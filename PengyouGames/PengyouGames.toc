@@ -1,0 +1,18 @@
+## Interface: 120007, 120100
+## Title: Pengyou Games
+## Notes: Raid-downtime minigames: Loot Goblins, The Pull Book, Rock Paper Scissors.
+## Author: Pengyou
+## Version: 0.5.0
+## SavedVariables: PengyouGamesDB
+
+Core.lua
+Util.lua
+Theme.lua
+Comm.lua
+Ledger.lua
+Widgets.lua
+Games\LootGoblins.lua
+Games\PullBook.lua
+Games\RockPaperScissors.lua
+Settings.lua
+Launcher.lua

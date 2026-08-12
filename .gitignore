@@ -1,0 +1,9 @@
+# Packaged addon builds - attached to GitHub Releases instead of committed
+*.zip
+
+# Lua bytecode / compiler artifacts
+*.out
+luac.out
+
+# macOS
+.DS_Store
