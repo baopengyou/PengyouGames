@@ -1234,6 +1234,13 @@ local function rvNormalize(payload)
   end
   if type(payload.validate) == "function" then p.validate = payload.validate end
   if type(payload.onDone) == "function" then p.onDone = payload.onDone end
+  -- Stage precedence (CONCURRENCY.md 5.8 rule 3): the caller reports whether
+  -- this payload belongs to the session the player is actually SEATED in. A
+  -- player who plays one game while refereeing another gets their own game's
+  -- moment first. 0 = a session we merely run, 1 = the one we are in.
+  local pri = rvNum(payload.priority) or 0
+  if pri < 0 then pri = 0 elseif pri > 9 then pri = 9 end
+  p.priority = math.floor(pri)
 
   -- Rows: at most 10 lines. More than 10 valid rows keep 1..9 and collapse the
   -- rest into a "... and N more" fade line. The local player's row is the one
@@ -2092,7 +2099,18 @@ local function rvDoQueue(payload)
   local p = rvNormalize(payload)
   if not p then return end
   if #rvQueue >= RV_QCAP then return end -- newest loses; the info lives in text
-  rvQueue[#rvQueue + 1] = p
+  -- Precedence at DRAIN time, never preemption: a payload already playing is
+  -- never torn down (the text behind it is final and the beats are timed), but
+  -- a seated session's podium queues AHEAD of a refereed one's. Insertion is
+  -- stable among equal priorities, so same-rank payloads keep FIFO order.
+  local at = #rvQueue + 1
+  for i = 1, #rvQueue do
+    if (rvQueue[i].priority or 0) < p.priority then
+      at = i
+      break
+    end
+  end
+  table.insert(rvQueue, at, p)
   rvHook()
   if not rvTicker then rvTicker = PG.Ticker(RV_GAP, rvPump) end
   rvPump()

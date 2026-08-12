@@ -7,7 +7,12 @@ local win
 local syncers = {} -- one per checkbox: re-reads its source into the display
 
 local function build()
-  win = PG.UI.Window("settings", "Settings", 320, 360, "neutral")
+  -- 320x460, not SCOPE.md 5.6's 320x420: that budget does not close once the
+  -- section header and the (three-line at this width) channel note are given
+  -- real space - the -164 checkbox would start 4px below the one at -134, and
+  -- the note would run into the slider. Only the point and the per-window scale
+  -- are persisted (never the size), so growing it is safe for existing users.
+  win = PG.UI.Window("settings", "Settings", 320, 460, "neutral")
 
   -- checkbox helper (UICheckButtonTemplate: stable since vanilla). OnShow
   -- re-reads its source so the window always reflects reality (DND can also
@@ -51,11 +56,72 @@ local function build()
     function() return PG.db.profile.hideInCombat end,
     function(v) PG.db.profile.hideInCombat = v end)
 
+  -----------------------------------------------------------------------------
+  -- Games from outside your group (SCOPE.md 5.6). Both checkboxes go through
+  -- the local check() helper, so each gets its syncers entry and its OnShow
+  -- re-read for free and PG.Settings.Refresh keeps them honest.
+  -----------------------------------------------------------------------------
+
+  local scopeHdr = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  scopeHdr:SetPoint("TOPLEFT", 24, -166)
+  scopeHdr:SetText("Games from outside your group")
+  scopeHdr:SetTextColor(0.80, 0.68, 0.42) -- BRASS
+
+  check("Guild games: show me invites", -190,
+    function()
+      -- default ON, matching Comm's guildScopeOn()
+      local p = PG.db and PG.db.profile
+      local si = p and p.scopeIn
+      if type(si) ~= "table" then return true end
+      return si.guild ~= false
+    end,
+    function(v)
+      local p = PG.db and PG.db.profile
+      if not p then return end
+      if type(p.scopeIn) ~= "table" then p.scopeIn = {} end
+      p.scopeIn.guild = v and true or false
+    end)
+
+  check("Public games: join the public channel", -220,
+    function()
+      local p = PG.db and PG.db.profile
+      return (p and p.publicOptIn) and true or false
+    end,
+    function(v)
+      local p = PG.db and PG.db.profile
+      if not p then return end
+      p.publicOptIn = v and true or false
+      if PG.Comm then
+        if v then
+          if PG.Comm.PublicJoin then PG.Comm.PublicJoin() end
+        elseif PG.Comm.PublicLeave then
+          -- a live public session needs no new abort entry point: the opt-in is
+          -- the first test inside ScopeAvailable("public"), so the host-abort
+          -- watchdog tears the session down on its next tick and clients fall
+          -- to the host-death watchdog once accept() starts dropping the HBs
+          PG.Comm.PublicLeave()
+        end
+      end
+      -- an open Loot Goblins / RPS dialog repaints its Public segment at once
+      if PG.UI and PG.UI.RefreshScopePickers then PG.UI.RefreshScopePickers() end
+    end)
+
+  local scopeNote = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  scopeNote:SetPoint("TOPLEFT", 24, -250)
+  scopeNote:SetPoint("TOPRIGHT", -20, -250)
+  scopeNote:SetJustifyH("LEFT")
+  scopeNote:SetHeight(48) -- three or four wrapped lines at this width
+  scopeNote:SetWordWrap(true)
+  scopeNote:SetText("Public uses a hidden chat channel. It takes one of your ten "
+    .. "channel slots and shows up in the Chat Channels list - nothing is ever "
+    .. "printed to your chat windows.")
+  scopeNote:SetTextColor(0.80, 0.68, 0.42) -- BRASS
+
   -- window scale slider. OptionsSliderTemplate keys its Low/High/Text regions
   -- off the frame name, so this is one of our two deliberately named frames
   -- (the other is the minimap button).
   local slider = CreateFrame("Slider", "PengyouGamesScaleSlider", win, "OptionsSliderTemplate")
-  slider:SetPoint("TOP", 0, -190)
+  slider:SetPoint("TOP", 0, -310)
   slider:SetSize(240, 17)
   slider:SetMinMaxValues(0.6, 1.6)
   slider:SetValueStep(0.05)
@@ -92,7 +158,7 @@ local function build()
     if PG.UI.ResetLayout then PG.UI.ResetLayout() end
     PG.UI.Toast("Window layout reset.")
   end)
-  resetBtn:SetPoint("TOP", 0, -256)
+  resetBtn:SetPoint("TOP", 0, -368)
 
   local note = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   note:SetPoint("BOTTOM", 0, 20)

@@ -26,11 +26,63 @@ local SYNC_MAX_REPLAY = 20   -- resync gaps larger than this get SYNCNO (spectat
 
 local GREEN, RED, GRAY, GOLD = "|cff40ff40", "|cffff5050", "|cffaaaaaa", "|cffffd200"
 
-local S       -- session state; nil until the first session, phase=="done" after it
+-------------------------------------------------------------------------------
+-- The session registry (CONCURRENCY.md 2).
+--
+-- The single module-global `S` is gone. A person PLAYS one round-based game at
+-- a time, but unlimited sessions may exist around them - two Loot Goblins games
+-- in one raid, a Rock Paper Scissors game alongside both - and none of them may
+-- block another. So this file keeps:
+--   * ONE full record: the session it hosts or sits in. That record is exactly
+--     the old `S` table plus kind/key/scope/seated.
+--   * Bounded LITE records for sessions it merely overhears: an invitation and
+--     a clean identity, nothing else. No roster, no totals, no picks, no
+--     history, no ticker, no frame. A lite record never sends anything, never
+--     writes the ledger, and never reaches an applier.
+--
+-- `S` did not disappear: every function that used the old upvalue opens with
+-- `local S = mySession()`, so the appliers, the FX and the window below are the
+-- code they always were. Only the OPEN path, the comm prologue, the sends and
+-- teardown changed.
+-------------------------------------------------------------------------------
+
+local sessions = {}   -- [key] = record, key = host .. "|" .. token
+local mine            -- key of the ONE full record (hosted or seated), or nil
+local recent = {}     -- [key] = GetTime() when it died: replay defence
+local recentQ = {}    -- FIFO of poisoned keys, capped at MAX_RECENT
+
+local MAX_LITE = 8          -- overheard sessions remembered at once
+local MAX_RECENT = 16       -- dead keys remembered
+local RECENT_TTL = 120      -- seconds a dead key stays poisoned
+local DONE_TTL = 60         -- seconds a finished full record lingers
+local LITE_TTL_PAD = 10     -- a lite record lives joinSecs + this ...
+local LITE_TTL_MIN = 15     -- ... clamped into this range
+local LITE_TTL_MAX = 180
+local ASK_MAX = 3           -- refreshed from PG.UI.ASK_MAX at init
+local BUSY_TOAST_EVERY = 60 -- busy client: at most one group line per minute
+-- The guild popup budget (SCOPE.md 6.3) is shared by every module and lives in
+-- Widgets next to AskCount: PG.UI.GuildAskOK / PG.UI.GuildAskSpend.
+local HB_QUIET_WIDE = 150   -- wide scope: the host is quiet, not dead
+local HB_GIVEUP_WIDE = 300  -- wide scope: now they are dead
+
+-- Loot Goblins plays to every audience (SCOPE.md 1.2 as amended by the owner
+-- decision of 2026-08-12). Public is made safe by the participation gate inside
+-- PG.Ledger.Commit - rows are written only for a session this client joined and
+-- played - not by forbidding the audience.
+PG.LG.SCOPES = { group = true, guild = true, public = true }
+
+-- The advisory that rides along on the Public segment: honest about what the
+-- ledger is (a claim, not a transfer) instead of refusing the audience.
+local PUBLIC_NOTE = "Public - anyone on your realm. Gold here is virtual and "
+  .. "settling up is on the honour system, so a stranger who loses can simply "
+  .. "log out. Fine for fun; keep buy-ins small with people you do not know."
+
 local ticker
-local win, dialog, dlgInputs
+local tickN = 0
+local win, dialog, dlgInputs, dlgScope, dlgNote, dlgOpen
 local ui = {}
 local rows = {}
+local rowOffset = 0 -- roster rows start one line lower under a referee host
 
 -- Presentation layer (SKIN.md, goblin theme). Captured at init / built with
 -- the window; ALL of it is decoration - game logic never branches on any of
@@ -42,7 +94,7 @@ local sparkFrame, sparkGroup -- A9 END sparkles
 -- The round/session result moment itself belongs to the shared reveal stage
 -- (REVEAL.md 6.1/6.2, PG.Theme.Reveal / PG.Theme.RevealQueue), so this file
 -- owns no glow/starburst/coin-shower/banner of its own for those beats.
-local greetToken            -- session token the host model has greeted already
+local greetToken            -- session KEY the host model has greeted already
 local lastNodAt, lastClinkAt = 0, 0 -- fx rate limits (join nods / pot clinks)
 
 -- assigned below; declared here so earlier closures capture them as upvalues
@@ -97,12 +149,106 @@ local function allClear()
   return not (s.inEncounter or s.readyCheck or s.countdown or s.restricted)
 end
 
-local function live() return S ~= nil and S.phase ~= "done" end
+-- Identity is the PAIR (host, token) plus the derived scope (CONCURRENCY.md
+-- 3.2). `sender` is server-vouched and realm-qualified, so a token only has to
+-- be unique inside one character's history - two Thralls on connected realms
+-- can no longer collide, and the wire gets smaller rather than larger.
+local function keyOf(host, token) return host .. "|" .. token end
+
+-- The ONE session this module fully tracks. Nil when it is in none.
+local function mySession() return mine and sessions[mine] or nil end
+
+-- Sessions we know about at all (full + lite): drives toast attribution.
+local function recordCount()
+  local n = 0
+  for _ in pairs(sessions) do n = n + 1 end
+  return n
+end
+
+-- "Name-Realm" -> "Name" (names never contain "-"; realms do).
+local function shortOf(full)
+  full = tostring(full or "?")
+  return full:match("^([^%-]+)") or full
+end
+
+local B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+local function b36(n)
+  n = math.floor(tonumber(n) or 0)
+  if n <= 0 then return "0" end
+  local out = ""
+  while n > 0 do
+    local d = n % 36
+    out = B36:sub(d + 1, d + 1) .. out
+    n = (n - d) / 36
+  end
+  return out
+end
+
+-- Token minting. A persisted monotonic counter per character plus a three-char
+-- random suffix; the suffix is a seatbelt for a SavedVariables rollback (where
+-- the counter can go backwards), not the mechanism. The counter is incremented
+-- AND persisted before the OPEN is broadcast, so a crash cannot reissue a
+-- number. Typical token "1a-7f3" (6 bytes) against up to 18 for the old
+-- shortName-random form. PG.NextToken is used when Core provides it, so the
+-- counter stays shared and monotonic across modules.
+local function nextToken()
+  if type(PG.NextToken) == "function" then
+    local ok, t = pcall(PG.NextToken)
+    t = ok and PG.SafeStr(t) or nil
+    if t and t ~= "" then return t end
+  end
+  local p = PG.db and PG.db.profile
+  local seq = 1
+  if p then
+    seq = (PG.SafeNum(p.seq) or 0) + 1
+    p.seq = seq
+  end
+  return b36(seq) .. "-" .. b36(math.random(0, 46655))
+end
+
+-- Wire token validation (CONCURRENCY.md 3.4): opaque to every version,
+-- bounded, and never carrying the field separator.
+local function validToken(v)
+  return type(v) == "string" and v ~= "" and #v <= 24 and not v:find("|", 1, true)
+end
+
+-- A lite record's whole purpose is its invitation window, so it dies with it.
+local function liteLife(joinSecs)
+  local t = (joinSecs or 0) + LITE_TTL_PAD
+  if t < LITE_TTL_MIN then t = LITE_TTL_MIN end
+  if t > LITE_TTL_MAX then t = LITE_TTL_MAX end
+  return t
+end
+
+-- live() survives ONLY as a UI predicate: it is no longer a gate on hosting, on
+-- an inbound OPEN, or on opening the dialog (CONCURRENCY.md 0.2).
+local function live()
+  local S = mySession()
+  return S ~= nil and S.phase ~= "done"
+end
 
 -- LG toasts carry the coin mark (SKIN.md 2.8); plain text when Theme absent
-local function toast(text)
+local function toast(text, opts)
   if Theme then text = Theme.Mark("coin") .. " " .. text end
-  PG.UI.Toast(text)
+  PG.UI.Toast(text, opts)
+end
+
+-- Attribution (CONCURRENCY.md 5.7): while this module holds more than one
+-- record its lines name the host, because a player in two audiences cannot
+-- otherwise tell which game a line refers to. With a single record the text is
+-- exactly what it always was.
+local function sname(S)
+  if S and S.host and recordCount() > 1 then
+    return "Loot Goblins (" .. shortOf(S.host) .. ")"
+  end
+  return "Loot Goblins"
+end
+
+-- Session-attributed status line. Keyed so a burst of status chatter replaces
+-- itself in the shared queue instead of pushing the money lines off it.
+local function stoast(S, text, opts)
+  toast(sname(S) .. ": " .. text, opts or { key = "lg-status" })
 end
 
 -- pot amounts inside the window get the coin mark (SKIN.md 2.4)
@@ -119,12 +265,19 @@ local function runFX(fn, arg)
   if not ok then geterrorhandler()(err) end
 end
 
+-- Every send carries the session's own audience (SCOPE.md 2.2). Only the ONE
+-- involved record ever broadcasts - lite records never send at all, which is
+-- also why they cannot consume the shared send bucket.
 local function broadcast(mtype, ...)
-  return PG.Comm.Broadcast("LG", mtype, S.token, ...)
+  local S = mySession()
+  if not S then return false end
+  return PG.Comm.Broadcast(S.scope, "LG", mtype, S.token, ...)
 end
 
-local function startTicker()
-  if ticker then ticker:Cancel() end
+-- One ticker for the module, as always (I9). It runs while the registry is
+-- non-empty and stops when it empties; no per-session timers exist.
+local function ensureTicker()
+  if ticker then return end
   ticker = PG.Ticker(TICK, function()
     local ok, err = pcall(onTick)
     if not ok then geterrorhandler()(err) end
@@ -138,11 +291,109 @@ local function stopTicker()
   end
 end
 
+-------------------------------------------------------------------------------
+-- Records: the launcher list, invitations, eviction, sweeping.
+-------------------------------------------------------------------------------
+
+-- The launcher's Open games list is a VIEW of the lite records, not a second
+-- store: one row per record, gone when the record is evicted. Existence-guarded
+-- because the list is Launcher-side work and this file must not depend on it.
+local function launcherAdd(rec)
+  rec.listed = true
+  if PG.Launcher and PG.Launcher.AddOpenGame then
+    pcall(PG.Launcher.AddOpenGame, {
+      game = "LG", host = rec.host, token = rec.token, scope = rec.scope,
+      expires = rec.expires, key = rec.key,
+    })
+  end
+end
+
+local function launcherDrop(rec)
+  if not rec.listed then return end
+  rec.listed = nil
+  if PG.Launcher and PG.Launcher.RemoveOpenGame then
+    pcall(PG.Launcher.RemoveOpenGame, "LG", rec.host, rec.token)
+  end
+end
+
+-- A dead session takes its invitation with it (CONCURRENCY.md 5.6 rule 4): a
+-- cancelled game must never leave a live countdown popup inviting you into
+-- nothing, where clicking Buy in silently does something to no session.
+local function dropInvite(rec)
+  if rec.askKey then
+    local key = rec.askKey
+    rec.askKey = nil
+    PG.UI.Dismiss(key)
+  end
+  launcherDrop(rec)
+end
+
+-- Eviction is the ONLY place a record leaves the registry, and it ALWAYS
+-- poisons the key into `recent`, so a finished session's token can never be
+-- resurrected by a replayed or re-broadcast OPEN (CONCURRENCY.md 4.5).
+-- keepWindow leaves a finished game's final standings on screen (4.3).
+local function evictSession(rec, keepWindow)
+  local key = rec.key
+  if sessions[key] ~= rec then return end
+  sessions[key] = nil
+  dropInvite(rec)
+  if mine == key then
+    mine = nil
+    PG.Session.Release("LG", rec.token)
+    if win and win.__pgRec == rec and not keepWindow then
+      win.__pgRec = nil
+      win:Hide()
+    end
+  end
+  if not recent[key] then
+    recentQ[#recentQ + 1] = key
+    if #recentQ > MAX_RECENT then
+      local oldest = table.remove(recentQ, 1)
+      recent[oldest] = nil
+    end
+  end
+  recent[key] = GetTime()
+end
+
+-- The memory contract (CONCURRENCY.md 7.3), on the module ticker at 2-second
+-- granularity: at most 1 + 8 + 16 = 25 entries are ever walked.
+local function sweep()
+  local now = GetTime()
+  for _, rec in pairs(sessions) do
+    if rec.kind == "lite" then
+      if now > (rec.expires or 0) then evictSession(rec) end
+    elseif rec.phase == "done" and (now - (rec.doneAt or now)) > DONE_TTL then
+      -- a finished game keeps its window - final standings, Ledger button -
+      -- until the user closes it, a new session replaces it, or this fires a
+      -- minute later. The podium has long since drained by then, and its
+      -- validate closure culls it if it somehow has not (5.8).
+      evictSession(rec)
+    end
+  end
+  for key, at in pairs(recent) do
+    if (now - at) > RECENT_TTL then
+      recent[key] = nil
+      for i = #recentQ, 1, -1 do
+        if recentQ[i] == key then table.remove(recentQ, i) end
+      end
+    end
+  end
+end
+
+-- A session stops being active the instant phase becomes "done" (7.1), in this
+-- order: state, then the SEAT (a new game may start immediately), then the
+-- invitation and the launcher row. The window keeps its final standings and a
+-- queued podium still plays: decoration never holds the seat, and never delays
+-- the next game.
 local function endSession(text)
+  local S = mySession()
+  if not S then return end
   S.phase = "done"
   S.roundOpen = false
   S.endText = text
-  stopTicker()
+  S.doneAt = GetTime()
+  PG.Session.Release("LG", S.token)
+  dropInvite(S)
   if win then ui.bar:Stop() end
   RefreshUI()
 end
@@ -153,6 +404,8 @@ end
 -------------------------------------------------------------------------------
 
 local function applyJoined(name)
+  local S = mySession()
+  if not S then return end
   -- normal path: the join phase. Resync replays land here too: a desynced
   -- spectator mid-play accepts the replayed JOINED/LEFT stream to repair its
   -- roster (idempotent - a duplicate JOINED never double-adds), which is what
@@ -173,6 +426,8 @@ local function applyJoined(name)
 end
 
 local function applyLeft(name)
+  local S = mySession()
+  if not S then return end
   -- same relaxation as applyJoined: resync replays repair a spectator roster
   if S.phase ~= "join" and not (S.phase == "play" and S.spectator) then return end
   if S.joined[name] then
@@ -181,9 +436,15 @@ local function applyLeft(name)
       if S.roster[i] == name then table.remove(S.roster, i) end
     end
   end
-  if name == myName() then
+  if name == myName() and not S.isHost then
+    -- WITHDRAWAL (CONCURRENCY.md 7.2). Leaving a game now stops this client
+    -- tracking it: the seat is freed, the window goes, and the record is
+    -- evicted immediately rather than lingering as a mirror of a game we are
+    -- not in. Nothing is written anywhere - a withdrawal is an abort.
     S.joinAccepted = false
-    if win then win:Hide() end
+    if win and win.__pgRec == S then win:Hide() end
+    evictSession(S)
+    return
   end
   RefreshUI()
 end
@@ -191,6 +452,8 @@ end
 -- dig (optional): the host's roster fingerprint at BEGIN. Absent (a peer that
 -- predates the field) degrades to the count-only check.
 local function applyBegin(count, pot, rounds, dig)
+  local S = mySession()
+  if not S then return end
   if S.phase ~= "join" then
     -- BEGIN while playing is ignored: totals are NEVER rebuilt once play has
     -- begun, so a replayed BEGIN can never wipe (or re-zero) applied winnings.
@@ -213,6 +476,24 @@ local function applyBegin(count, pot, rounds, dig)
   S.digest = dig
   S.totals = {}
   for _, n in ipairs(S.roster) do S.totals[n] = 0 end
+  -- G2 VOUCHING (SCOPE.md 4.4): the roster this client itself watched fill up,
+  -- frozen here because the roster cannot change after BEGIN. It is the only
+  -- independent source of names at public scope, where nobody in the game need
+  -- be in our group or our guild.
+  S.vouched = {}
+  for _, n in ipairs(S.roster) do S.vouched[n] = true end
+  local me = myName()
+  local agrees = (#S.roster == count) and (not dig or rosterDigest(S.roster) == dig)
+  if not S.isHost and agrees and not (me and S.joined[me]) then
+    -- NOT SEATED AT BEGIN (CONCURRENCY.md 7.2/7.3, generalised to every scope):
+    -- our mirror agrees with the host in size AND membership and we are not in
+    -- it, so our buy-in never landed. There is no reason to track a game we are
+    -- not playing - stop, free the seat, and be ready for the next OPEN.
+    stoast(S, "your buy-in did not reach the host - you are not in this game.")
+    endSession("You are not in this game.")
+    evictSession(S)
+    return
+  end
   if not S.isHost and (#S.roster ~= count
     or (dig and rosterDigest(S.roster) ~= dig)) then
     -- our JOINED/LEFT stream disagrees with the host in size or in membership:
@@ -221,7 +502,7 @@ local function applyBegin(count, pot, rounds, dig)
     -- restore us. Setting spectator here is also what lets the repair land:
     -- applyJoined/applyLeft only accept replays for a spectator mid-play.
     S.spectator = true
-    toast("Loot Goblins: out of sync with the host - resyncing...")
+    stoast(S, "out of sync with the host - resyncing...")
     clientRequestSync()
   end
   if win then ui.bar:Stop() end
@@ -230,7 +511,8 @@ local function applyBegin(count, pot, rounds, dig)
 end
 
 local function applyRound(r, pot, secs)
-  if S.phase ~= "play" then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" then return end
   if r < S.r then return end -- stale/late resync replay: never regress the round
   if r ~= S.r then
     S.r = r
@@ -249,7 +531,8 @@ local function applyRound(r, pot, secs)
 end
 
 local function applyResult(r, pattern, hoardPay, sharePay, carry)
-  if S.phase ~= "play" then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" then return end
   -- RESYNC IDEMPOTENCY, and the reason the ledger can never double-count: the
   -- END ledger delta is (session winnings - buy-in), and session winnings are
   -- accumulated here from RESULT patterns. A round whose payouts have already
@@ -284,7 +567,7 @@ local function applyResult(r, pattern, hoardPay, sharePay, carry)
     -- wrong: stop playing (and stop qualifying for the ledger) until resync
     -- repairs the roster, at which point this same RESULT is replayed
     S.spectator = true
-    toast("Loot Goblins: out of sync with the host - resyncing...")
+    stoast(S, "out of sync with the host - resyncing...")
     clientRequestSync()
   end
   if not current then
@@ -310,7 +593,8 @@ local function applyResult(r, pattern, hoardPay, sharePay, carry)
 end
 
 local function applyVoid(r)
-  if S.phase ~= "play" then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" then return end
   -- A voided round pays nothing, so "applied" for it means "seen": the flag
   -- keeps the applied-round run contiguous across the hole a VOID leaves in
   -- the RESULT stream (rounds 1..n each end in exactly one RESULT or one
@@ -329,7 +613,8 @@ local function applyVoid(r)
 end
 
 local function applyEnd(dustIdx, dustAmt)
-  if S.phase ~= "play" then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" then return end
   -- LEDGER INTEGRITY GATE. The ledger is written here, identically on every
   -- client, from locally accumulated winnings - so only a mirror that can
   -- prove it applied EVERY round may write it. Rounds 1..S.rounds each end in
@@ -347,40 +632,76 @@ local function applyEnd(dustIdx, dustAmt)
   end
   local me = myName()
   local myNet
+  -- G1 PARTICIPATION (SCOPE.md 4.4, CONCURRENCY.md 0.4). Rows go to
+  -- SavedVariables only for a session this client actually SAT AT: seated (a
+  -- referee host is not), in the roster, and not spectating. Everyone else -
+  -- passers-by, decliners, out-of-sync mirrors - keeps its UI and writes
+  -- nothing, which is exactly what lets two concurrent games produce two
+  -- disjoint, internally consistent ledgers instead of one divergent one.
+  local played = (not S.spectator) and S.seated and me and S.joined[me] and true or false
   if not S.spectator then
+    local rows2 = {}
     for _, name in ipairs(S.roster) do
       local netN = (S.totals[name] or 0) - S.buyin
-      PG.Ledger.Add(name, netN, "Loot Goblins")
+      rows2[name] = netN
       if name == me then myNet = netN end
+    end
+    if played then
+      -- The gates live in the persistence layer: participation, name vouching,
+      -- the per-row bound and the zero-sum check are all applied by Commit,
+      -- all-or-nothing, and the provenance id carries the HOST now that tokens
+      -- are only unique per host (CONCURRENCY.md 3.4).
+      PG.Ledger.Commit({
+        id = "LG:" .. S.host .. ":" .. S.token,
+        game = "LG",
+        host = S.host,
+        scope = S.scope,
+        at = (type(time) == "function") and time() or nil,
+        played = true,
+        vouch = S.vouched,
+        cap = (S.buyin or 0) * #S.roster,
+        label = "Loot Goblins",
+      }, rows2)
     end
   end
   S.ended = true
   local text = "Game over!"
-  if myNet then
+  if myNet and played then
     text = "Game over - you " .. (myNet >= 0
       and ("came out +" .. PG.Money(myNet)) or ("are down " .. PG.Money(-myNet)))
+  elseif S.refereed then
+    text = "Game over - you ran this one, so no gold was recorded for you."
   elseif S.syncMissed then
     text = "Game over - you missed part of the game, so no gold was recorded."
   elseif S.spectator then
     text = "Game over - you sat this one out (out of sync). No gold changes."
   end
-  toast("Loot Goblins: " .. text)
+  stoast(S, text, { priority = "result" })
   ShowWindow()
   endSession(text)
   runFX(fxEnd)
 end
 
 local function applyCancel(reason)
-  if S.phase == "done" then return end
+  local S = mySession()
+  if not S or S.phase == "done" then return end
   local text
   if reason == "few" then
-    text = "Cancelled - not enough players joined."
+    -- Honest text (CONCURRENCY.md 6.3): nobody is told you are busy, so the
+    -- host is told what silence actually means. At guild scope it also names
+    -- the one cause a host cannot otherwise diagnose (SCOPE.md 2.4): a rank
+    -- that cannot speak in guild chat cannot SEND on the GUILD distribution.
+    if S.scope == "guild" and S.isHost then
+      text = "Nobody joined. If your guild rank can't speak in guild chat, guild games can't be started from this character."
+    else
+      text = "Cancelled - not enough players joined. Others may be busy or away."
+    end
   elseif reason == "host" then
     text = "Cancelled by the host - no gold changes."
   else
     text = "Cancelled (" .. tostring(reason) .. ") - no gold changes."
   end
-  toast("Loot Goblins: " .. text)
+  stoast(S, text)
   endSession(text)
 end
 
@@ -394,14 +715,20 @@ end
 -- precisely what it missed - see hostHandleSyncQ. Nothing is ever re-derived:
 -- the replayed fields are the bytes the group already agreed on.
 local function hostRecordOp(op, name)
+  local S = mySession()
+  if not S then return end
   S.hist.ops[#S.hist.ops + 1] = { op = op, name = name }
 end
 
 local function hostRecordTop(r)
+  local S = mySession()
+  if not S then return end
   if r > S.hist.top then S.hist.top = r end
 end
 
 local function hostStartRound(r)
+  local S = mySession()
+  if not S then return end
   local pot = idiv(S.basePot, S.rounds) + S.carry
   if broadcast("ROUND", r, pot, S.roundSecs) then
     S.carry = 0
@@ -412,6 +739,8 @@ local function hostStartRound(r)
 end
 
 local function hostAdvance(delay)
+  local S = mySession()
+  if not S then return end
   if S.r >= S.rounds then
     S.endPending = true -- END goes out on the next clear tick
   else
@@ -420,6 +749,8 @@ local function hostAdvance(delay)
 end
 
 local function hostResolveRound()
+  local S = mySession()
+  if not S then return end
   local chars = {}
   local k, h, sN = 0, 0, 0
   for i, name in ipairs(S.roster) do
@@ -481,6 +812,8 @@ end
 -- so that round quietly falls back to its timer - never an early resolve that
 -- would strand them.
 local function allPicked()
+  local S = mySession()
+  if not S then return false end
   local n = #S.roster
   if n < 2 then return false end
   for i = 1, n do
@@ -494,12 +827,15 @@ end
 -- ticker's deadline-branch gating - never while frozen/broken or during an
 -- encounter/lockdown.
 local function maybeEarlyFinish()
-  if S.phase ~= "play" or not S.roundOpen or S.broken or S.frozen then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" or not S.roundOpen or S.broken or S.frozen then return end
   if not (allPicked() and allClear() and not PG.Comm.Locked()) then return end
   hostResolveRound()
 end
 
 local function hostVoidRound()
+  local S = mySession()
+  if not S then return end
   if broadcast("VOID", S.r) then
     S.carry = S.carry + S.roundPot
     S.hist.voids[S.r] = true -- this round leaves no RESULT: replayed as VOID
@@ -512,6 +848,8 @@ local function hostVoidRound()
 end
 
 local function hostReopenRound()
+  local S = mySession()
+  if not S then return end
   local secs = math.max(MIN_REOPEN_SECS, math.ceil(S.freezeRemaining or 0))
   -- clients treat a repeat ROUND for a known r as a timer refresh
   if broadcast("ROUND", S.r, S.roundPot, secs) then
@@ -527,6 +865,8 @@ local function hostReopenRound()
 end
 
 local function hostEnd()
+  local S = mySession()
+  if not S then return end
   if S.endSent then return end -- END is already on the wire; onSent finishes up
   local dustAmt = S.carry or 0
   local dustIdx = -1
@@ -546,10 +886,13 @@ local function hostEnd()
   -- with no ledger anywhere instead (all-or-nothing in every branch).
   local sess = S
   local ok = PG.Comm.BroadcastEx({
+    scope = S.scope,
     onSent = function()
-      if S ~= sess or S.phase ~= "play" then return end
-      S.endPending = nil
-      S.carry = 0
+      -- the record must still be the one we are in: a superseded or withdrawn
+      -- session never commits a result on the strength of an old callback
+      if mySession() ~= sess or sess.phase ~= "play" then return end
+      sess.endPending = nil
+      sess.carry = 0
       applyEnd(dustIdx, dustAmt)
     end,
   }, "LG", "END", S.token, dustIdx, dustAmt)
@@ -557,6 +900,8 @@ local function hostEnd()
 end
 
 local function hostCancel(reason)
+  local S = mySession()
+  if not S then return end
   -- END is already on the wire: clients will write the ledger when it lands, so
   -- the host must complete too - no abort may interleave after END is queued.
   -- (endPending alone is fine: nothing has been submitted yet, so cancelling
@@ -569,7 +914,8 @@ local function hostCancel(reason)
 end
 
 local function hostCloseJoin()
-  if S.phase ~= "join" then return end
+  local S = mySession()
+  if not S or S.phase ~= "join" then return end
   local count = #S.roster
   if count < 2 then
     if broadcast("CANCEL", "few") then
@@ -596,7 +942,8 @@ local function hostCloseJoin()
 end
 
 local function hostHandleJoin(sender)
-  if S.phase ~= "join" or S.joined[sender] then return end -- duplicate JOINs idempotent
+  local S = mySession()
+  if not S or S.phase ~= "join" or S.joined[sender] then return end -- duplicate JOINs idempotent
   if broadcast("JOINED", sender) then
     hostRecordOp("J", sender)
     applyJoined(sender)
@@ -604,7 +951,8 @@ local function hostHandleJoin(sender)
 end
 
 local function hostHandleUnjoin(sender)
-  if S.phase ~= "join" or sender == S.host or not S.joined[sender] then return end
+  local S = mySession()
+  if not S or S.phase ~= "join" or sender == S.host or not S.joined[sender] then return end
   if broadcast("LEFT", sender) then
     hostRecordOp("L", sender)
     applyLeft(sender)
@@ -612,7 +960,8 @@ local function hostHandleUnjoin(sender)
 end
 
 local function hostHandlePick(sender, r, p)
-  if S.phase ~= "play" or not S.roundOpen or S.broken then return end
+  local S = mySession()
+  if not S or S.phase ~= "play" or not S.roundOpen or S.broken then return end
   if r ~= S.r or (p ~= "S" and p ~= "H") then return end
   if not S.joined[sender] then return end
   if S.picks[sender] then return end -- first click locks
@@ -637,6 +986,8 @@ end
 -- over SYNC_MAX_REPLAY messages -> SYNCNO (that client spectates the session
 -- out, so it never writes a ledger delta).
 local function hostHandleSyncQ(sender, phase, rApplied, rosterN, dig)
+  local S = mySession()
+  if not S then return end
   if phase ~= "join" and phase ~= "play" then return end
   if not (rApplied and rosterN) then return end
   if dig ~= nil and not isDigest(dig) then return end -- malformed field: reject
@@ -696,28 +1047,62 @@ local function hostHandleSyncQ(sender, phase, rApplied, rosterN, dig)
   end
 end
 
-local function hostOpen(buyin, rounds, joinSecs, roundSecs)
-  if live() then
-    toast("Loot Goblins: a game is already running.")
+-- Hosting is NEVER blocked by another module, by the seat, or by anybody
+-- else's session (I4). It refuses for exactly three reasons: this module is
+-- already involved in a live session (I3), the audience does not exist, or the
+-- OPEN broadcast was refused. The old blanket "a game is already running" line
+-- is gone with the model that produced it.
+local function hostOpen(buyin, rounds, joinSecs, roundSecs, scope)
+  local prev = mySession()
+  if prev and prev.phase ~= "done" then
+    -- I3 is a scope limit, not a policy: the window, the row pool, the stamp
+    -- pool and the Grizzle model are module singletons, so the explanation is
+    -- specific and actionable rather than a shrug.
+    if prev.isHost then
+      stoast(prev, "you're already running a game. Cancel it first, or wait for it to finish.")
+    else
+      stoast(prev, "you're playing " .. shortOf(prev.host)
+        .. "'s game. You can start your own when it's over.")
+    end
+    ShowWindow()
     return
   end
   local host = myName()
   if not host then return end
-  if not IsInGroup() then
-    toast("Loot Goblins needs a party or raid.")
+  scope = PG.SafeStr(scope) or "group"
+  if not PG.LG.SCOPES[scope] then return end
+  -- availability is re-checked at the moment Start is pressed: the player can
+  -- /gquit or leave the group between opening the dialog and clicking
+  local avail, why = PG.Comm.ScopeAvailable(scope)
+  if not avail then
+    toast("Loot Goblins: " .. (why or "that audience isn't available."))
     return
   end
-  local short = host:match("^([^%-]+)") or host
-  local token = short .. "-" .. math.random(10000, 99999)
-  -- broadcast OPEN before constructing S: submit-time lockdown drops invoke
-  -- our onDrop synchronously, which must not see a half-built live session
-  if not PG.Comm.Broadcast("LG", "OPEN", token, buyin, rounds, joinSecs) then
+  local code = PG.Comm.ScopeCode(scope)
+  if not code then return end
+  if prev then evictSession(prev, true) end -- the finished record steps aside
+  local token = nextToken()
+  local key = keyOf(host, token)
+  -- broadcast OPEN before constructing the record: submit-time lockdown drops
+  -- invoke our onDrop synchronously, which must not see a half-built session.
+  -- The scope code is the trailing field, checked (never trusted) on receipt.
+  if not PG.Comm.Broadcast(scope, "LG", "OPEN", token, buyin, rounds, joinSecs, code) then
     toast("Loot Goblins: cannot start right now (addon messages are blocked).")
     return
   end
-  S = {
+  -- I5 REFEREE HOSTING. If the single round-based seat is held by the other
+  -- module, this host runs the game without playing in it: no roster entry, no
+  -- buy-in, no pick, no ledger row for itself. ClaimHost cannot refuse, so this
+  -- call can never return early and hosting stays unblocked.
+  local seated = PG.Session.ClaimHost("LG", token, host)
+  local S = {
+    kind = "full",
+    key = key,
     token = token,
     host = host,
+    scope = scope,
+    seated = seated and true or false,
+    refereed = (not seated) and true or false,
     isHost = true,
     buyin = buyin,
     rounds = rounds,
@@ -737,13 +1122,19 @@ local function hostOpen(buyin, rounds, joinSecs, roundSecs)
     joinDeadlineDisplay = GetTime() + joinSecs,
     lastHBSent = GetTime(),
   }
-  if broadcast("JOINED", host) then
-    hostRecordOp("J", host)
-    applyJoined(host) -- host auto-joins
+  sessions[key] = S
+  mine = key
+  ensureTicker()
+  if seated then
+    if broadcast("JOINED", host) then
+      hostRecordOp("J", host)
+      applyJoined(host) -- host auto-joins
+    end
+    -- a sync lockdown drop of JOINED (critical) aborts via onDrop above
+    if not live() then return end
+  else
+    stoast(S, "you're playing another game, so you're running this one without playing in it.")
   end
-  -- a sync lockdown drop of JOINED (now critical) aborts via onDrop above
-  if not live() then return end
-  startTicker()
   ShowWindow()
   if win then ui.bar:Start(joinSecs) end
 end
@@ -753,7 +1144,11 @@ end
 -------------------------------------------------------------------------------
 
 local function doPick(p)
+  local S = mySession()
   if not S or S.phase ~= "play" or not S.roundOpen then return end
+  -- gate l (CONCURRENCY.md 5.2): a local action needs the record we are IN and
+  -- a seat in it. A referee host runs the game and makes no pick.
+  if not S.seated then return end
   if S.spectator or S.myPick then return end
   if S.syncHoldR == S.r then return end -- resynced mid-round: back in NEXT round
   local me = myName()
@@ -772,16 +1167,24 @@ local function doPick(p)
   if S.myPick == p then runFX(fxPick, p) end
 end
 
-local function clientOpen(token, sender, buyin, rounds, joinSecs)
-  -- every addon client mirrors the session (even decliners), so the whole
-  -- group applies identical ledger deltas at END
-  S = {
-    token = token,
-    host = sender,
+-- The FULL-record constructor (I7). Called from the Ask accept callback and the
+-- launcher's Join button, and NOWHERE else: an OPEN at any scope - group
+-- included now - creates a lite record only, so no session state exists on this
+-- client without an explicit click. Decliners and passers-by hold nothing.
+local function clientOpen(rec)
+  local now = GetTime()
+  local S = {
+    kind = "full",
+    key = rec.key,
+    token = rec.token,
+    host = rec.host,
+    scope = rec.scope,
+    seated = true,
+    refereed = false,
     isHost = false,
-    buyin = buyin,
-    rounds = rounds,
-    joinSecs = joinSecs,
+    buyin = rec.cfg.buyin,
+    rounds = rec.cfg.rounds,
+    joinSecs = rec.cfg.joinSecs,
     phase = "join",
     roster = {},
     joined = {},
@@ -791,32 +1194,271 @@ local function clientOpen(token, sender, buyin, rounds, joinSecs)
     carry = 0,
     appliedResults = {},
     syncAllClear = allClear(), -- tracks all-clear transitions for resync
-    lastHB = GetTime(),
-    joinDeadlineDisplay = GetTime() + joinSecs,
+    lastHB = now,
+    joinAccepted = true, -- provisional; the host's JOINED broadcast confirms
+    joinDeadlineDisplay = (rec.openedAt or now) + rec.cfg.joinSecs,
   }
-  startTicker()
-  local short = sender:match("^([^%-]+)") or sender
-  -- themed goblin Ask (SKIN.md 2.3): parchment look, coin-marked Accept label;
-  -- plain look and labels when the Theme layer is absent
+  sessions[S.key] = S -- replaces the lite record under the same key
+  mine = S.key
+  ensureTicker()
+  PG.Comm.Whisper(S.host, "LG", "JOIN", S.token)
+  -- a constructor this late converges on the host's roster through the existing
+  -- resync protocol (it replays the JOINED stream and BEGIN) - no new machinery
+  clientRequestSync()
+  ShowWindow()
+  if win then ui.bar:Start(math.max(1, S.joinDeadlineDisplay - GetTime())) end
+end
+
+-- Accepting an invitation. The seat is claimed FIRST: on success every other
+-- module withdraws its outstanding invitations through PG.Session.OnChange, and
+-- on failure - a genuine race with a JOINED landing from elsewhere - the accept
+-- is abandoned and nothing is whispered (CONCURRENCY.md 5.6 rule 3).
+local function clientAccept(rec)
+  if not rec or sessions[rec.key] ~= rec or rec.kind ~= "lite" then return false end
+  local prev = mySession()
+  if prev and prev.phase ~= "done" then
+    if prev.isHost then
+      stoast(prev, "you're running your own game right now - finish it first.")
+    else
+      stoast(prev, "you're already in " .. shortOf(prev.host) .. "'s game.")
+    end
+    return false
+  end
+  if prev then evictSession(prev, true) end -- a finished record steps aside
+  if not PG.Session.Claim("LG", rec.token, rec.host) then
+    toast("Loot Goblins: you just joined another game - not buying in here.")
+    return false
+  end
+  rec.askKey = nil -- its popup has already closed; nothing to dismiss
+  launcherDrop(rec)
+  clientOpen(rec)
+  return true
+end
+
+-- The launcher's Open games list joins through the same path as the popup.
+function PG.LG.JoinOpen(key)
+  return clientAccept(sessions[tostring(key or "")])
+end
+
+-- Read-only view of what this module is overhearing, for the launcher list.
+-- Lite records are the store; this is a projection of them (5.10 rule 2).
+function PG.LG.OpenGames()
+  local out = {}
+  for _, rec in pairs(sessions) do
+    if rec.kind == "lite" then
+      out[#out + 1] = { key = rec.key, host = rec.host, token = rec.token,
+                        scope = rec.scope, expires = rec.expires, game = "LG",
+                        buyin = rec.cfg.buyin, rounds = rec.cfg.rounds }
+    end
+  end
+  return out
+end
+
+-- Busy means the seat is held, and nothing else (CONCURRENCY.md 6.1): hosting
+-- is not busy, holding lite records is not busy, a Pull Book is not busy.
+local busyToastAt, busyPending = 0, 0
+
+-- One line per minute at group scope however many opens arrive in it; guild and
+-- public are silent, because a popular guild starting five games must not
+-- produce five lines. With more than one open in the window the line collapses
+-- to a count: the launcher list is where the detail lives.
+local function listedToast(rec, seated)
+  local now = GetTime()
+  if (now - busyToastAt) < BUSY_TOAST_EVERY then
+    busyPending = busyPending + 1
+    return
+  end
+  -- a pending count older than the throttle window belongs to games that have
+  -- long since expired: "4 more games are open" must never be counted from
+  -- opens that closed ten minutes ago
+  if (now - busyToastAt) > (BUSY_TOAST_EVERY * 2) then busyPending = 0 end
+  busyToastAt = now
+  local extra = busyPending
+  busyPending = 0
+  if extra > 0 then
+    toast((extra + 1) .. " more games are open - see the Pengyou Games window.",
+      { key = "lg-busy" })
+  elseif seated then
+    toast("Loot Goblins: " .. shortOf(rec.host)
+      .. " started a game - you're in another game right now. It's in the Pengyou Games window.",
+      { key = "lg-busy" })
+  else
+    toast("Loot Goblins: " .. shortOf(rec.host)
+      .. " started a game - it's in the Pengyou Games window.", { key = "lg-busy" })
+  end
+end
+
+-- Guild invite budget (SCOPE.md 6.3): at most one popup per sender per minute
+-- and three per five minutes. Two hundred guildmates with no budget is a denial
+-- of service on the user's screen.
+--
+-- The counter lives in Widgets, next to AskCount, because it is a budget on the
+-- SCREEN and not on a module: kept per module it was spent twice over, so the
+-- real ceiling was six popups per five minutes against a spec that says three.
+-- The local fallbacks only matter if Widgets somehow predates this API.
+local function guildBudgetOK(host)
+  if PG.UI.GuildAskOK then return PG.UI.GuildAskOK(host) end
+  return true
+end
+
+local function guildBudgetSpend(host)
+  if PG.UI.GuildAskSpend then PG.UI.GuildAskSpend(host) end
+end
+
+-- One invitation per SESSION, keyed by (game, host, token): several are on
+-- screen at once and accepting one withdraws the rest. The old per-game
+-- "lg-invite" key silently auto-declined the first invitation whenever a second
+-- arrived, which is the bug behind "every pending invitation stays visible".
+local function raiseInvite(rec)
+  launcherAdd(rec) -- the list is the one surface every open reaches
+  -- Busy: no popup at all. An Ask you cannot accept is worse than no Ask, and
+  -- being busy never means being deaf - the record and the row still exist.
+  -- Public never pops. Over ASK_MAX the launcher list is the overflow target.
+  -- The guild budget is only TESTED here and is spent below, once the popup is
+  -- actually on screen, so a DND or capped-out invitation costs nothing.
+  local seated = PG.Session.IsSeated()
+  if seated
+    or rec.scope == "public"
+    or PG.UI.AskCount() >= ASK_MAX
+    or (rec.scope == "guild" and not guildBudgetOK(rec.host)) then
+    if rec.scope == "group" then listedToast(rec, seated) end
+    return
+  end
   local acceptLabel = "Buy in"
   if Theme then acceptLabel = Theme.Mark("coin") .. " Buy in" end
-  PG.UI.Ask("lg-invite",
-    short .. " started Loot Goblins - buy-in " .. PG.Money(buyin) .. ", "
-      .. rounds .. " rounds. Buy in?",
-    acceptLabel, "Pass", joinSecs,
-    function()
-      if S and S.token == token and S.phase == "join" then
-        PG.Comm.Whisper(S.host, "LG", "JOIN", S.token)
-        S.joinAccepted = true -- provisional; the host's JOINED broadcast confirms
-        ShowWindow()
-        if win then ui.bar:Start(math.max(1, S.joinDeadlineDisplay - GetTime())) end
+  local key = "LG:" .. rec.key
+  -- the timeout is the invitation's REMAINING life, so a popup raised late
+  -- never outlives its join window
+  local secs = math.max(1, (rec.expires or GetTime()) - GetTime())
+  local ok = PG.UI.Ask(key,
+    shortOf(rec.host) .. " started Loot Goblins - buy-in "
+      .. PG.Money(rec.cfg.buyin) .. ", " .. rec.cfg.rounds .. " rounds. Buy in?",
+    acceptLabel, "Pass", secs,
+    function() clientAccept(rec) end,
+    -- Pass, or the countdown running out, takes the popup down - and askKey has
+    -- to come down with it. A stale askKey makes the record claim a popup it no
+    -- longer has, and row 6 of the OPEN table picks its eviction victim by
+    -- exactly that field: eight passed-on invitations used to leave eight
+    -- records all claiming popups, after which the next OPEN was discarded
+    -- outright. The identity guard stops a late callback resurrecting the field
+    -- on a record that has since been evicted or replaced.
+    function() if sessions[rec.key] == rec then rec.askKey = nil end end,
+    "goblin")
+  if ok then
+    rec.askKey = key
+    -- spent only on a popup that actually appeared: PG.UI.Ask's DND branch runs
+    -- onDecline and returns false, and a full screen returns false too
+    if rec.scope == "guild" then guildBudgetSpend(rec.host) end
+  end
+end
+
+-- SUPERSESSION (CONCURRENCY.md 4.3): the newest OPEN from a given host replaces
+-- that host's previous session on every client, unconditionally, at any age.
+-- This is deterministic and client-independent without any comparison, because
+-- the host is the sole authority for its own sessions - if it is sending a new
+-- OPEN, its previous one is over whatever any client still believes. It is the
+-- fix for a client stuck at phase == "play" that missed END and was silently
+-- excluded from every future game.
+local function supersedeHost(host)
+  for _, rec in pairs(sessions) do
+    if rec.host == host then
+      if rec.kind == "lite" then
+        evictSession(rec) -- silently: no toast, its popup just goes
+      elseif rec.phase == "done" then
+        evictSession(rec, true) -- keep the final standings on screen
+      else
+        -- we are seated in it; we can never HOST it, because our own OPEN is
+        -- dropped before it reaches here. Never auto-seat into the new game:
+        -- the replacement raises a normal invitation we may decline.
+        stoast(rec, shortOf(host)
+          .. " started a new game - your previous game is over. No gold changes.",
+          { priority = "result" })
+        endSession("The host started a new game. No gold changes.")
+        evictSession(rec)
       end
-    end,
-    nil, "goblin")
+    end
+  end
+end
+
+-- The inbound OPEN decision table (CONCURRENCY.md 4.2), evaluated in order.
+-- There is no collision window and no arbitration between hosts: two hosts
+-- pressing Start in the same second produce two games, two lite records and two
+-- invitations, and the human picks. No client silently elects a winner, so no
+-- two clients can elect differently.
+local function onOpen(token, sender, scope, f1, f2, f3, f4)
+  -- row 2: malformed fields, bad token, declared scope != delivered scope, or
+  -- an audience this game does not play to
+  local buyin = num(f1, 1, 100000)
+  local rounds = num(f2, 1, 20)
+  local joinSecs = num(f3, 5, 600)
+  if not (buyin and rounds and joinSecs) then return end
+  local declared = PG.Comm.ScopeOfCode(PG.SafeStr(f4))
+  if not declared or declared ~= scope then return end
+  if scope == "private" then return end -- an OPEN must never arrive by whisper
+  if not PG.LG.SCOPES[scope] then return end
+  -- row 1: our own OPEN. Comm already refuses self-delivery; belt and braces.
+  local me = myName()
+  if not me or sender == me then return end
+  local key = keyOf(sender, token)
+  -- row 3: a finished session's key stays poisoned, so its token can never be
+  -- resurrected by a replayed or re-broadcast OPEN
+  local died = recent[key]
+  if died and (GetTime() - died) < RECENT_TTL then return end
+  -- row 4: idempotent. A retransmitted OPEN refreshes the invitation window and
+  -- raises no second popup and no toast.
+  local rec = sessions[key]
+  if rec then
+    if rec.kind == "lite" then rec.expires = GetTime() + liteLife(joinSecs) end
+    return
+  end
+  -- row 5: same host, different token
+  supersedeHost(sender)
+  -- row 6: at the cap, the oldest lite record with no popup ON SCREEN goes.
+  -- Liveness is PG.UI.IsAsking, not the cached askKey: the cached field is the
+  -- record's belief and the popup frame is the fact. If every record still
+  -- claims one, the oldest goes anyway - its popup comes down with it through
+  -- dropInvite - because dropping the new OPEN outright would leave it with no
+  -- record, no popup AND no launcher row, and a launcher row with no record
+  -- behind it is unjoinable (JoinOpen resolves through sessions[key]).
+  local nLite, oldest, oldestAny = 0, nil, nil
+  for _, r in pairs(sessions) do
+    if r.kind == "lite" then
+      nLite = nLite + 1
+      local asking = r.askKey ~= nil
+      if PG.UI.IsAsking then asking = PG.UI.IsAsking(r.askKey) end
+      if not asking and (not oldest or (r.openedAt or 0) < (oldest.openedAt or 0)) then
+        oldest = r
+      end
+      if not oldestAny or (r.openedAt or 0) < (oldestAny.openedAt or 0) then
+        oldestAny = r
+      end
+    end
+  end
+  if nLite >= MAX_LITE then
+    local victim = oldest or oldestAny
+    if not victim then return end
+    evictSession(victim)
+  end
+  -- row 7: a lite record. One small table: no roster, no totals, no picks, no
+  -- history, no ticker, no frame, and nothing it can ever send.
+  local now = GetTime()
+  rec = {
+    kind = "lite",
+    key = key,
+    token = token,
+    host = sender,
+    scope = scope,
+    cfg = { buyin = buyin, rounds = rounds, joinSecs = joinSecs },
+    openedAt = now,
+    expires = now + liteLife(joinSecs),
+  }
+  sessions[key] = rec
+  ensureTicker()
+  raiseInvite(rec)
 end
 
 local function clientHostDead()
-  toast("Loot Goblins: lost contact with the host - game abandoned, no gold changes.")
+  stoast(mySession(), "lost contact with the host - game abandoned, no gold changes.")
   endSession("Abandoned - the host stopped responding. No gold changes.")
 end
 
@@ -824,6 +1466,7 @@ end
 -- voided round counts (it pays nothing and produces no RESULT), so this is
 -- exactly "the outcomes I hold with no holes in them".
 appliedThrough = function()
+  local S = mySession()
   if not S then return 0 end
   local r = 0
   while S.appliedResults[r + 1] do r = r + 1 end
@@ -835,6 +1478,7 @@ end
 -- cooling-down request stays pending and the ticker retries it once clear.
 -- Never sent by the host, after SYNCNO, or for a finished session.
 clientRequestSync = function()
+  local S = mySession()
   if not S or S.isHost or S.phase == "done" or S.syncDead then return end
   local now = GetTime()
   if now - (S.lastSyncQ or 0) < SYNC_COOLDOWN or PG.Comm.Locked() then
@@ -864,6 +1508,7 @@ end
 -- every round it missed, worth nothing. Its winnings are therefore identical
 -- to everyone else's, which is what makes it safe to write the END ledger.
 local function maybeClearSpectator()
+  local S = mySession()
   if not S or S.isHost or not S.spectator or S.syncDead then return end
   if S.phase ~= "play" or not S.count then return end
   if #S.roster ~= S.count then return end
@@ -874,9 +1519,21 @@ local function maybeClearSpectator()
   local need = S.roundOpen and (S.r - 1) or S.r
   if need < 0 then need = 0 end
   if appliedThrough() < need then return end
+  -- The same test applyBegin makes, one hop later: a mirror that converges on
+  -- the host's roster and finds itself absent was never in this game (its JOIN
+  -- was lost, or the host closed the window without it). It stops here rather
+  -- than holding the seat and watching a game it cannot play (CONCURRENCY.md
+  -- 7.2/7.3) - and the seat matters, because the next invitation needs it.
+  local me = myName()
+  if not (me and S.joined[me]) then
+    stoast(S, "your buy-in did not reach the host - you are not in this game.")
+    endSession("You are not in this game.")
+    evictSession(S)
+    return
+  end
   S.spectator = false
   if S.roundOpen and S.r >= 1 then S.syncHoldR = S.r end
-  toast("Loot Goblins: back in sync - you are back in the game.")
+  stoast(S, "back in sync - you are back in the game.")
   RefreshUI()
 end
 
@@ -884,36 +1541,79 @@ end
 -- Comm routing
 -------------------------------------------------------------------------------
 
-local function onComm(mtype, token, sender, f1, f2, f3, f4, f5)
-  if mtype == "OPEN" then
-    if live() then
-      toast("Loot Goblins: " .. sender .. " tried to start a game, but one is already running.")
-      return
-    end
-    local buyin = num(f1, 1, 100000)
-    local rounds = num(f2, 1, 20)
-    local joinSecs = num(f3, 5, 600)
-    if not (buyin and rounds and joinSecs) then return end
-    if type(token) ~= "string" or token == "" then return end
-    clientOpen(token, sender, buyin, rounds, joinSecs)
-    return
+-- Messages split by AUTHOR, not by a fallback between lookups: a peer who hosts
+-- a session whose token happens to equal ours can never have its whisper
+-- resolve against our hosted record, and vice versa.
+local HOST_AUTHORED = {
+  HB = true, JOINED = true, LEFT = true, BEGIN = true, ROUND = true,
+  RESULT = true, VOID = true, END = true, CANCEL = true,
+  SYNCOK = true, SYNCNO = true,
+}
+local CLIENT_AUTHORED = { JOIN = true, UNJOIN = true, PICK = true, SYNCQ = true }
+
+-- Gate h: a lite record is an invitation, not a mirror. It accepts exactly the
+-- messages that tell it to stop existing (a game we did not join has begun,
+-- been cancelled or finished - we have no reason to know it exists any more)
+-- and the heartbeat that keeps it alive. Nothing else, ever.
+local function liteObserve(rec, mtype)
+  if mtype == "HB" then
+    -- a heartbeat keeps a still-open invitation alive, but never past the
+    -- clamp: a record whose BEGIN we missed must still age out on its own
+    local cap = (rec.openedAt or GetTime()) + LITE_TTL_MAX
+    local want = GetTime() + LITE_TTL_MIN
+    if want > cap then want = cap end
+    if want > (rec.expires or 0) then rec.expires = want end
+  elseif mtype == "BEGIN" or mtype == "CANCEL" or mtype == "END" then
+    evictSession(rec)
   end
-  if not S or S.phase == "done" or token ~= S.token then return end
+end
+
+-- The inbound gate order of CONCURRENCY.md 5.2, applied verbatim. Gates a-e
+-- (version, distribution -> scope, accept/trust, rate limit, module route) are
+-- Comm's; f-l are here, and nothing before a gate may write state.
+local function onComm(mtype, token, sender, scope, f1, f2, f3, f4, f5)
+  if not validToken(token) then return end
+  if mtype == "OPEN" then return onOpen(token, sender, scope, f1, f2, f3, f4) end
+
+  local rec
+  if HOST_AUTHORED[mtype] then
+    -- gate g: identity is the pair. This single lookup replaces the old
+    -- `token ~= S.token` test and is what makes two sessions non-interfering:
+    -- it ROUTES a message instead of merely filtering it, so a message for a
+    -- session we know about but are not in is dropped without also deafening
+    -- us to the session we are in.
+    rec = sessions[keyOf(sender, token)]
+  elseif CLIENT_AUTHORED[mtype] then
+    local m = mySession()
+    if m and m.isHost and m.token == token and scope == "private" then rec = m end
+  else
+    return -- gate f: unknown mtype
+  end
+  if not rec then return end
+  if rec.kind == "lite" then return liteObserve(rec, mtype) end -- gate h
+  if rec.phase == "done" then return end                        -- gate k
+  -- gate i: scope equality. This is what stops someone re-broadcasting a live
+  -- guild session's token in party chat; "private" is exempt because resync
+  -- replays of BEGIN/RESULT/ROUND legitimately arrive by whisper.
+  if scope ~= "private" and scope ~= rec.scope then return end
+  local S = rec
   if S.isHost then
+    -- gate j, client-authored: PICK and UNJOIN must come from a seated player
     if mtype == "JOIN" then
       hostHandleJoin(sender)
     elseif mtype == "UNJOIN" then
-      hostHandleUnjoin(sender)
+      if S.joined[sender] then hostHandleUnjoin(sender) end
     elseif mtype == "PICK" then
-      hostHandlePick(sender, num(f1, 1, 20), PG.SafeStr(f2))
+      if S.joined[sender] then hostHandlePick(sender, num(f1, 1, 20), PG.SafeStr(f2)) end
     elseif mtype == "SYNCQ" then
       hostHandleSyncQ(sender, PG.SafeStr(f1), num(f2, 0, 20), num(f3, 0, 40),
                       PG.SafeStr(f4))
     end
     return
   end
-  if sender ~= S.host then return end -- only the host may drive the session
+  -- gate j, host-authored: guaranteed by gate g's key - sender IS rec.host
   S.lastHB = GetTime() -- any host traffic counts as a heartbeat
+  S.hostQuiet = nil    -- ... and ends a wide-scope quiet spell (SCOPE.md 6.2)
   if S.phase == "join"
     and (mtype == "ROUND" or mtype == "RESULT" or mtype == "VOID" or mtype == "END") then
     -- we missed BEGIN entirely: spectate for now (no ledger) and ask the host
@@ -921,7 +1621,7 @@ local function onComm(mtype, token, sender, f1, f2, f3, f4, f5)
     -- BEGIN + outcomes), unlike the old permanent sit-out
     S.phase = "play"
     S.spectator = true
-    toast("Loot Goblins: out of sync with the host - resyncing...")
+    stoast(S, "out of sync with the host - resyncing...")
     clientRequestSync()
   end
   if mtype == "HB" then
@@ -979,7 +1679,7 @@ local function onComm(mtype, token, sender, f1, f2, f3, f4, f5)
       S.syncNeeded = false
       if not S.spectator then
         S.spectator = true
-        toast("Loot Goblins: too far out of sync to catch up - spectating this game.")
+        stoast(S, "too far out of sync to catch up - spectating this game.")
       end
       RefreshUI()
     end
@@ -1013,11 +1713,17 @@ local REPLAYABLE = {
   JOINED = true, LEFT = true, BEGIN = true, RESULT = true, VOID = true, ROUND = true,
 }
 
-local function onDrop(mtype)
-  if not (S and S.isHost and live()) then return end
+-- The send queue and its 10-token bucket are shared by the whole addon, so a
+-- drop must say WHICH session lost the message: with two live sessions an
+-- unqualified drop is one session killing another (CONCURRENCY.md 5.5). A drop
+-- for a foreign or unknown token is ignored.
+local function onDrop(mtype, token)
+  local S = mySession()
+  if not (S and S.isHost and S.phase ~= "done") then return end
+  if S.token ~= token then return end
   if not CRITICAL_DROP[mtype] then return end
   if REPLAYABLE[mtype] and S.syncReplayUntil and GetTime() < S.syncReplayUntil then return end
-  toast("Loot Goblins: game aborted - addon messages were blocked mid-send. No gold changes.")
+  stoast(S, "game aborted - addon messages were blocked mid-send. No gold changes.")
   endSession("Aborted - addon messages were blocked. No gold changes.")
 end
 
@@ -1030,7 +1736,8 @@ end
 -------------------------------------------------------------------------------
 
 local function onSafetyChange(state, trigger)
-  if not live() then return end
+  local S = mySession()
+  if not S or S.phase == "done" then return end
   -- plain combat neither freezes the round nor discards picks, and it can
   -- never change allClear() (so no resync bookkeeping is missed by returning
   -- here); without this every trash pull would churn the round
@@ -1070,13 +1777,20 @@ end
 -- retries, heartbeat) and the client-side host-death watchdog.
 -------------------------------------------------------------------------------
 
-onTick = function()
-  if not S or S.phase == "done" then return end
-  local now = GetTime()
+-- One tick of the session this client is in. Split out of onTick so the sweep
+-- (which must run whether or not we are in a session) is not entangled with the
+-- early returns below.
+local function serviceMine(S, now)
   if S.isHost then
-    if not IsInGroup() then
-      toast("Loot Goblins: you left the group - game abandoned, no gold changes.")
-      endSession("Abandoned - you left the group. No gold changes.")
+    -- Scope-aware host abort (SCOPE.md 6.1): left the party at group scope,
+    -- /gquit at guild scope, the public channel gone for 8 continuous seconds
+    -- (the grace absorbs loading screens, which drop a temporary channel every
+    -- time). The session is immutable in its scope: it aborts, never migrates.
+    local ok, why = PG.Comm.ScopeAvailable(S.scope, 8)
+    if not ok then
+      why = why or "the audience is gone."
+      stoast(S, why .. " Game abandoned, no gold changes.", { priority = "result" })
+      endSession("Abandoned - " .. why .. " No gold changes.")
       return
     end
     if now - (S.lastHBSent or 0) >= HB_INTERVAL and not PG.Comm.Locked() then
@@ -1113,6 +1827,25 @@ onTick = function()
       -- comms lockdown, or the pre-activation restriction window): suspend
       -- the watchdog instead of declaring the host dead
       S.lastHB = (S.lastHB or now) + TICK
+    elseif S.scope ~= "group" then
+      -- Wide scope: the host can be pulling a boss while we stand in a city, so
+      -- OUR safety state proves nothing about theirs (SCOPE.md 6.2). Silence is
+      -- "quiet, and probably in an encounter" for 150s - no state change, no
+      -- spectator flip, no ledger effect - and only then are they dead.
+      local quiet = now - (S.lastHB or now)
+      if quiet > HB_GIVEUP_WIDE then
+        clientHostDead()
+        return
+      elseif quiet > HB_QUIET_WIDE then
+        if not S.hostQuiet then
+          S.hostQuiet = true
+          RefreshUI()
+        end
+        if now - (S.quietSyncAt or 0) > 60 then
+          S.quietSyncAt = now
+          clientRequestSync() -- heal the instant they come back
+        end
+      end
     elseif now - (S.lastHB or now) > HB_TIMEOUT then
       clientHostDead()
       return
@@ -1120,7 +1853,20 @@ onTick = function()
     -- pending resync request (cooling down, or a refused send): retry once clear
     if S.syncNeeded and allClear() then clientRequestSync() end
   end
-  if win and win:IsShown() then RefreshUI() end
+end
+
+onTick = function()
+  tickN = tickN + 1
+  -- every 4th tick (2s): lite records past their invitation window, finished
+  -- records past DONE_TTL, poisoned keys past RECENT_TTL. Bounded at 25 entries.
+  if tickN % 4 == 0 then sweep() end
+  local S = mySession()
+  if S and S.phase ~= "done" then
+    serviceMine(S, GetTime())
+    if win and win:IsShown() then RefreshUI() end
+  end
+  -- the ticker exists only while the registry does
+  if not next(sessions) then stopTicker() end
 end
 
 -------------------------------------------------------------------------------
@@ -1269,7 +2015,9 @@ placeStamps = function(pattern)
   if not stampPool or not win then return end
   hideStamps()
   local limit = #pattern
-  if limit > MAX_ROWS then limit = MAX_ROWS - 1 end -- last row is "... and more"
+  -- last visible row is the "... and more" line, and a referee host has pushed
+  -- the roster down by one
+  if limit + rowOffset > MAX_ROWS then limit = MAX_ROWS - 1 - rowOffset end
   local used = 0
   for i = 1, limit do
     if pattern:sub(i, i) == "H" then
@@ -1277,7 +2025,7 @@ placeStamps = function(pattern)
       if used > #stampPool then break end -- hoarders 9+: text-only LOSS color
       local sp = stampPool[used]
       sp.tex:ClearAllPoints()
-      sp.tex:SetPoint("CENTER", rowAt(i), "LEFT", -2, 0)
+      sp.tex:SetPoint("CENTER", rowAt(i + rowOffset), "LEFT", -2, 0)
       if sp.group then
         sp.tex:SetAlpha(0) -- invisible through the stagger; the slam raises it
         sp.tex:Show()
@@ -1342,13 +2090,6 @@ fxPick = function(p)
   Theme.Sound("click")
 end
 
--- "Name-Realm" -> "Name" for the tight marquee line (names never contain "-";
--- realms do). Purely cosmetic: rows keep the full name the roster shows.
-local function shortOf(full)
-  full = tostring(full or "?")
-  return full:match("^([^%-]+)") or full
-end
-
 -- The stage shows 9 result rows plus a "... and N more" line once a payload
 -- carries more than 10 (REVEAL.md 2.3), which on a 20-man roster can swallow
 -- the local player's row - and "your delta emphasized" is the point of it.
@@ -1373,7 +2114,8 @@ end
 -- shows the headline alone rather than invent payouts nobody agrees with.
 local function resultRows(lr)
   local list = {}
-  if S.spectator or #lr.pattern ~= #S.roster then return list end
+  local S = mySession()
+  if not S or S.spectator or #lr.pattern ~= #S.roster then return list end
   local me = myName()
   for i, name in ipairs(S.roster) do
     local c = lr.pattern:sub(i, i)
@@ -1396,6 +2138,7 @@ end
 -- information. Reveal (not RevealQueue): a round result that could not play is
 -- superseded by the next round, and a late replay would be a lie.
 fxResult = function()
+  local S = mySession()
   if not (win and win:IsShown() and S and S.lastResult) then return end
   local lr = S.lastResult
   local nh, ns = 0, 0
@@ -1420,8 +2163,19 @@ fxResult = function()
     title = "ROUND " .. lr.r
   end
   local paid = (lr.hoardPay > 0 or lr.sharePay > 0)
+  local sess = S
   Theme.Reveal({
     theme = "goblin",
+    -- OWNERSHIP (CONCURRENCY.md 5.8 rule 2): the payload belongs to ONE record.
+    -- A round moment whose session was superseded, withdrawn or swept between
+    -- the applier and the stage is culled instead of playing over whatever
+    -- window is up by then.
+    validate = function() return sessions[sess.key] == sess end,
+    -- PRECEDENCE (rule 3): when a seated session and a refereed one both want
+    -- the stage, the one the player is actually PLAYING wins. S.seated is the
+    -- record's own copy of that fact and, unlike PG.Session.Holds, it is still
+    -- true at END - where the seat was released a few lines before the podium.
+    priority = sess.seated and 1 or 0,
     anchor = { mode = "window", host = win },
     title = title,
     subtitle = "Round " .. lr.r .. " of " .. (S.rounds or "?") .. " - pot "
@@ -1460,7 +2214,9 @@ end
 -- numbers are part of the row text so a hoisted personal row stays honest.
 -- Returns the row list, the leader's name and the leader's net.
 local function endRows()
+  local S = mySession()
   local order, net = {}, {}
+  if not S then return {} end
   for i, name in ipairs(S.roster) do
     order[i] = name
     net[name] = (S.totals[name] or 0) - (S.buyin or 0)
@@ -1495,6 +2251,7 @@ end
 -- eventually show, so it waits out an encounter/ready-check rather than being
 -- dropped - and its validate culls it if this session is gone by then.
 fxEnd = function()
+  local S = mySession()
   if not (win and win:IsShown() and S) then return end
   -- A9 sparkles stay in the window: they are its own end-state decoration and
   -- the one celebration that still plays while the podium is held back. They
@@ -1536,7 +2293,15 @@ fxEnd = function()
     burstSound = "fanfare",
     npc = npc,
     emote = bigWin and "dance" or "cheer",
-    validate = function() return S == sess and sess.ended == true end,
+    -- ownership (CONCURRENCY.md 5.8): a payload whose session has since been
+    -- evicted - superseded, withdrawn, swept - is culled at drain time rather
+    -- than played over whatever is on screen by then
+    validate = function()
+      return sessions[sess.key] == sess and sess.ended == true
+    end,
+    -- precedence (5.8 rule 3): a podium from the game we PLAYED drains ahead of
+    -- one from a game we merely refereed
+    priority = sess.seated and 1 or 0,
   })
 end
 
@@ -1561,8 +2326,12 @@ local function ensureWindow()
   if win then return end
   win = PG.UI.Window("lg", "Loot Goblins", 440, 620, "goblin")
   -- Safety auto-resume: come back after an encounter/ready-check/countdown,
-  -- but never resurrect for a session that has since died.
-  win.__pgResume = function() return S ~= nil end
+  -- but never resurrect for a session that has since died OR been replaced -
+  -- the window is bound to one record (win.__pgRec) and shows nothing else.
+  win.__pgResume = function()
+    local S = mySession()
+    return S ~= nil and win.__pgRec == S
+  end
 
   -- Title ribbon (decor; failure -> plain title, today's look)
   if Theme then
@@ -1604,8 +2373,17 @@ local function ensureWindow()
   ui.info:SetMaxLines(3)
   if TC then ui.info:SetTextColor(TC.AMBER[1], TC.AMBER[2], TC.AMBER[3]) end
 
+  -- the audience, under the title (SCOPE.md 5.4): "who can see this game" is
+  -- the first thing a player needs to know about a session they did not start
+  ui.aud = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  ui.aud:SetPoint("TOPLEFT", 24, -100)
+  ui.aud:SetPoint("TOPRIGHT", -24, -100)
+  ui.aud:SetJustifyH("LEFT")
+  ui.aud:SetWordWrap(false)
+  if TC then ui.aud:SetTextColor(TC.AMBER[1], TC.AMBER[2], TC.AMBER[3]) end
+
   ui.bar = PG.UI.TimerBar(win, 260)
-  ui.bar:SetPoint("TOPLEFT", 24, -112)
+  ui.bar:SetPoint("TOPLEFT", 24, -118)
 
   -- Grizzle the Pit Boss: 3D goblin host, reacts to the game (pure decor;
   -- Theme.NPC falls back to a static coin-pile icon in the same container)
@@ -1635,17 +2413,25 @@ local function ensureWindow()
   ui.mine:SetWordWrap(false)
   if TC then ui.mine:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
   ui.startBtn = PG.UI.Button(win, "Start now", 105, 22, function()
+    local S = mySession()
     if S and S.isHost and S.phase == "join" then hostCloseJoin() end
   end)
   ui.startBtn:SetPoint("BOTTOMLEFT", 20, 16)
   ui.cancelBtn = PG.UI.Button(win, "Cancel game", 105, 22, function()
-    if S and S.isHost and live() then hostCancel("host") end
+    local S = mySession()
+    if S and S.isHost and S.phase ~= "done" then hostCancel("host") end
   end)
   ui.cancelBtn:SetPoint("BOTTOMRIGHT", -20, 16)
   ui.withdrawBtn = PG.UI.Button(win, "Withdraw", 105, 22, function()
+    local S = mySession()
     if S and not S.isHost and S.phase == "join" and S.joinAccepted then
       if Theme then Theme.Sound("coincancel") end
       PG.Comm.Whisper(S.host, "LG", "UNJOIN", S.token)
+      -- withdrawing stops this client tracking the game at all (7.2): the seat
+      -- is freed here rather than when the host's LEFT comes back, so the next
+      -- invitation is accept-able immediately
+      local me = myName()
+      if me then applyLeft(me) end
     end
   end)
   ui.withdrawBtn:SetPoint("BOTTOMLEFT", 20, 16) -- shares the host-only Start slot
@@ -1670,6 +2456,7 @@ local function ensureWindow()
     -- always arrive with a flag set, so allClear() filters every auto path
     -- (and Theme.Sound re-applies the same gates plus the default-off pref).
     win:HookScript("OnHide", function()
+      local S = mySession()
       if S and S.phase == "done" and S.ended and allClear() then
         Theme.Sound("farewell")
       end
@@ -1677,9 +2464,18 @@ local function ensureWindow()
   end
 end
 
+local SCOPE_HEADER = {
+  group = "Party",
+  guild = "Guild game - settle up with people you can find again.",
+  public = "Public - realm-wide. Virtual gold, honour-system settling.",
+}
+
 RefreshUI = function()
+  local S = mySession()
   if not win or not S then return end
+  if win.__pgRec and win.__pgRec ~= S then return end -- another record's window
   local now = GetTime()
+  ui.aud:SetText(SCOPE_HEADER[S.scope] or "")
   local me = myName()
   local isJoin = S.phase == "join"
   local isPlay = S.phase == "play"
@@ -1709,11 +2505,26 @@ RefreshUI = function()
         or math.max(0, (S.joinDeadline or now) - now)
       status = #S.roster .. " joined - buy-in closes in " .. math.ceil(remaining) .. "s"
         .. (S.joinFrozen and " (paused)" or "")
+      -- Show what we already know (CONCURRENCY.md 6.3): nobody replies "busy",
+      -- so the host is at least told how many addon users are in earshot. Group
+      -- scope only - PG.Peers is a group-scope fact and would mislead elsewhere.
+      if S.scope == "group" and PG.Peers then
+        local peers = 0
+        for _ in pairs(PG.Peers) do peers = peers + 1 end
+        if peers > 0 then
+          status = status .. GRAY .. "  (" .. #S.roster .. " of " .. (peers + 1)
+            .. " addon users)|r"
+        end
+      end
     else
       status = #S.roster .. " joined - waiting for the host to start"
     end
   elseif isPlay then
-    if S.spectator then
+    if S.hostQuiet then
+      -- wide scope: the host is in content we cannot see (SCOPE.md 6.2). This
+      -- is a repaint and nothing else - no state change, no spectator flip.
+      status = "Waiting for the host - they may be in a boss fight."
+    elseif S.spectator then
       status = S.syncDead and "Spectating - too far out of sync to catch up."
         or "Spectating - out of sync, resyncing with the host..."
     elseif S.roundOpen then
@@ -1742,13 +2553,22 @@ RefreshUI = function()
   ui.status:SetText(status)
 
   local lines = {}
+  -- the referee host sits OUTSIDE the numbered roster: it has no buy-in, no
+  -- pick and no ledger row, and the pot arithmetic never counts it (I5)
+  rowOffset = 0
+  if S.refereed then
+    lines[1] = GRAY .. shortOf(S.host) .. " (running the game)|r"
+    rowOffset = 1 -- hoarder stamps follow the roster down one row
+  end
   if S.spectator and not isJoin then
-    lines[1] = GRAY .. "Out of sync - results are shown in the status line only.|r"
+    lines[#lines + 1] = GRAY .. "Out of sync - results are shown in the status line only.|r"
   elseif isJoin then
     for _, name in ipairs(S.roster) do
       lines[#lines + 1] = name .. (name == me and (GOLD .. " (you)|r") or "")
     end
-    if not lines[1] then lines[1] = GRAY .. "Nobody has bought in yet.|r" end
+    if #S.roster == 0 then
+      lines[#lines + 1] = GRAY .. "Nobody has bought in yet.|r"
+    end
   else
     local lr = S.lastResult
     local annotate = lr and #lr.pattern == #S.roster
@@ -1787,6 +2607,8 @@ RefreshUI = function()
 
   if S.spectator then
     ui.mine:SetText(GRAY .. "No stake this game (spectating).|r")
+  elseif S.refereed then
+    ui.mine:SetText(GRAY .. "You have no stake in this game - you're running it.|r")
   elseif inRoster then
     if isJoin then
       ui.mine:SetText("You are in for " .. GOLD .. PG.Money(S.buyin) .. "|r.")
@@ -1817,18 +2639,23 @@ RefreshUI = function()
 end
 
 ShowWindow = function()
-  if not S then return end
+  local S = mySession()
+  if not S then return end -- only the session we are IN ever gets the window
   if not (S.isHost or S.joinAccepted) then return end -- mirrors stay windowless
   local st = PG.Safety.state
   if st.inEncounter or st.readyCheck or st.countdown or st.restricted then return end
   -- plain combat hides the window only when the user opted in (Settings)
   if st.inCombat and PG.db and PG.db.profile and PG.db.profile.hideInCombat then return end
   ensureWindow()
+  -- one window per module, bound to the involved record: a replaced session can
+  -- never leave a fully drawn, live-looking window behind (CONCURRENCY.md 5.9)
+  win.__pgRec = S
   RefreshUI()
   win:Show()
-  -- first show for this session: the host waves hello (once per token)
-  if Theme and greetToken ~= S.token then
-    greetToken = S.token
+  -- first show for this session: the host waves hello (once per session, and
+  -- identity is the whole key now that tokens are only unique per host)
+  if Theme and greetToken ~= S.key then
+    greetToken = S.key
     runFX(fxGreet)
   end
 end
@@ -1861,9 +2688,48 @@ local function fieldValue(eb, lo, hi)
   return n
 end
 
+local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors" }
+
+-- The dialog always opens and Start explains itself (CONCURRENCY.md 6.4). It
+-- never refuses to appear: "why can't I?" is information the user wants, and
+-- the old blanket refusal answered it with a toast and a shrug.
+local function refreshDialog()
+  if not dialog then return end
+  local note, canStart = "", true
+  local S = mySession()
+  local seat = PG.Session.Seat()
+  if S and S.phase ~= "done" then
+    canStart = false
+    if S.isHost then
+      note = "You're already running a Loot Goblins game. Cancel it first, or wait for it to finish."
+    else
+      note = "You're playing " .. shortOf(S.host)
+        .. "'s Loot Goblins game. You can start your own when it's over."
+    end
+  elseif seat then
+    -- seated in the OTHER module: Start stays ENABLED (I4/I5) and this is a
+    -- statement of what will happen, not a refusal
+    note = "You're playing " .. (GAME_NAME[seat.module] or "another game")
+      .. ", so you'll run this game without playing in it."
+  end
+  local scope = dlgScope and dlgScope:Get()
+  if not scope then
+    canStart = false
+    if note == "" then
+      note = "Nowhere to start a game: you're not in a group or a guild."
+    end
+  end
+  if dlgNote then dlgNote:SetText(note) end
+  if dlgOpen then
+    dlgOpen.__pgWhy = (not canStart) and note or nil
+    dlgOpen:SetEnabled(canStart)
+  end
+end
+
 local function ensureDialog()
   if dialog then return end
-  dialog = PG.UI.Window("lgdialog", "Start Loot Goblins", 320, 270, "goblin")
+  -- 320x270 -> 320x320 for the audience block (SCOPE.md 5.3)
+  dialog = PG.UI.Window("lgdialog", "Start Loot Goblins", 320, 320, "goblin")
   -- gold crown header behind the title (decor; failure keeps the plain title)
   if Theme then
     local header = dialog:CreateTexture(nil, "ARTWORK", nil, -6)
@@ -1885,32 +2751,77 @@ local function ensureDialog()
     joinSecs = makeField(dialog, "Join window (sec)", -120, 45),
     roundSecs = makeField(dialog, "Round timer (sec)", -150, 20),
   }
+  -- Audience picker (SCOPE.md 5.3): label at -182, segments at -202. Every
+  -- segment renders at every moment - an unavailable one is greyed with its
+  -- reason on hover, because the disabled state IS the message.
+  dlgScope = PG.UI.ScopePicker(dialog, {
+    key = "LG",
+    allowed = PG.LG.SCOPES,
+    reasons = function(scope)
+      if scope == "public" then return PUBLIC_NOTE end
+      return nil
+    end,
+    onChange = function() refreshDialog() end,
+  })
+  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -182)
+  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -182)
+
+  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  dlgNote:SetPoint("TOPLEFT", 20, -244)
+  dlgNote:SetPoint("TOPRIGHT", -20, -244)
+  dlgNote:SetJustifyH("LEFT")
+  dlgNote:SetHeight(34)
+  dlgNote:SetWordWrap(true)
+  if TC then dlgNote:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
+
   local openLabel = "Open buy-in"
   if Theme then openLabel = Theme.Mark("coin") .. " Open buy-in" end
-  local openBtn = PG.UI.Button(dialog, openLabel, 150, 26, function()
+  dlgOpen = PG.UI.Button(dialog, openLabel, 150, 26, function()
     local buyin = fieldValue(dlgInputs.buyin, 1, 100000)
     local rounds = fieldValue(dlgInputs.rounds, 1, 20)
     local joinSecs = fieldValue(dlgInputs.joinSecs, 10, 300)
     local roundSecs = fieldValue(dlgInputs.roundSecs, 10, 60)
+    local scope = dlgScope and dlgScope:Get()
+    if not scope then
+      toast("Loot Goblins: nowhere to start a game - you're not in a group or a guild.")
+      return
+    end
+    -- availability is re-checked at the moment Start is pressed: never fall
+    -- back to another audience, say why and repaint (SCOPE.md 1.3)
+    local ok, why = PG.Comm.ScopeAvailable(scope)
+    if not ok then
+      toast("Loot Goblins: " .. (why or "that audience isn't available."))
+      dlgScope:Refresh()
+      refreshDialog()
+      return
+    end
     if Theme then Theme.Sound("stamp") end
     dialog:Hide()
-    hostOpen(buyin, rounds, joinSecs, roundSecs)
+    hostOpen(buyin, rounds, joinSecs, roundSecs, scope)
   end)
-  openBtn:SetPoint("BOTTOM", 0, 18)
+  dlgOpen:SetPoint("BOTTOM", 0, 18)
+  -- "how does this work?" lives next to Start, where a new player looks
+  local dlgRules = PG.UI.Button(dialog, "Rules", 60, 22, function()
+    if PG.Rules and PG.Rules.Show then PG.Rules.Show("LG") end
+  end)
+  dlgRules:SetPoint("BOTTOMLEFT", 16, 18)
+  -- the same reason, on hover, for a Start that cannot be pressed
+  dlgOpen:SetScript("OnEnter", function(self)
+    if not self.__pgWhy then return end
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(self.__pgWhy, 1, 0.82, 0, true)
+    GameTooltip:Show()
+  end)
+  dlgOpen:SetScript("OnLeave", function() GameTooltip:Hide() end)
+  dialog:HookScript("OnShow", refreshDialog)
 end
 
--- Launcher / slash entry point: host config dialog (or the running game).
+-- Launcher / slash entry point. The dialog ALWAYS opens (CONCURRENCY.md 0.2):
+-- the refusals that used to live here are gone, and the control explains
+-- itself instead.
 function PG.LG.OpenDialog()
-  if live() then
-    toast("Loot Goblins: a game is already running.")
-    ShowWindow()
-    return
-  end
-  if not IsInGroup() then
-    toast("Loot Goblins needs a party or raid.")
-    return
-  end
   ensureDialog()
+  refreshDialog()
   dialog:Show()
 end
 
@@ -1925,4 +2836,43 @@ PG.RegisterInit(function()
   end
   PG.Comm.Register("LG", onComm, onDrop)
   PG.Safety.OnChange(onSafetyChange)
+
+  ASK_MAX = PG.UI.ASK_MAX or ASK_MAX
+  -- the random suffix in a token is a seatbelt against a SavedVariables
+  -- rollback, and math.random is unseeded on a fresh client. Core owns this
+  -- once it ships PG.NextToken; until then the fallback minter seeds itself.
+  if type(PG.NextToken) ~= "function" then
+    pcall(math.randomseed, time())
+  end
+
+  -- Whisper trust (SCOPE.md 4.3, retargeted at the registry). A whisper
+  -- carries no audience proof at all, so only the session we are INVOLVED in
+  -- vouches for one. Lite records never do: we never whispered them anything,
+  -- so they can never legitimately expect a reply.
+  PG.Comm.RegisterTrust("LG", function(sender)
+    local S = mySession()
+    if not S or S.phase == "done" then return false end
+    if sender == S.host then return true end
+    if S.joined[sender] then return true end
+    -- host side, wide scope, join window open: the first JOIN from a stranger
+    -- is the entire point of a wider audience. Comm's rate limiting bounds it.
+    if S.isHost and S.phase == "join" and S.scope ~= "group" then return true end
+    return false
+  end)
+
+  -- Accepting one invitation withdraws the rest (CONCURRENCY.md 5.6 rule 3):
+  -- the moment the single round-based seat is taken - here or in the other
+  -- module - every invitation this module still has on screen comes down. The
+  -- lite records stay in the launcher list until they expire.
+  PG.Session.OnChange(function(seat)
+    if not seat then return end
+    for _, rec in pairs(sessions) do
+      if rec.kind == "lite" and rec.askKey then
+        local key = rec.askKey
+        rec.askKey = nil
+        PG.UI.Dismiss(key)
+      end
+    end
+    if dialog and dialog:IsShown() then refreshDialog() end
+  end)
 end)

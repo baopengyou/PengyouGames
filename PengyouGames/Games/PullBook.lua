@@ -1,7 +1,29 @@
 -- Games/PullBook.lua - The Pull Book: pre-pull betting (bookie + client + UI).
+--
+-- 0.6.0 concurrency pass. The single module-global `book` is now a keyed
+-- registry (CONCURRENCY.md 2): ONE full record - the book we are actually in,
+-- hosted or adopted - plus bounded lite records for books we merely overhear.
+-- Identity is the pair (bookie, token) (CONCURRENCY.md 3), which is what stops
+-- a colliding token from folding another bookie's bettors into our own
+-- attempt.bets and paying them at our stake.
+--
+-- The Pull Book NEVER takes the round-based seat (I10): it is passive pre-pull
+-- betting, designed from day one to run alongside a Loot Goblins or Rock Paper
+-- Scissors game, so this file contains zero references to PG.Session,
+-- permanently.
+--
+-- The Pull Book is PARTY ONLY (SCOPE.md 1.2), and that is a rule about physics
+-- rather than taste: the book is scored from the bookie's own ENCOUNTER_END and
+-- UNIT_DIED, so only the group standing in that fight can observe, verify or
+-- contest the result. The picker still renders Guild and Public - disabled,
+-- with the reason - because "why can't I?" is the question being asked at
+-- exactly that moment.
 local ADDON, PG = ...
 
 PG.PB = {}
+
+-- Read by PG.UI.ScopePicker (SCOPE.md 1.2 / 5.2).
+PG.PB.SCOPES = { group = true, guild = false, public = false }
 
 local STAKE_MIN, STAKE_MAX = 1, 100000
 local LINE_MIN, LINE_MAX = 1, 99
@@ -13,6 +35,16 @@ local HB_MISS_SECS = 50
 -- combat is flagged a moment later; this covers the gap between the two, where
 -- every Safety flag is momentarily clear but the raid is mid-pull.
 local PULL_GRACE = 6
+
+-- Registry budget (CONCURRENCY.md 2.1 / 7.3). Worst case per sweep is
+-- 1 + 8 + 16 = 25 table entries, once per 2 seconds.
+local MAX_LITE = 8        -- overheard books remembered at once
+local MAX_RECENT = 16     -- dead keys remembered
+local RECENT_TTL = 120    -- seconds a dead key stays poisoned
+local LITE_TTL_PAD = 10   -- a lite book outlives the bookie's own miss deadline by this
+local LITE_TTL = HB_MISS_SECS + LITE_TTL_PAD
+local TICK = 0.5          -- the module's ONE ticker; sweeps every 4th tick (2s)
+local MAX_REVEAL_Q = 6    -- bounded: stage payloads waiting out a pull
 
 local MARKETS = {
   { m = "K", label = "Kill?", opts = { { "YES", "Y" }, { "NO", "N" } } },
@@ -27,6 +59,12 @@ local VALID_PICK = {
 }
 
 local ROLE_WORD = { T = "Tank", H = "Healer", D = "DPS" }
+
+-- Only these arrive from the bookie, and gate g resolves them against
+-- (sender, token) - so the sender IS the record's bookie by construction
+-- (CONCURRENCY.md 5.2 gate j). BET is the one type any player at the table
+-- broadcasts, and it resolves against the involved book only.
+local BOOKIE_AUTHORED = { CLOSE = true, HB = true, FD = true }
 
 -------------------------------------------------------------------------------
 -- Presentation (SKIN.md "faire": Darkmoon bookmaker). Markup and color only:
@@ -75,48 +113,182 @@ local PLAIN_BACKDROP = {
 -- Tarot emblem per market (SKIN.md 2.7); fail -> no emblem, labels carry it.
 local MARKET_ICON = { K = "tarotK", D = "tarotD", W = "tarotW" }
 
+-- The Pull Book's own disabled-scope answer (SCOPE.md 1.2, verbatim intent).
+local WIDE_SCOPE_REASON =
+  "The Pull Book follows your own pull. The book is scored from the boss fight "
+  .. "you are standing in, so only your group can see the same result you do."
+
 -------------------------------------------------------------------------------
 -- State
+--
+-- books[key] = record, key = bookie .. "|" .. token.
+--   full record: the one book we are in (ours or adopted). Exactly today's
+--     `book` table plus kind / key / scope / attemptSeq, so every function
+--     below keeps its shape: `local book = myBook()` and the body is unchanged.
+--   lite record: a book we merely overheard. No attempt, no bets, no strip, no
+--     ticker, no frame - enough to drop its traffic cheaply, resolve identity,
+--     and offer it in the launcher when our own book ends.
 -------------------------------------------------------------------------------
 
--- book: nil, or { token, bookie = "Name-Realm", stake, line, isBookie }
-local book
--- attempt: nil, or { bets = { [fullName] = { K=, D=, W= } }, frozen, snap,
+local books = {}      -- [key] = record
+local mine            -- key of the ONE full record, or nil
+local recent = {}     -- [key] = GetTime() when it died; replay defence
+local recentQ = {}    -- FIFO of poisoned keys, capped at MAX_RECENT
+
+-- attempt belongs to the full record and to nothing else: every path that
+-- replaces or evicts that record clears it. `mine` is set in exactly two places
+-- (adoptFull, and the bookie's own open) and cleared in exactly one (evict), so
+-- there is no path where an attempt outlives the book it was taken for.
+-- attempt: nil, or { bets = { [fullName] = { K=, D=, W= } }, frozen, snap, seq,
 --   firstDeath = { role, name } (bookie only), resolvedKW, dDone, fdSent, reason }
 local attempt
 local lastSnap        -- bookie's latest out-of-combat roster snapshot { [guid] = { name, role } }
-local lastHB = 0      -- client: GetTime() of last sign of life from the bookie
-local hbTicker        -- bookie: 15s heartbeat
-local staleTicker     -- client: 5s bookie-liveness check
 
 local strip           -- bet strip frame (NOT Safety-registered; managed manually)
-local dlg, stakeBox, lineBox, statusFS, closeBtn, configWidgets
+local dlg, stakeBox, lineBox, statusFS, closeBtn, configWidgets, picker
 local bookieNPC       -- the dialog's goblin bookie handle (Emote self-gates)
 local pullAt = 0      -- GetTime() of the last pull-timer expiry (see PULL_GRACE)
 
+local regTicker, tickN = nil, 0
+
 local refreshDialog   -- forward: defined in the dialog section
+local ensureTicker    -- forward: defined in the lifecycle section
+local bookieSendFD    -- forward: defined after the wire section
 
 local function shortOf(full)
   return (strsplit("-", tostring(full or "?")))
 end
 
 -------------------------------------------------------------------------------
--- Result queue: results may arrive while the screen is not ours (encounter /
--- restriction / combat); queue and drain once the coast is clear. Two kinds of
--- item ride the same FIFO with the same semantics - a plain toast, and a
--- reveal-stage payload (REVEAL.md 6.5), which is only handed to
--- PG.Theme.RevealQueue at a moment the Pull Book is also happy with; the
--- engine then applies its own five-flag gate on top and holds it further if
--- the coast turns bad. Draining is presentation only; nothing here feeds
--- gameplay, and no drain path can alter the ledger or the wire.
+-- Identity and the registry (CONCURRENCY.md 2.1, 3.2)
+--
+-- The registry is keyed by the PAIR, so a token only has to be unique within
+-- one character's history: the sender is server-vouched and realm-qualified, so
+-- two hosts can mint the same token and still never share a key. That is what
+-- makes the compact token safe - and it makes every message smaller, not larger.
 -------------------------------------------------------------------------------
 
-local toastQueue = {}
-local toastTicker
+local B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 
-local function canToastNow()
-  local s = PG.Safety.state
-  return not (s.inCombat or s.inEncounter or s.restricted)
+local function b36(n)
+  n = math.floor(tonumber(n) or 0)
+  if n < 0 then n = 0 end
+  if n == 0 then return "0" end
+  local out = ""
+  while n > 0 do
+    local d = n % 36
+    out = B36:sub(d + 1, d + 1) .. out
+    n = math.floor(n / 36)
+  end
+  return out
+end
+
+-- "1a-7f3": a persisted monotonic counter per character, plus three random
+-- base-36 characters. The counter is the mechanism (incremented and persisted
+-- BEFORE the OPEN goes out, so a crash cannot reissue a number); the suffix is
+-- a seatbelt for a SavedVariables rollback, where the counter can go backwards.
+local function nextToken()
+  if type(PG.NextToken) == "function" then
+    local ok, t = pcall(PG.NextToken)
+    if ok and type(t) == "string" and t ~= "" then return t end
+  end
+  local p = PG.db and PG.db.profile
+  local seq = 1
+  if p then
+    seq = (tonumber(p.seq) or 0) + 1
+    p.seq = seq
+  end
+  return b36(seq) .. "-" .. b36(math.random(0, 46655))
+end
+
+local function keyOf(host, token)
+  return tostring(host) .. "|" .. tostring(token)
+end
+
+local function myBook()
+  return mine and books[mine] or nil
+end
+
+local function recordCount()
+  local n = 0
+  for _ in pairs(books) do n = n + 1 end
+  return n
+end
+
+local function liteCount()
+  local n = 0
+  for _, rec in pairs(books) do
+    if rec.kind == "lite" then n = n + 1 end
+  end
+  return n
+end
+
+-- A dead key can never be resurrected for RECENT_TTL: a stale or replayed OPEN
+-- for a book that just closed is dropped at the front of the decision table.
+local function poison(key)
+  for i = 1, #recentQ do
+    if recentQ[i] == key then
+      table.remove(recentQ, i)
+      break
+    end
+  end
+  recent[key] = GetTime()
+  recentQ[#recentQ + 1] = key
+  while #recentQ > MAX_RECENT do
+    local old = table.remove(recentQ, 1)
+    recent[old] = nil
+  end
+end
+
+-- Wire token validation (CONCURRENCY.md 3.4): opaque, bounded, separator-free.
+local function validToken(token)
+  if PG.IsSecret(token) or type(token) ~= "string" then return false end
+  if token == "" or #token > 24 then return false end
+  if token:find("|", 1, true) then return false end
+  return true
+end
+
+-- "the sender is in the current group snapshot" (CONCURRENCY.md 4.5). Comm has
+-- already vouched a group-scope sender against the roster; this is the module's
+-- own copy of that test, kept because the BET path is the one place a wire
+-- message touches another player's money.
+local function inGroupNow(name)
+  if type(name) ~= "string" then return false end
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do
+      if PG.FullName("raid" .. i) == name then return true end
+    end
+  elseif IsInGroup() then
+    if PG.FullName("player") == name then return true end
+    for i = 1, GetNumGroupMembers() - 1 do
+      if PG.FullName("party" .. i) == name then return true end
+    end
+  end
+  return false
+end
+
+-------------------------------------------------------------------------------
+-- Toasts and the results stage.
+--
+-- The private FIFO is GONE (CONCURRENCY.md 5.7): Widgets owns one queue for the
+-- whole addon, with the 1.2s floor, the 4-entry cap and the rule that a result
+-- line is never dropped for a status line. What stays here is the stage
+-- queueing, because only this module knows about PULL_GRACE and the bet strip.
+-------------------------------------------------------------------------------
+
+local revealQ = {}
+
+-- rec (optional) is attribution: while more than one book is known, a line
+-- names its bookie, because a player who can hear two books cannot otherwise
+-- tell which one just paid them.
+local function toast(text, rec, opts)
+  if type(text) ~= "string" then return end
+  if rec and rec.bookie and recordCount() > 1 then
+    text = "(" .. shortOf(rec.bookie) .. ") " .. text
+  end
+  local pre = mark("ticket")
+  if pre ~= "" then text = pre .. " " .. text end
+  PG.UI.Toast(text, opts)
 end
 
 -- The extra conditions a full-takeover stage answers to on top of the toast
@@ -132,73 +304,53 @@ local function stageGatesOK()
   return true
 end
 
--- Plain toasts keep exactly today's gate; a stage answers stageGatesOK too.
-local function canDrainNow(item)
-  if not canToastNow() then return false end
-  if not item.reveal then return true end
-  return stageGatesOK()
-end
-
--- One item per tick, oldest drainable first. Toasts keep their exact order and
--- their exact gate, so a stage waiting out a pull never holds text back.
-local function pumpToasts()
-  if not toastQueue[1] then
-    if toastTicker then
-      toastTicker:Cancel()
-      toastTicker = nil
-    end
-    return
+-- Today's gate, unchanged in meaning: the screen must be ours, the pull gates
+-- must be clear, and the text that explains a settlement must have been read
+-- first - so a stage payload never overtakes its own toasts.
+local function canRevealNow()
+  local s = PG.Safety.state
+  if s.inCombat or s.inEncounter or s.restricted then return false end
+  if not stageGatesOK() then return false end
+  if PG.UI.ToastPending then
+    local pending, onScreen = PG.UI.ToastPending()
+    if (pending or 0) > 0 or onScreen then return false end
   end
-  for i = 1, #toastQueue do
-    if canDrainNow(toastQueue[i]) then
-      local item = table.remove(toastQueue, i)
-      if item.reveal then
-        -- decoration doctrine: we never branch on the result. The engine drops
-        -- the payload under DND exactly as PG.UI.Toast drops a toast, and the
-        -- ledger keeps the money either way.
-        if PG.Theme and PG.Theme.RevealQueue then PG.Theme.RevealQueue(item.reveal) end
-        return
-      end
-      PG.UI.Toast(item.text)
-      -- settle chime on a drained result toast with a personal delta (SKIN.md
-      -- 2.8); Theme.Sound applies its own gates on top of canToastNow here
-      if item.snd and not PG.IsDND() and PG.Theme and PG.Theme.Sound then
-        PG.Theme.Sound(item.snd)
-      end
-      return
-    end
-  end
-end
-
-local function startPump()
-  if not toastTicker then
-    toastTicker = PG.Ticker(3.2, pumpToasts)
-    pumpToasts()
-  end
-end
-
--- sndKey (optional): Theme.Sound key played when this toast actually drains.
-local function queueToast(text, sndKey)
-  local pre = mark("ticket")
-  if pre ~= "" then text = pre .. " " .. text end
-  toastQueue[#toastQueue + 1] = { text = text, snd = sndKey }
-  startPump()
+  return true
 end
 
 local function queueReveal(payload)
-  toastQueue[#toastQueue + 1] = { reveal = payload }
-  startPump()
+  revealQ[#revealQ + 1] = payload
+  while #revealQ > MAX_REVEAL_Q do table.remove(revealQ, 1) end
+  if ensureTicker then ensureTicker() end
+end
+
+-- One payload per tick, oldest first. Draining is presentation only; nothing
+-- here feeds gameplay, and no drain path can alter the ledger or the wire.
+local function pumpReveal()
+  if not revealQ[1] then return end
+  if not canRevealNow() then return end
+  local payload = table.remove(revealQ, 1)
+  -- decoration doctrine: we never branch on the result. The engine drops the
+  -- payload under DND exactly as PG.UI.Toast drops a toast, and the ledger
+  -- keeps the money either way.
+  if PG.Theme and PG.Theme.RevealQueue then PG.Theme.RevealQueue(payload) end
 end
 
 -- Drain-time gate for every PB stage payload. Handing a payload to the engine
--- only relinquishes the toast-queue gate: the engine's own gate is the five
--- Safety flags, and a payload that lands in the engine queue while the stage is
--- busy can sit there across a whole ready check plus countdown and then drain
--- on COUNTDOWN_OFF - the one moment PULL_GRACE exists to protect. So the same
--- gate is re-applied at drain. The engine DISCARDS a payload whose validate
--- returns false and a settlement must eventually show, so a veto puts the
--- payload back in our own queue, where canDrainNow holds it properly.
--- Presentation only: no gameplay path, ledger write or wire send reads this.
+-- only relinquishes our own gate: the engine's gate is the five Safety flags,
+-- and a payload that lands in the engine queue while the stage is busy can sit
+-- there across a whole ready check plus countdown and then drain on
+-- COUNTDOWN_OFF - the one moment PULL_GRACE exists to protect. So the same gate
+-- is re-applied at drain. The engine DISCARDS a payload whose validate returns
+-- false and a settlement must eventually show, so a veto puts the payload back
+-- in our own queue, where canRevealNow holds it properly.
+--
+-- Note what this deliberately does NOT test: record liveness. A settlement is
+-- never stale (REVEAL.md 6.5) - the gold moved when the market resolved - and
+-- the closing podium is by definition queued as its record dies. Ownership
+-- culling (CONCURRENCY.md 5.8 rule 2) is for mid-session moments, and the Pull
+-- Book has none: only a full record ever emits, and only about money already
+-- committed.
 local function stageValidate(payload)
   if stageGatesOK() then return true end
   queueReveal(payload)
@@ -221,19 +373,19 @@ end
 -- Running per-book tally of settled deltas, for the closing podium. The ledger
 -- is the record of record; this is only what the podium ranks. Never
 -- persisted, never sent, never read by a gameplay path.
-local function bookTally(name, delta)
-  if not book then return end
-  local nets = book.nets
+local function bookTally(rec, name, delta)
+  if not rec then return end
+  local nets = rec.nets
   if not nets then
     nets = {}
-    book.nets = nets
+    rec.nets = nets
   end
   nets[name] = (nets[name] or 0) + delta
 end
 
-local function stakeLine()
-  if not book then return nil end
-  return "STAKE " .. PG.Money(book.stake) .. " A BET"
+local function stakeLine(rec)
+  if not rec then return nil end
+  return "STAKE " .. PG.Money(rec.stake) .. " A BET"
 end
 
 -- One settlement moment's report: ordered lines, each carrying the exact toast
@@ -245,21 +397,33 @@ local function newReport()
 end
 
 -- toastText nil -> a line that exists on the stage only (nothing to toast).
-local function repAdd(rep, toastText, snd, rowText, rowRole)
-  rep.lines[#rep.lines + 1] = { toast = toastText, snd = snd, row = rowText, role = rowRole }
+-- key / prio ride to PG.UI.Toast: a market's line dedupes on its own key, and a
+-- line that moved gold is a "result" the shared queue never drops for chatter.
+local function repAdd(rep, toastText, snd, rowText, rowRole, key, prio)
+  rep.lines[#rep.lines + 1] = {
+    toast = toastText, snd = snd, row = rowText, role = rowRole,
+    key = key, prio = prio,
+  }
 end
 
-local function flushToasts(rep)
-  if rep.head then queueToast(rep.head) end
+local function flushToasts(rep, rec)
+  if rep.head then
+    toast(rep.head, rec, {
+      key = "pb-outcome",
+      priority = (rep.paid > 0) and "result" or nil,
+    })
+  end
   for i = 1, #rep.lines do
     local ln = rep.lines[i]
-    if ln.toast then queueToast(ln.toast, ln.snd) end
+    if ln.toast then
+      toast(ln.toast, rec, { key = ln.key, sound = ln.snd, priority = ln.prio })
+    end
   end
 end
 
-local function emitReport(rep, title, emote)
+local function emitReport(rep, rec, title, emote)
   if rep.paid < 1 or not (PG.Theme and PG.Theme.RevealQueue) then
-    flushToasts(rep)
+    flushToasts(rep, rec)
     return
   end
   local rows = {}
@@ -280,7 +444,7 @@ local function emitReport(rep, title, emote)
     title = title,
     subtitle = rep.sub,
     rows = rows,
-    marquee = stakeLine(),
+    marquee = stakeLine(rec),
     burst = "tickets", burstCount = 10,
     sound = "settled",
     npc = bookieNPC, emote = emote,
@@ -293,10 +457,10 @@ end
 -- its life, podium variant, top three rising last. Players the book never paid
 -- or charged are absent. Returns true when the stage took the closing line, so
 -- the caller can skip the toast that would only repeat it.
-local function closePodium(sub)
-  if not (book and book.nets and PG.Theme and PG.Theme.RevealQueue) then return false end
+local function closePodium(rec, sub)
+  if not (rec and rec.nets and PG.Theme and PG.Theme.RevealQueue) then return false end
   local list, any = {}, false
-  for name, net in pairs(book.nets) do
+  for name, net in pairs(rec.nets) do
     list[#list + 1] = { name = name, net = net }
     if net ~= 0 then any = true end
   end
@@ -344,7 +508,7 @@ local function closePodium(sub)
 end
 
 -------------------------------------------------------------------------------
--- Parimutuel math
+-- Parimutuel math (unchanged: every number below is exactly 0.5.0's)
 -------------------------------------------------------------------------------
 
 local function marketBetCount(bets, m)
@@ -386,49 +550,73 @@ local function resolveMarket(bets, m, winPick, stake)
   for i = 1, #winners do
     deltas[winners[i]] = share + (i == 1 and dust or 0)
   end
-  return deltas, #winners, pot
+  return deltas, #winners, pot, #losers
+end
+
+-- Provenance id for one settled market (SCOPE.md 4.5 + CONCURRENCY.md 3.4):
+-- game, bookie, token, attempt, market. The bookie is in it because tokens are
+-- only unique per host now.
+local function marketId(rec, a, m)
+  return "PB:" .. rec.bookie .. ":" .. rec.token .. ":" .. (a.seq or 0) .. ":" .. m
 end
 
 -- Settles one market: applies ledger deltas and records the result line in the
 -- caller's report (rep), which decides afterwards whether the moment gets the
 -- stage or the quiet toasts. winPick == nil means the market is void by rule
 -- (unreadable result / no FD). Silent when nobody bet the market.
-local function settleMarket(a, m, winPick, label, rep)
+local function settleMarket(rec, a, m, winPick, label, rep)
   if marketBetCount(a.bets, m) == 0 then return end
   if not winPick then
     repAdd(rep, P.chgray .. label .. ": void, stakes returned.|r", nil,
-      label .. ": void, stakes returned", "fade")
+      label .. ": void, stakes returned", "fade", "pb-" .. m)
     return
   end
-  local deltas, nWin, pot = resolveMarket(a.bets, m, winPick, book.stake)
+  local deltas, nWin, pot, nLose = resolveMarket(a.bets, m, winPick, rec.stake)
   if not deltas then
     repAdd(rep, P.chgray .. label .. ": void (not enough action), stakes returned.|r", nil,
-      label .. ": void (not enough action)", "fade")
+      label .. ": void (not enough action)", "fade", "pb-" .. m)
     return
   end
-  for name, delta in pairs(deltas) do
-    PG.Ledger.Add(name, delta, a.reason)
-    bookTally(name, delta) -- presentation-only tally for the closing podium
-  end
   local me = PG.FullName("player")
-  local mine = me and deltas[me]
+  local mine2 = me and deltas[me]
+  -- Ledger: one commit per settled market, all-or-nothing, with provenance.
+  -- G1 (participation) is the caller's declaration and the gate re-checks it
+  -- against the rows: a client that did not back this market keeps its UI
+  -- mirror and writes nothing, which is what keeps two books - or a book and a
+  -- Loot Goblins game - from producing divergent advisory ledgers.
+  PG.Ledger.Commit({
+    id = marketId(rec, a, m),
+    game = "PB",
+    host = rec.bookie,
+    scope = rec.scope,
+    at = (type(time) == "function") and time() or nil,
+    played = (mine2 ~= nil),
+    cap = rec.stake * math.max(1, nWin + (nLose or 0)),
+    label = a.reason,
+  }, deltas)
+  for name, delta in pairs(deltas) do
+    bookTally(rec, name, delta) -- presentation-only tally for the closing podium
+  end
   local won = nWin .. (nWin == 1 and " winner takes " or " winners split ")
   local line = label .. ": " .. won .. P.chgold .. PG.Money(pot) .. "|r"
   local snd
-  if mine then
-    line = line .. " - you " .. (mine >= 0 and (P.chgreen .. "+" .. PG.Money(mine) .. "|r")
-      or (P.chred .. PG.Money(mine) .. "|r"))
+  if mine2 then
+    line = line .. " - you " .. (mine2 >= 0 and (P.chgreen .. "+" .. PG.Money(mine2) .. "|r")
+      or (P.chred .. PG.Money(mine2) .. "|r"))
     snd = "settled"
-    rep.mine = (rep.mine or 0) + mine
+    rep.mine = (rep.mine or 0) + mine2
   end
   rep.paid = rep.paid + 1
-  repAdd(rep, line, snd, label .. ": " .. won .. tmoney(pot), "win")
+  repAdd(rep, line, snd, label .. ": " .. won .. tmoney(pot), "win",
+    "pb-" .. m, "result")
 end
 
 -- Resolves the first-death market and ends the attempt. winPick nil -> void.
 local function finishD(winPick, deadName)
   local a = attempt
   if not a or not a.resolvedKW or a.dDone then return end
+  local book = myBook()
+  if not book then return end
   a.dDone = true
   if marketBetCount(a.bets, "D") > 0 then
     if winPick then
@@ -438,17 +626,21 @@ local function finishD(winPick, deadName)
       local rep = newReport()
       rep.head = header .. "."
       rep.sub = word .. " fell first" .. (deadName and (" - " .. shortOf(deadName)) or "")
-      settleMarket(a, "D", winPick, "First death bet", rep)
-      emitReport(rep, "FIRST DEATH", "point")
+      settleMarket(book, a, "D", winPick, "First death bet", rep)
+      emitReport(rep, book, "FIRST DEATH", "point")
     else
-      queueToast(P.chgray .. "First death bet: void, stakes returned.|r")
+      toast(P.chgray .. "First death bet: void, stakes returned.|r", book, { key = "pb-D" })
     end
   end
   attempt = nil
 end
 
-local function newAttempt()
-  return { bets = {}, frozen = false, snap = lastSnap }
+-- Attempts are numbered per book so a settled market's ledger id is unique
+-- across the book's life. No wire message may create one (CONCURRENCY.md 4.5):
+-- only the bookie's own READY_ON / COUNTDOWN_ON does.
+local function newAttempt(rec)
+  rec.attemptSeq = (rec.attemptSeq or 0) + 1
+  return { bets = {}, frozen = false, snap = lastSnap, seq = rec.attemptSeq }
 end
 
 -------------------------------------------------------------------------------
@@ -462,17 +654,18 @@ local function hideStrip()
 end
 
 local function refreshStrip()
+  local book = myBook()
   if not (strip and book) then return end
   local pre = mark("ticket")
   if pre ~= "" then pre = pre .. " " end
   strip.title:SetText(pre .. "The Pull Book - " .. PG.Money(book.stake) .. " a bet")
   local me = PG.FullName("player")
-  local mine = (attempt and me) and attempt.bets[me] or nil
+  local mine2 = (attempt and me) and attempt.bets[me] or nil
   local bets = attempt and attempt.bets or nil
   for r = 1, #MARKETS do
     local mk = MARKETS[r]
     local btns = strip.rows[mk.m]
-    local locked = mine and mine[mk.m]
+    local locked = mine2 and mine2[mk.m]
     local lockedBtn
     for i = 1, #btns do
       local b = btns[i]
@@ -529,8 +722,8 @@ end
 local function popLock(m)
   if not (strip and strip:IsShown() and PG.Theme and PG.Theme.Pulse) then return end
   local me = PG.FullName("player")
-  local mine = (attempt and me) and attempt.bets[me] or nil
-  local locked = mine and mine[m]
+  local mine2 = (attempt and me) and attempt.bets[me] or nil
+  local locked = mine2 and mine2[m]
   if not locked then return end
   local btns = strip.rows[m]
   if not btns then return end
@@ -540,6 +733,7 @@ local function popLock(m)
 end
 
 local function placeBet(m, p)
+  local book = myBook()
   local a = attempt
   if not (book and a) or a.frozen then return end
   if PG.Comm.Locked() then return end
@@ -553,6 +747,7 @@ local function placeBet(m, p)
   -- a bet nobody else saw. Everyone, including us, keeps the first pick per
   -- market, so a rare duplicate send stays consistent group-wide.
   PG.Comm.BroadcastEx({
+    scope = book.scope,
     onSent = function()
       if attempt ~= a or a.frozen then return end
       local s = PG.Safety.state
@@ -566,7 +761,12 @@ local function placeBet(m, p)
       refreshStrip()
       popLock(m) -- decoration only; the lock above is already committed
     end,
-  }, "PB", "BET", book.token, m, p)
+    -- The bookie rides along as the LAST field, so f1/f2 keep their meaning and
+    -- no other handler shifts. Identity is the PAIR (CONCURRENCY.md 4.5):
+    -- tokens are only host-unique now, and a BET is a BROADCAST every client in
+    -- earshot applies, so without the bookie a colliding token folds another
+    -- table's bettors into our book and settles them at OUR stake.
+  }, "PB", "BET", book.token, m, p, book.bookie)
 end
 
 local function buildStrip()
@@ -652,6 +852,7 @@ local function buildStrip()
 end
 
 local function maybeShowStrip()
+  local book = myBook()
   local s = PG.Safety.state
   if not (book and attempt) or attempt.frozen then return end
   if s.inEncounter or s.restricted or s.inCombat then return end
@@ -662,79 +863,166 @@ local function maybeShowStrip()
 end
 
 -------------------------------------------------------------------------------
--- Book lifecycle
+-- Book lifecycle: creation, eviction, supersession, the sweep, the one ticker
 -------------------------------------------------------------------------------
 
-local function clearAll(toastText)
-  if hbTicker then
-    hbTicker:Cancel()
-    hbTicker = nil
+local function addLauncherRow(rec)
+  if not (PG.Launcher and PG.Launcher.AddOpenGame) then return end
+  pcall(PG.Launcher.AddOpenGame, {
+    game = "PB", host = rec.bookie, token = rec.token,
+    scope = rec.scope, expires = rec.expires,
+  })
+end
+
+local function removeLauncherRow(rec)
+  if not (PG.Launcher and PG.Launcher.RemoveOpenGame) then return end
+  pcall(PG.Launcher.RemoveOpenGame, "PB", rec.bookie, rec.token)
+end
+
+-- The ONLY place a record leaves the registry, and the only place `mine` is
+-- cleared. Every eviction poisons the key, takes down the launcher row and any
+-- invitation it raised, and - for the involved record - drops the attempt and
+-- the strip with it, so an overheard book can never leave state behind.
+local function evict(rec)
+  if not rec or books[rec.key] ~= rec then return end
+  books[rec.key] = nil
+  poison(rec.key)
+  if rec.askKey then PG.UI.Dismiss(rec.askKey) end -- PB raises none today; teardown stays exact
+  removeLauncherRow(rec)
+  if mine == rec.key then
+    mine = nil
+    attempt = nil
+    hideStrip()
   end
-  if staleTicker then
-    staleTicker:Cancel()
-    staleTicker = nil
-  end
-  -- closing podium first: it reads the book's tally before the state is
-  -- dropped, and its subtitle is the closing line itself, so the toast would
-  -- only repeat it. Queued like everything else; queueing never touches state.
-  local staged = closePodium(toastText)
-  book, attempt = nil, nil
-  hideStrip()
+end
+
+-- Ends one book and says so. The closing podium reads the record's tally before
+-- the state is dropped, and its subtitle is the closing line itself, so the
+-- toast would only repeat it. Queueing never touches state.
+local function closeBook(rec, text)
+  if not rec then return end
+  local staged = false
+  if rec.key == mine then staged = closePodium(rec, text) end
+  evict(rec)
+  if text and not staged then toast(text, rec) end
   if refreshDialog then refreshDialog() end
-  if toastText and not staged then queueToast(toastText) end
 end
 
-local function startHBTicker()
-  if hbTicker then hbTicker:Cancel() end
-  hbTicker = PG.Ticker(HB_SECS, function()
-    if book and book.isBookie and not PG.Comm.Locked() then
-      PG.Comm.Broadcast("PB", "HB", book.token)
-    end
-  end)
+local function adoptFull(rec)
+  rec.kind = "full"
+  rec.expires = nil
+  rec.lastHB = GetTime()
+  books[rec.key] = rec
+  mine = rec.key
+  attempt = nil
+  removeLauncherRow(rec)
+  ensureTicker()
+  if refreshDialog then refreshDialog() end
 end
 
-local function startStaleTicker()
-  if staleTicker then staleTicker:Cancel() end
-  lastHB = GetTime()
-  staleTicker = PG.Ticker(5, function()
-    if not book or book.isBookie then return end
-    local s = PG.Safety.state
-    if s.inEncounter or s.restricted or PG.Comm.Locked() then
-      lastHB = GetTime() -- bookie cannot legally send; suspend the deadline
-      return
-    end
-    if GetTime() - lastHB > HB_MISS_SECS then
-      clearAll("The Pull Book closed (lost contact with the bookie).")
-    end
-  end)
+local function addLite(rec)
+  rec.kind = "lite"
+  rec.expires = GetTime() + LITE_TTL
+  books[rec.key] = rec
+  addLauncherRow(rec)
+  ensureTicker()
 end
 
--- Bookie: broadcast the first-death adjudication after the restriction lifts,
--- and resolve D locally only once the FD has ACTUALLY gone out (onSent, not
--- the queued-ok return value): a queued-then-lockdown-dropped FD leaves the
--- attempt intact, so the 1/4/8s retries still apply and, failing those, the
--- 20s deadline voids D here identically to every client. Duplicate FDs from
--- overlapping retries are harmless: everyone (including us) settles D once.
-local function bookieSendFD()
-  local a = attempt
-  if not (book and book.isBookie and a and a.resolvedKW) then return end
-  if a.dDone or a.fdSent then return end
-  if PG.Comm.Locked() then return end
-  local role, name = "NONE", "-"
-  if a.firstDeath then
-    role, name = a.firstDeath.role, a.firstDeath.name
+-- Row 6 of the decision table: at the cap, the oldest overheard book yields.
+local function evictOldestLite()
+  local oldest
+  for _, rec in pairs(books) do
+    if rec.kind == "lite" and (not oldest or (rec.openedAt or 0) < (oldest.openedAt or 0)) then
+      oldest = rec
+    end
   end
-  PG.Comm.BroadcastEx({
-    onSent = function()
-      if attempt ~= a or a.dDone then return end
-      a.fdSent = true
-      if role == "NONE" then
-        finishD(nil, nil)
+  if oldest then evict(oldest) end
+end
+
+-- CONCURRENCY.md 4.3: the newest OPEN from a given bookie replaces that
+-- bookie's previous book on every client, unconditionally, at any age. It is
+-- deterministic without any comparison because the bookie is the sole authority
+-- for its own books: if it is opening a new one, its old one is over on the
+-- bookie, whatever we still believe. This is what un-strands a client that
+-- missed CLOSE and would otherwise be silently excluded from every future book.
+local function supersede(sender, token)
+  for _, rec in pairs(books) do
+    if rec.bookie == sender and rec.token ~= token then
+      if rec.kind == "full" then
+        closeBook(rec, shortOf(sender) .. " opened a new Pull Book - the old one is closed.")
       else
-        finishD(role, name)
+        evict(rec) -- silently: it never had a popup or a settlement
       end
-    end,
-  }, "PB", "FD", book.token, role, name)
+    end
+  end
+end
+
+local function sweep()
+  local now = GetTime()
+  for _, rec in pairs(books) do
+    if rec.kind == "lite" and now > (rec.expires or 0) then evict(rec) end
+  end
+  while recentQ[1] and (now - (recent[recentQ[1]] or 0)) > RECENT_TTL do
+    local key = table.remove(recentQ, 1)
+    recent[key] = nil
+  end
+end
+
+-- `recent` deliberately does NOT hold the ticker up: it is capped at
+-- MAX_RECENT keys and its TTL is re-checked at lookup, so a poisoned key needs
+-- no timer to stay correct.
+local function stopTickerIfIdle()
+  if not regTicker then return end
+  if next(books) or revealQ[1] then return end
+  regTicker:Cancel()
+  regTicker = nil
+end
+
+-- ONE ticker for the module (I9): the bookie's heartbeat and transport
+-- watchdog, the client's liveness deadline, the 2-second registry sweep and the
+-- results-stage pump all ride it. It runs only while the registry or the stage
+-- queue has something in it.
+local function onTick()
+  tickN = tickN + 1
+  local book = myBook()
+  if book then
+    local now = GetTime()
+    if book.isBookie then
+      -- SCOPE.md 6.1: the audience the book was opened for has to still exist.
+      -- Availability is a group test, not a lockdown test, so a boss fight
+      -- never trips this - but a loading screen can blink the group away for a
+      -- frame, so the loss has to persist before the book dies. Sends are
+      -- refused for the whole grace anyway (Comm checks availability too).
+      local ok, why = PG.Comm.ScopeAvailable(book.scope, 8)
+      if not ok then
+        book.scopeLostAt = book.scopeLostAt or now
+        if (now - book.scopeLostAt) >= 5 then
+          closeBook(book, "The Pull Book closed - " .. (why or "that audience is gone."))
+        end
+      else
+        book.scopeLostAt = nil
+        if not PG.Comm.Locked() and (now - (book.lastSend or 0)) >= HB_SECS then
+          book.lastSend = now
+          PG.Comm.Broadcast(book.scope, "PB", "HB", book.token)
+        end
+      end
+    else
+      local s = PG.Safety.state
+      if s.inEncounter or s.restricted or PG.Comm.Locked() then
+        book.lastHB = now -- the bookie cannot legally send; suspend the deadline
+      elseif (now - (book.lastHB or 0)) > HB_MISS_SECS then
+        closeBook(book, "The Pull Book closed (lost contact with the bookie).")
+      end
+    end
+  end
+  if (tickN % 4) == 0 then sweep() end
+  pumpReveal()
+  stopTickerIfIdle()
+end
+
+ensureTicker = function()
+  if regTicker then return end
+  regTicker = PG.Ticker(TICK, onTick)
 end
 
 -------------------------------------------------------------------------------
@@ -742,6 +1030,7 @@ end
 -------------------------------------------------------------------------------
 
 local function resolveEncounter(encounterName, success, encounterUnitStatus)
+  local book = myBook()
   local a = attempt
   if not (book and a and a.frozen) or a.resolvedKW then return end
   a.resolvedKW = true
@@ -789,13 +1078,14 @@ local function resolveEncounter(encounterName, success, encounterUnitStatus)
   end
 
   -- succ unreadable/secret -> both immediate markets void
-  settleMarket(a, "K", succ and (succ == 1 and "Y" or "N") or nil, "Kill bet", rep)
-  settleMarket(a, "W", bossPct and (bossPct > book.line and "O" or "U") or nil, "Boss HP bet", rep)
+  settleMarket(book, a, "K", succ and (succ == 1 and "Y" or "N") or nil, "Kill bet", rep)
+  settleMarket(book, a, "W", bossPct and (bossPct > book.line and "O" or "U") or nil,
+    "Boss HP bet", rep)
   -- the D market is still out; say so on the stage rather than leave a gap
   if marketBetCount(a.bets, "D") > 0 then
     repAdd(rep, nil, nil, "First death bet: settling...", "body")
   end
-  emitReport(rep, "THE BOOK SETTLES", "excited")
+  emitReport(rep, book, "THE BOOK SETTLES", "excited")
 
   PG.After(FD_VOID_SECS, function()
     if attempt == a and not a.dDone then finishD(nil, nil) end
@@ -817,6 +1107,7 @@ end
 -- the roster snapshot is the attempt's first death.
 local function onUnitDied(_, guid)
   pcall(function()
+    local book = myBook()
     if not (book and book.isBookie) then return end
     local a = attempt
     if not a or not a.frozen or a.resolvedKW or a.firstDeath then return end
@@ -832,17 +1123,42 @@ end
 -- Bookie dialog
 -------------------------------------------------------------------------------
 
+-- The picker is the authority on the audience; "group" is the floor because it
+-- is the only audience this game has ever had.
+local function pickedScope()
+  if picker and picker.Get then
+    local s = picker:Get()
+    if s and PG.PB.SCOPES[s] then return s end
+    return nil
+  end
+  return "group"
+end
+
 local function tryOpenBook()
-  if book then
+  -- I3: this module is already involved in a book. The dialog explains itself
+  -- (the status panel replaces the config widgets); it never refuses blankly,
+  -- and it never consults another module, the seat, or anyone else's session.
+  if myBook() then
     refreshDialog()
     return
   end
-  if not IsInGroup() then
-    queueToast("The Pull Book needs a group.")
+  local scope = pickedScope()
+  if not scope then
+    local _, why = PG.Comm.ScopeAvailable("group")
+    toast("The Pull Book: " .. (why or "you're not in a party or raid."))
+    if picker then picker:Refresh() end
+    return
+  end
+  -- re-checked at the moment Start is pressed: the player can leave the group
+  -- between opening this dialog and clicking (SCOPE.md 1.3)
+  local ok, why = PG.Comm.ScopeAvailable(scope)
+  if not ok then
+    toast("The Pull Book: " .. (why or "that audience isn't available."))
+    if picker then picker:Refresh() end
     return
   end
   if PG.Comm.Locked() then
-    queueToast("Cannot open the book right now (messaging is locked).")
+    toast("Cannot open the book right now (messaging is locked).")
     return
   end
   local me = PG.FullName("player")
@@ -854,20 +1170,32 @@ local function tryOpenBook()
   local line = math.floor(tonumber(lineBox:GetText() or "") or 50)
   if line < LINE_MIN then line = LINE_MIN elseif line > LINE_MAX then line = LINE_MAX end
   lineBox:SetText(tostring(line))
-  local token = (UnitName("player") or "?") .. "-" .. math.random(10000, 99999)
-  if PG.Comm.Broadcast("PB", "OPEN", token, stake, line) then
-    book = { token = token, bookie = me, stake = stake, line = line, isBookie = true }
-    startHBTicker()
+  local token = nextToken()
+  local code = PG.Comm.ScopeCode(scope)
+  if not code then return end
+  if PG.Comm.Broadcast(scope, "PB", "OPEN", token, stake, line, code) then
+    -- built synchronously in the frame that broadcast it, so a double click
+    -- cannot emit two OPENs: the check at the top of this function now sees it
+    local key = keyOf(me, token)
+    books[key] = {
+      kind = "full", key = key, token = token, bookie = me, scope = scope,
+      stake = stake, line = line, isBookie = true,
+      openedAt = GetTime(), lastSend = GetTime(), lastHB = GetTime(),
+    }
+    mine = key
+    attempt = nil
+    ensureTicker()
     refreshDialog()
-    queueToast("The Pull Book is open - " .. P.chgold .. PG.Money(stake) .. "|r a bet, wipe line "
+    toast("The Pull Book is open - " .. P.chgold .. PG.Money(stake) .. "|r a bet, wipe line "
       .. line .. "%.")
   end
 end
 
 local function bookieClose()
+  local book = myBook()
   if not (book and book.isBookie) then return end
-  PG.Comm.Broadcast("PB", "CLOSE", book.token)
-  clearAll("You closed the Pull Book.")
+  PG.Comm.Broadcast(book.scope, "PB", "CLOSE", book.token)
+  closeBook(book, "You closed the Pull Book.")
 end
 
 local function numBox(parent, labelText, defaultText, maxLetters, y)
@@ -887,7 +1215,7 @@ local function numBox(parent, labelText, defaultText, maxLetters, y)
 end
 
 local function buildDialog()
-  dlg = PG.UI.Window("pullbook", "The Pull Book", 340, 300, "faire")
+  dlg = PG.UI.Window("pullbook", "The Pull Book", 340, 340, "faire")
   local stakeLabel, lineLabel, hint, openBtn, poster, posterOK
   -- notice-board poster (SKIN.md 2.6). The poster slot is positioned whether
   -- or not the atlas renders, so the layout never depends on the art: the
@@ -912,8 +1240,29 @@ local function buildDialog()
   end
   stakeBox, stakeLabel = numBox(dlg, "Stake per bet (gold)", "100", 6, -136)
   lineBox, lineLabel = numBox(dlg, "Wipe line (boss HP %)", "50", 2, -168)
+  -- Audience (SCOPE.md 5.3): all three segments render, Guild and Public
+  -- permanently disabled with the reason. This is not decoration - it is the
+  -- answer to "why can't I run a book for the guild", delivered at the exact
+  -- moment the question is asked.
+  if PG.UI.ScopePicker then
+    picker = PG.UI.ScopePicker(dlg, {
+      key = "PB",
+      allowed = PG.PB.SCOPES,
+      width = 340,
+      reasons = function(scope)
+        if scope == "group" then return nil end
+        return WIDE_SCOPE_REASON
+      end,
+    })
+    picker:SetPoint("TOPLEFT", dlg, "TOPLEFT", 0, -200)
+  end
   openBtn = PG.UI.Button(dlg, mark("ticket") .. " Open book", 150, 24, tryOpenBook)
   openBtn:SetPoint("BOTTOM", 30, 18)
+  -- bottom-LEFT belongs to the goblin bookie here, so the rules sit right
+  local dlgRules = PG.UI.Button(dlg, "Rules", 56, 22, function()
+    if PG.Rules and PG.Rules.Show then PG.Rules.Show("PB") end
+  end)
+  dlgRules:SetPoint("BOTTOMRIGHT", -10, 18)
   statusFS = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   statusFS:SetPoint("TOPLEFT", 24, -56)
   statusFS:SetPoint("TOPRIGHT", -24, -56)
@@ -923,6 +1272,7 @@ local function buildDialog()
   closeBtn = PG.UI.Button(dlg, "Close book", 150, 24, bookieClose)
   closeBtn:SetPoint("BOTTOM", 30, 18)
   configWidgets = { stakeLabel, stakeBox, lineLabel, lineBox, hint, openBtn }
+  if picker then configWidgets[#configWidgets + 1] = picker end
   if posterOK then configWidgets[#configWidgets + 1] = poster end
   -- decorative goblin bookie in the bottom-left corner (SKIN.md 2.6)
   if PG.Theme and PG.Theme.NPC then
@@ -937,16 +1287,17 @@ local function buildDialog()
     end)
   end
   -- stamp + sound garnish on the dialog buttons; hooks run AFTER the click
-  -- handler, so `book` already reflects whether the action actually happened
+  -- handler, so the registry already reflects whether the action happened
   if PG.Theme then
     openBtn:HookScript("OnClick", function()
+      local book = myBook()
       if book and book.isBookie then
         if PG.Theme.Sound then PG.Theme.Sound("stamp") end
         if PG.Theme.Stamp then PG.Theme.Stamp(dlg, "BOOK OPEN") end
       end
     end)
     closeBtn:HookScript("OnClick", function()
-      if not book then
+      if not myBook() then
         if PG.Theme.Sound then PG.Theme.Sound("bookclose") end
         if PG.Theme.Stamp then PG.Theme.Stamp(dlg, "BOOK CLOSED") end
       end
@@ -954,18 +1305,42 @@ local function buildDialog()
   end
 end
 
+-- How many other books we can hear right now (lite records). One line in the
+-- status panel: an overheard book is not a second book we are in, and the only
+-- thing the user can do with it is switch once this one ends.
+local function otherBookLine()
+  local n, who = 0, nil
+  for _, rec in pairs(books) do
+    if rec.kind == "lite" then
+      n = n + 1
+      who = who or shortOf(rec.bookie)
+    end
+  end
+  if n == 0 then return "" end
+  if n == 1 then
+    return "\n\n" .. P.chgray .. who .. " is running another book - it's in the Pengyou Games window.|r"
+  end
+  return "\n\n" .. P.chgray .. n .. " other books are open - they're in the Pengyou Games window.|r"
+end
+
 refreshDialog = function()
   if not dlg then return end
+  local book = myBook()
   local isOpen = book ~= nil
   for i = 1, #configWidgets do
     configWidgets[i]:SetShown(not isOpen)
   end
   statusFS:SetShown(isOpen)
   closeBtn:SetShown(isOpen and book.isBookie or false)
+  -- availability is a live query: the config side reappearing after a book ends
+  -- must show the audience as it is now, not as it was when the book opened
+  if not isOpen and picker then picker:Refresh() end
   if book then
     local who = book.isBookie and "Your book is open" or (shortOf(book.bookie) .. "'s book is open")
     statusFS:SetText(who .. " - " .. P.chgold .. tmoney(book.stake) .. "|r a bet, wipe line "
-      .. book.line .. "%.\n\nThe bet strip appears at every ready check or pull timer.")
+      .. book.line .. "%.\n\nAudience: Party."
+      .. "\n\nThe bet strip appears at every ready check or pull timer."
+      .. otherBookLine())
   end
 end
 
@@ -975,61 +1350,184 @@ function PG.PB.OpenDialog()
   dlg:Show()
 end
 
+-- A view of the books we can hear but are not in, for the launcher's Open games
+-- list (CONCURRENCY.md 5.10). It is a view, not a second store: rows come from
+-- lite records and disappear when those records are evicted.
+function PG.PB.OpenBooks()
+  local out = {}
+  for _, rec in pairs(books) do
+    if rec.kind == "lite" then
+      out[#out + 1] = {
+        game = "PB", host = rec.bookie, token = rec.token, scope = rec.scope,
+        stake = rec.stake, line = rec.line, expires = rec.expires,
+      }
+    end
+  end
+  table.sort(out, function(x, y) return x.host < y.host end)
+  return out
+end
+
+-- Switch to an overheard book (the launcher's Join button). No wire traffic:
+-- joining a book is just agreeing to score the same pull, and betting starts at
+-- the next ready check. Refused while we are already in one - first book wins,
+-- and full multi-book is deliberately not v1 (CONCURRENCY.md 9.8).
+function PG.PB.JoinBook(host, token)
+  local h, t = PG.SafeStr(host), PG.SafeStr(token)
+  if not (h and t) then return false end
+  local rec = books[keyOf(h, t)]
+  if not rec or rec.kind ~= "lite" then return false end
+  if myBook() then
+    toast("You're already in " .. shortOf(myBook().bookie) .. "'s Pull Book.")
+    return false
+  end
+  adoptFull(rec)
+  toast(shortOf(rec.bookie) .. "'s Pull Book - " .. P.chgold .. PG.Money(rec.stake)
+    .. "|r a bet, wipe line " .. rec.line .. "%.", rec)
+  return true
+end
+
 -------------------------------------------------------------------------------
 -- Wire handling
+--
+-- Gate order (CONCURRENCY.md 5.2). Gates a-e are Comm's (version, distribution
+-- -> scope, accept/trust, rate limit, module route). Here:
+--   f  mtype class      bookie-authored vs the table's BET; unknown -> drop
+--   g  session          books[keyOf(sender, token)], or - for BET - the
+--                       involved book matched on (bookie, token). No record ->
+--                       drop. THIS is what makes two books non-interfering; the
+--                       old `token ~= book.token` test was a filter, not a
+--                       router, and matching a BET on the token alone let a
+--                       colliding token cross-contaminate the settlement.
+--   h  kind             a lite record accepts only CLOSE (evict) and HB
+--                       (refresh). It never reaches an applier.
+--   i  scope equality   blocks re-broadcasting a book's token on another
+--                       distribution.
+--   j  sender authority bookie-authored is guaranteed by g's key; BET must come
+--                       from someone actually at the table.
 -------------------------------------------------------------------------------
 
-local function onMessage(mtype, token, sender, f1, f2)
-  if PG.IsSecret(token) or PG.IsSecret(f1) or PG.IsSecret(f2) then return end
-  if type(token) ~= "string" then return end
+-- Everything a lite record is allowed to do: die, or stay alive a little longer.
+local function liteObserve(rec, mtype)
+  if mtype == "HB" then
+    rec.lastHB = GetTime()
+    rec.expires = GetTime() + LITE_TTL
+  elseif mtype == "CLOSE" then
+    evict(rec)
+  end
+end
 
-  if mtype == "OPEN" then
-    local stake = tonumber(f1)
-    local line = tonumber(f2)
-    if not (stake and line) then return end
-    stake, line = math.floor(stake), math.floor(line)
-    if stake < STAKE_MIN or stake > STAKE_MAX then return end
-    if line < LINE_MIN or line > LINE_MAX then return end
-    if book then
-      -- one book per group: any OPEN while a book is live is ignored
-      if book.token == token and sender == book.bookie then lastHB = GetTime() end
-      return
-    end
-    book = { token = token, bookie = sender, stake = stake, line = line, isBookie = false }
-    startStaleTicker()
-    refreshDialog()
-    queueToast(shortOf(sender) .. " opened the Pull Book - " .. P.chgold .. PG.Money(stake)
-      .. "|r a bet, wipe line " .. line .. "%.")
+-- Decision table for an inbound OPEN (CONCURRENCY.md 4.2), evaluated in order.
+-- Row 1 (self) is Comm's; rows 2-7 are here. Note what is NOT here any more:
+-- the blanket "a book is already open, ignore" refusal. An OPEN is never
+-- refused because a session exists.
+local function onOpen(token, sender, scope, f1, f2, f3)
+  -- row 2: malformed fields, or a scope this game does not play to
+  local stake = PG.SafeNum(f1)
+  local line = PG.SafeNum(f2)
+  if not (stake and line) then return end
+  stake, line = math.floor(stake), math.floor(line)
+  if stake < STAKE_MIN or stake > STAKE_MAX then return end
+  if line < LINE_MIN or line > LINE_MAX then return end
+  -- the declared code exists to be CHECKED against the delivered distribution,
+  -- never trusted: a wire field can claim guild on a PARTY message, a
+  -- distribution cannot (SCOPE.md 3.1)
+  local declared = PG.Comm.ScopeOfCode(PG.SafeStr(f3))
+  if not declared or declared ~= scope then return end
+  if scope == "private" then return end -- an OPEN must never arrive by whisper
+  if not PG.PB.SCOPES[scope] then return end
+
+  local key = keyOf(sender, token)
+  -- row 3: a finished book's key can never be resurrected
+  if recent[key] and (GetTime() - recent[key]) < RECENT_TTL then return end
+  -- row 4: idempotent. A retransmitted OPEN refreshes liveness and nothing else
+  local rec = books[key]
+  if rec then
+    rec.lastHB = GetTime()
+    if rec.kind == "lite" then rec.expires = GetTime() + LITE_TTL end
     return
   end
+  -- row 5: supersession (which may have just freed the full slot)
+  supersede(sender, token)
+  -- row 6: the lite budget. Only relevant when this OPEN is heading for a lite
+  -- record; with no book of our own it becomes the full one instead.
+  if mine and liteCount() >= MAX_LITE then evictOldestLite() end
 
-  if not book or token ~= book.token then return end
+  -- row 7: create the record
+  rec = {
+    key = key, token = token, bookie = sender, scope = scope,
+    stake = stake, line = line, isBookie = false, openedAt = GetTime(),
+    lastHB = GetTime(),
+  }
+  if not mine then
+    -- First book wins, as it always has. At party scope hearing the book IS the
+    -- invitation: there is no seat, no buy-in and nothing to consent to until
+    -- the strip appears at the next pull, and the local player can simply not
+    -- bet. (I7's "no state without consent" is a WIDE-scope rule; the Pull Book
+    -- has no wide scope, by physics.)
+    adoptFull(rec)
+    toast(shortOf(sender) .. " opened the Pull Book - " .. P.chgold .. PG.Money(stake)
+      .. "|r a bet, wipe line " .. line .. "%.", rec)
+  else
+    -- We are already in a book: this one is remembered cheaply and offered in
+    -- the launcher. Silent - a second bookie must not interrupt the first one's
+    -- table (CONCURRENCY.md 6.2).
+    addLite(rec)
+  end
+end
+
+local function onMessage(mtype, token, sender, scope, f1, f2, f3)
+  if PG.IsSecret(f1) or PG.IsSecret(f2) or PG.IsSecret(f3) then return end
+  if type(mtype) ~= "string" or type(sender) ~= "string" then return end
+  if not validToken(token) then return end
+  if mtype == "OPEN" then return onOpen(token, sender, scope, f1, f2, f3) end
+
+  -- gate f + g
+  local rec
+  if BOOKIE_AUTHORED[mtype] then
+    rec = books[keyOf(sender, token)]
+  elseif mtype == "BET" then
+    -- gate g: identity is the PAIR, and BET is the one broadcast in the suite
+    -- that cannot be keyed on the sender - so it names its bookie (f3). Without
+    -- that field a token collision (host-unique only, CONCURRENCY.md 3.2) folds
+    -- another table's bettors into our book and pays them at our stake, which is
+    -- the single place two sessions can corrupt each other's numbers.
+    -- PG.SafeStr returns nil for a secret or non-string, and m.bookie is always
+    -- a realm-qualified string, so a missing field drops the message.
+    local m = myBook()
+    if m and m.token == token and PG.SafeStr(f3) == m.bookie then rec = m end
+  else
+    return
+  end
+  if not rec then return end
+  if rec.kind == "lite" then return liteObserve(rec, mtype) end -- gate h
+  if scope ~= rec.scope then return end                          -- gate i
 
   if mtype == "BET" then
-    if attempt and attempt.frozen then return end -- post-freeze bets ignored
+    -- gate j: a bet moves other people's money, so the sender must be at the
+    -- table. No wire message may fabricate an attempt (CONCURRENCY.md 4.5):
+    -- only the bookie's own READY_ON / COUNTDOWN_ON opens a bet window.
+    local a = attempt
+    if not a or a.frozen then return end -- post-freeze bets ignored
     local s = PG.Safety.state
     if s.inEncounter or s.restricted then return end
     if type(f1) ~= "string" or not (VALID_PICK[f1] and VALID_PICK[f1][f2]) then return end
-    -- a BET implies a bet window we may have missed the event for
-    if not attempt then attempt = newAttempt() end
-    local picks = attempt.bets[sender]
+    if not inGroupNow(sender) then return end
+    local picks = a.bets[sender]
     if not picks then
       picks = {}
-      attempt.bets[sender] = picks
+      a.bets[sender] = picks
     end
     if not picks[f1] then picks[f1] = f2 end -- first pick per market locks
     refreshStrip() -- presentation only: the chalk tallies are live backer counts
     return
   end
 
-  if sender ~= book.bookie then return end
-
+  -- everything below is bookie-authored, and gate g already proved the sender
+  -- IS this record's bookie (the key is bookie|token)
+  rec.lastHB = GetTime()
   if mtype == "CLOSE" then
-    clearAll(shortOf(sender) .. " closed the Pull Book.")
-  elseif mtype == "HB" then
-    lastHB = GetTime()
+    closeBook(rec, shortOf(sender) .. " closed the Pull Book.")
   elseif mtype == "FD" then
-    lastHB = GetTime()
     if f1 == "NONE" then
       finishD(nil, nil)
     elseif f1 == "T" or f1 == "H" or f1 == "D" then
@@ -1039,13 +1537,50 @@ local function onMessage(mtype, token, sender, f1, f2)
   end
 end
 
-local function onDrop(mtype)
-  -- Lockdown drops are permanent (never retried). A dropped OPEN means nobody
-  -- heard the book exists; un-open it. Dropped BET/FD/HB: the ledger is
-  -- social, not authoritative (documented v1 limitation) - nothing to redo.
-  if mtype == "OPEN" and book and book.isBookie then
-    clearAll("The book could not be opened (messaging is locked).")
+-- Lockdown drops are permanent (never retried). The token says WHICH book lost
+-- the message, so another session's drop can never abort ours (CONCURRENCY.md
+-- 5.5). A dropped OPEN means nobody heard the book exists; un-open it. Dropped
+-- BET/FD/HB: the ledger is social, not authoritative (documented v1
+-- limitation) - nothing to redo.
+local function onDrop(mtype, token)
+  if mtype ~= "OPEN" then return end
+  local book = myBook()
+  if not (book and book.isBookie) then return end
+  if PG.SafeStr(token) ~= book.token then return end
+  closeBook(book, "The book could not be opened (messaging is locked).")
+end
+
+-------------------------------------------------------------------------------
+-- Bookie: broadcast the first-death adjudication after the restriction lifts,
+-- and resolve D locally only once the FD has ACTUALLY gone out (onSent, not
+-- the queued-ok return value): a queued-then-lockdown-dropped FD leaves the
+-- attempt intact, so the 1/4/8s retries still apply and, failing those, the
+-- 20s deadline voids D here identically to every client. Duplicate FDs from
+-- overlapping retries are harmless: everyone (including us) settles D once.
+-------------------------------------------------------------------------------
+
+bookieSendFD = function()
+  local book = myBook()
+  local a = attempt
+  if not (book and book.isBookie and a and a.resolvedKW) then return end
+  if a.dDone or a.fdSent then return end
+  if PG.Comm.Locked() then return end
+  local role, name = "NONE", "-"
+  if a.firstDeath then
+    role, name = a.firstDeath.role, a.firstDeath.name
   end
+  PG.Comm.BroadcastEx({
+    scope = book.scope,
+    onSent = function()
+      if attempt ~= a or a.dDone then return end
+      a.fdSent = true
+      if role == "NONE" then
+        finishD(nil, nil)
+      else
+        finishD(role, name)
+      end
+    end,
+  }, "PB", "FD", book.token, role, name)
 end
 
 -------------------------------------------------------------------------------
@@ -1053,6 +1588,7 @@ end
 -------------------------------------------------------------------------------
 
 local function onSafetyChange(state, trigger)
+  local book = myBook()
   if trigger == "READY_ON" or trigger == "COUNTDOWN_ON" then
     if not book then return end
     if state.inEncounter or state.restricted or PG.Comm.Locked() then return end
@@ -1064,7 +1600,7 @@ local function onSafetyChange(state, trigger)
       and (GetTime() - (attempt.resolvedAt or 0)) > 3 then
       finishD(nil, nil)
     end
-    if not attempt then attempt = newAttempt() end
+    if not attempt then attempt = newAttempt(book) end
     if attempt.frozen then return end
     if book.isBookie and not state.inCombat then
       lastSnap = PG.RosterSnapshot() -- snapshot only out of combat (rule 4 hygiene)
@@ -1113,6 +1649,11 @@ PG.RegisterInit(function()
     end
   end
   PG.Comm.Register("PB", onMessage, onDrop)
+  -- The Pull Book is party-only, so every whisper it could ever receive is
+  -- already covered by Comm's group test: it vouches for nobody (SCOPE.md 4.3).
+  if PG.Comm.RegisterTrust then
+    PG.Comm.RegisterTrust("PB", function() return false end)
+  end
   PG.Safety.OnChange(onSafetyChange)
   PG.RegisterEvent("ENCOUNTER_END", onEncounterEnd)
   PG.RegisterEvent("UNIT_DIED", onUnitDied) -- registration pcall-guarded in the hub

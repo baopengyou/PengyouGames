@@ -79,7 +79,20 @@ function PG.Ticker(sec, fn) return C_Timer.NewTicker(sec, fn) end
 -------------------------------------------------------------------------------
 
 local DB_DEFAULTS = {
-  profile = { sounds = false, dnd = false, scale = 1, positions = {}, hideInCombat = false },
+  -- profile.scope: last audience the user picked per game (SCOPE.md 5.5).
+  -- Written by PG.UI.ScopePicker on an explicit click only; a fallback to an
+  -- available scope never overwrites it.
+  profile = {
+    sounds = false, dnd = false, scale = 1, positions = {}, hideInCombat = false,
+    -- profile.scopeIn: which wider audiences may reach us at all (SCOPE.md 5.6).
+    -- Guild defaults ON, matching Comm's guildScopeOn(); copyDefaults only fills
+    -- nils, so a user who turned it off keeps it off across sessions.
+    -- profile.publicOptIn is deliberately NOT seeded: its default is off, absent
+    -- reads as false everywhere, and a stray `true` here would silently join the
+    -- public channel on first login.
+    scopeIn = { guild = true },
+    scope = { LG = "group", RPS = "group", PB = "group" },
+  },
   ledger = { sessions = {}, lifetime = {} },
 }
 
@@ -229,6 +242,128 @@ PG.RegisterInit(function()
 end)
 
 -------------------------------------------------------------------------------
+-- PG.Session - the single round-based seat (CONCURRENCY.md 1.2, 2.3).
+--
+-- A person PLAYS at most one round-based game at a time. That is the ONLY
+-- exclusivity in the suite: unlimited sessions may exist around you, hosting is
+-- never blocked, and every pending invitation stays visible until one is
+-- accepted. This holder is the whole mechanism.
+--
+--   I1  One seat, globally, across LG and RPS combined. `seat` below is
+--       single-valued or nil, and PG.Session.Claim / PG.Session.Release are its
+--       only writers - no module may write it directly.
+--   I2  The seat spans join (or self-seating host) through phase == "done" and
+--       nothing else. Release from endSession and the withdrawal path only; the
+--       reveal stage, podium, results window and record memory never hold it.
+--   I5  Referee hosting: a player seated in one module may HOST in the other
+--       without taking a second seat. PG.Session.ClaimHost is that rule; it
+--       cannot refuse, so hosting is never blocked (I4).
+--   I10 The Pull Book neither claims nor consults the seat - it is passive
+--       pre-pull betting and runs alongside anything. PullBook.lua must contain
+--       zero references to PG.Session, permanently.
+--
+-- Same shape as PG.Safety.OnChange above: register a callback, get told.
+-------------------------------------------------------------------------------
+
+PG.Session = {}
+
+local seat = nil  -- { module = "LG", token = "1a-7f3", host = "Name-Realm" } or nil
+local seatCbs = {}
+
+-- Callers get a copy, never the holder itself: "read-only view" is an
+-- invariant (I1), not a request.
+local function seatView()
+  if not seat then return nil end
+  return { module = seat.module, token = seat.token, host = seat.host }
+end
+
+-- fn(seat, prev): both are views or nil. Errors in one listener never stop the
+-- others (a module that blows up while withdrawing its invitations must not
+-- strand the seat).
+local function fireSeatChange(prev)
+  local view = seatView()
+  for i = 1, #seatCbs do
+    local ok, err = pcall(seatCbs[i], view, prev)
+    if not ok then geterrorhandler()(err) end
+  end
+end
+
+-- module and token identify the seat; host is carried for user-facing text
+-- ("You're playing Grizzle's Loot Goblins game."). All three arrive from the
+-- wire on the client accept path, so all three are validated here.
+local function seatArgs(module, token, host)
+  module, token, host = PG.SafeStr(module), PG.SafeStr(token), PG.SafeStr(host)
+  if not module or module == "" then return nil end
+  if not token or token == "" then return nil end
+  return module, token, (host ~= "" and host) or "?"
+end
+
+-- Take the single round-based seat. Idempotent for the same (module, token).
+-- Returns:
+--   true                             seat taken (or already ours)
+--   false, heldModule, heldHost      someone else's session holds it
+--   false                            arguments rejected (secret/empty)
+function PG.Session.Claim(module, token, host)
+  local m, t, h = seatArgs(module, token, host)
+  if not m then return false end
+  if seat then
+    if seat.module == m and seat.token == t then return true end
+    return false, seat.module, seat.host
+  end
+  seat = { module = m, token = t, host = h }
+  fireSeatChange(nil)
+  return true
+end
+
+-- Referee hosting (I5). Hosting is NEVER blocked by the seat (I4), so this
+-- always lets the caller proceed; it only reports which way.
+--   true                          the host is a player in its own game
+--   false, heldModule, heldHost   the host referees: no seat, no roster entry,
+--                                 no buy-in, no pick, no ledger row for itself
+-- hostOpen's single permitted PG.Session reference is this call, and it must
+-- not be able to return early on the result.
+function PG.Session.ClaimHost(module, token, host)
+  local ok, heldModule, heldHost = PG.Session.Claim(module, token, host)
+  if ok then return true end
+  return false, heldModule, heldHost
+end
+
+-- No-op unless (module, token) currently holds the seat, so every teardown path
+-- may call it unconditionally. Returns true if a seat was actually freed.
+function PG.Session.Release(module, token)
+  local m, t = seatArgs(module, token, nil)
+  if not m then return false end
+  if not seat or seat.module ~= m or seat.token ~= t then return false end
+  local prev = seatView()
+  seat = nil
+  fireSeatChange(prev)
+  return true
+end
+
+-- Read-only view of the seat, or nil. Copy: mutating it changes nothing.
+function PG.Session.Seat() return seatView() end
+
+-- "Busy" in CONCURRENCY.md 6.1 means exactly this and nothing else. Hosting is
+-- not busy; holding lite records is not busy; a Pull Book is not busy.
+function PG.Session.IsSeated() return seat ~= nil end
+
+-- Does this exact session hold the seat? The cheap form of Seat() for the
+-- per-record tests (a referee host answers false for its own session).
+function PG.Session.Holds(module, token)
+  local m, t = seatArgs(module, token, nil)
+  if not m or not seat then return false end
+  return seat.module == m and seat.token == t
+end
+
+-- fn(seat, prev) on every transition. This is how a module learns to withdraw
+-- its outstanding invitations when the player seats themselves elsewhere
+-- (CONCURRENCY.md 5.6 rule 3).
+function PG.Session.OnChange(fn)
+  if type(fn) ~= "function" then return end
+  seatCbs[#seatCbs + 1] = fn
+end
+
+-------------------------------------------------------------------------------
 -- Peers: who else in the group runs the addon, learned from CO|HELLO.
 -------------------------------------------------------------------------------
 
@@ -236,16 +371,24 @@ PG.Peers = {} -- [fullName] = versionString
 
 local peerSeen = {} -- [fullName] = GetTime() of last HELLO received
 local lastHelloSent = 0
-local addonVersion = "0.1.0"
+local addonVersion = "0.6.0"
 
 local function sendHello()
   if not (PG.Comm and PG.Comm.Broadcast) then return end
   lastHelloSent = GetTime()
-  PG.Comm.Broadcast("CO", "HELLO", "-", addonVersion)
+  -- Scope LEADS on Broadcast since 0.6.0 (SCOPE.md 2.2). CO HELLO is always a
+  -- group fact: it answers "who else in my party/raid runs this addon", which is
+  -- what the host's join-window line counts (CONCURRENCY.md 6.3).
+  PG.Comm.Broadcast("group", "CO", "HELLO", "-", addonVersion)
 end
 
-local function onCoMessage(mtype, token, sender, ver)
+-- scope is the router's derived audience ("group"/"guild"/"public"/"private"),
+-- passed to every handler since 0.6.0; ver is the peer's addon version.
+local function onCoMessage(mtype, token, sender, scope, ver)
   if mtype ~= "HELLO" then return end
+  -- PG.Peers is a group-scope fact and is rendered as "(N of M addon users)" in
+  -- the host's join window: a guild or public HELLO must never inflate it.
+  if scope ~= "group" and scope ~= "private" then return end
   if PG.IsSecret(ver) or type(ver) ~= "string" or ver == "" then ver = "?" end
   local now = GetTime()
   local last = peerSeen[sender]
@@ -281,6 +424,8 @@ local function onSlash(msg)
     if PG.PB and PG.PB.OpenDialog then PG.PB.OpenDialog() end
   elseif cmd == "rps" then
     if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
+  elseif cmd == "rules" then
+    if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
   elseif cmd == "settings" then
     if PG.Settings and PG.Settings.Show then PG.Settings.Show() end
   elseif cmd == "ledger" then
@@ -300,6 +445,19 @@ local function onSlash(msg)
     DEFAULT_CHAT_FRAME:AddMessage("PengyouGames comm: lockdown=" .. ld
       .. "  publicChatRestricted=" .. pub .. " (info only, not used as a gate)"
       .. "  -> Locked=" .. tostring(PG.Comm.Locked()))
+    -- SCOPE.md 5.7: the audience diagnostic. Availability is a live query, so
+    -- this line is the one place a user can see why a segment is greyed out.
+    if PG.Comm.ScopeAvailable then
+      local parts = {}
+      local names = { "group", "guild", "public" }
+      for i = 1, #names do
+        local okS, why = PG.Comm.ScopeAvailable(names[i])
+        parts[i] = names[i] .. "=" .. (okS and "ok" or tostring(why or "no"))
+      end
+      local idx = PG.Comm.PublicIndex and PG.Comm.PublicIndex()
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames scope: " .. table.concat(parts, "  ")
+        .. "  publicIndex=" .. (idx and tostring(idx) or "none"))
+    end
   elseif cmd == "debug" then
     PG.debug = not PG.debug
     DEFAULT_CHAT_FRAME:AddMessage("PengyouGames: debug " .. (PG.debug and "ON" or "OFF"))

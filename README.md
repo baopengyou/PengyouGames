@@ -36,6 +36,7 @@ addon installed; group members without it are simply never bothered.
 | `/pg dnd` | Toggle Do Not Disturb (suppresses popups and toasts) |
 | `/pg settings` | Open settings (sounds, DND, minimap button, combat hiding, window scale, layout reset) |
 | `/pg minimap` | Show/hide the minimap button |
+| `/pg rules` | Open the Rules explainer (one page per game) |
 
 There is also a coin-shaped **minimap button**: left-click opens the launcher, right-click
 toggles DND, and dragging it moves it around the minimap rim.
@@ -45,6 +46,41 @@ corner (the whole window scales, and each window remembers its own size). Window
 **never overlap each other**: opening or dragging one onto another nudges it to the
 nearest clear spot.
 | `/pg debug` | Toggle local debug output |
+
+## Who you play with
+
+When you start a game you pick its **audience** from the scope selector in the start
+dialog:
+
+| Scope | Who it reaches |
+|---|---|
+| **Party** | Your party or raid, as always |
+| **Guild** | Every online guild member running the addon, including guildmates on other realms -- no group needed |
+| **Public** | Everyone on your realm and its connected realms running the addon, same faction |
+
+Loot Goblins and Rock Paper Scissors support all three. **The Pull Book is party only**,
+because it is scored from the boss fight you are personally standing in -- a guildmate in
+a city cannot see the same result you do.
+
+Public uses a hidden chat channel that the addon joins for you. Nothing is ever printed
+to your chat windows, but it does occupy one of your ten channel slots, so it is opt-in
+from `/pg settings`.
+
+## Playing more than one game at once
+
+You can only **play** one game at a time, but any number of games can be running around
+you -- including two Loot Goblins games in the same raid. If several are open you will
+see an invite for each and pick the one you want; accepting one withdraws the rest.
+Starting a game is never blocked by someone else's game.
+
+The Pull Book is the exception in the other direction: it is passive betting on your own
+pulls, so it runs happily alongside whatever else you are playing.
+
+## Rules
+
+Not sure how something works? `/pg rules`, or the **Rules** button in the launcher and on
+every game's start dialog. One page per game, in plain language, including how scoring
+works and who you can play with.
 
 ## The games
 
