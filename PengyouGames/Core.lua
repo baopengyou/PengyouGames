@@ -91,7 +91,18 @@ local DB_DEFAULTS = {
     -- reads as false everywhere, and a stray `true` here would silently join the
     -- public channel on first login.
     scopeIn = { guild = true },
-    scope = { LG = "group", RPS = "group", PB = "group" },
+    -- QZ is all-scopes (SCOPE.md 4.3) and is seeded to the NARROWEST of them,
+    -- matching RPS: a wider default would put a first-time host in front of the
+    -- guild before they knew the picker existed.
+    -- DR and GB are group-only, so their entries can never hold anything but
+    -- "group" - the picker offers one segment and a click writes back what is
+    -- already there. They are seeded anyway, on The Pull Book's precedent
+    -- (also group-only, also seeded): one entry per shipped game reads as a
+    -- complete list, where a half-seeded table invites the next reader to
+    -- conclude the missing games have no picker at all. copyDefaults only fills
+    -- nils, so no existing user preference is touched either way.
+    scope = { LG = "group", RPS = "group", PB = "group",
+              DR = "group", GB = "group", QZ = "group" },
   },
   ledger = { sessions = {}, lifetime = {} },
 }
@@ -126,6 +137,79 @@ function PG.ToggleDND()
   if PG.Settings and PG.Settings.Refresh then PG.Settings.Refresh() end
   return p.dnd
 end
+
+-------------------------------------------------------------------------------
+-- Session tokens (CONCURRENCY.md 3.2).
+--
+-- Identity is the PAIR (host, token): `sender` is server-vouched and realm-
+-- qualified, so a token only has to be unique inside ONE character's history.
+-- The mechanism is the persisted monotonic counter; the three random base-36
+-- characters after it are a seatbelt for a SavedVariables rollback, where the
+-- counter can go backwards, and nothing else. The counter is incremented AND
+-- persisted BEFORE the caller receives its token, so a client that dies between
+-- minting and broadcasting can never reissue a number it already used.
+--
+-- Typical result "1a-7f3": 6 bytes on every message of a session, against up to
+-- 18 for the realm-less "Thrall-48120" form this replaced.
+--
+-- This shipped late. CONCURRENCY.md 3.2 specified PG.NextToken, Core never
+-- provided it, and Loot Goblins, Pull Book and Rock Paper Scissors each grew a
+-- private fallback minter that PREFERS PG.NextToken when it exists. All three
+-- therefore start sharing this counter the moment this function is defined,
+-- with no edit to any of them - which is the point: one counter across every
+-- module is more monotonic than three, never less.
+-------------------------------------------------------------------------------
+
+local B36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+
+local function b36(n)
+  n = math.floor(PG.SafeNum(n) or 0)
+  if n <= 0 then return "0" end
+  local out = ""
+  while n > 0 do
+    local d = n % 36
+    out = B36:sub(d + 1, d + 1) .. out
+    n = math.floor(n / 36)
+  end
+  return out
+end
+
+-- Never returns nil: every caller's local fallback minter is the same code with
+-- the same limits, so refusing here would buy nothing and cost a session its
+-- identity. Always satisfies the shipped wire validation (CONCURRENCY.md 3.4:
+-- non-empty, <= 24 bytes, no "|") - the counter would need 36^11 sessions on one
+-- character to reach even half that length.
+function PG.NextToken()
+  local p = PG.db and PG.db.profile
+  local seq = 1
+  if p then
+    seq = (PG.SafeNum(p.seq) or 0) + 1
+    -- A corrupt or hand-edited profile could hold a negative or non-numeric
+    -- seq; without this, b36() floors every one of them to "0" and the counter
+    -- silently stops being a counter.
+    if seq < 1 then seq = 1 end
+    p.seq = seq
+  end
+  -- Padded, unlike the game files' fallbacks: one draw in 36 lands below 36 and
+  -- would otherwise carry a one-character seatbelt, which is not the three
+  -- characters the format claims and is 1296 times weaker.
+  local r = b36(math.random(0, 46655))
+  while #r < 3 do r = "0" .. r end
+  return b36(seq) .. "-" .. r
+end
+
+PG.RegisterInit(function()
+  -- One seed for the whole addon, before anything can mint. Lua's generator is
+  -- deterministic from a fixed seed, so unseeded every client draws the SAME
+  -- "random" sequence after login - exactly the case the seatbelt exists to
+  -- cover. The first draws after a seed are weakly distributed in some builds;
+  -- three throwaways cost nothing.
+  local base = (type(time) == "function" and tonumber(time())) or 0
+  local frac = (type(GetTimePreciseSec) == "function" and tonumber(GetTimePreciseSec()))
+    or (type(GetTime) == "function" and tonumber(GetTime())) or 0
+  math.randomseed(math.floor((base * 1000 + frac * 1000) % 2147483647))
+  math.random() math.random() math.random()
+end)
 
 -------------------------------------------------------------------------------
 -- Safety state machine: hides all registered UI the instant any raid-critical
@@ -249,18 +333,25 @@ end)
 -- never blocked, and every pending invitation stays visible until one is
 -- accepted. This holder is the whole mechanism.
 --
---   I1  One seat, globally, across LG and RPS combined. `seat` below is
---       single-valued or nil, and PG.Session.Claim / PG.Session.Release are its
---       only writers - no module may write it directly.
+--   I1  One seat, globally, across every round-based module - LG, RPS, DR, GB
+--       and QZ as of 1.1.0 (BRIEF 1.1). `seat` below is single-valued or nil,
+--       and PG.Session.Claim / PG.Session.Release are its only writers - no
+--       module may write it directly. Each of the three new games demands a
+--       timed decision from a human, which is the whole test in
+--       CONCURRENCY.md 1.1; QZ claims despite being points-only, exactly as
+--       RPS does, because the seat is a rule about ATTENTION, not about gold.
 --   I2  The seat spans join (or self-seating host) through phase == "done" and
 --       nothing else. Release from endSession and the withdrawal path only; the
 --       reveal stage, podium, results window and record memory never hold it.
---   I5  Referee hosting: a player seated in one module may HOST in the other
+--   I5  Referee hosting: a player seated in one module may HOST another
 --       without taking a second seat. PG.Session.ClaimHost is that rule; it
 --       cannot refuse, so hosting is never blocked (I4).
---   I10 The Pull Book neither claims nor consults the seat - it is passive
---       pre-pull betting and runs alongside anything. PullBook.lua must contain
---       zero references to PG.Session, permanently.
+--   I10 The Pull Book is the ONLY module that neither claims nor consults the
+--       seat - it is passive pre-pull betting and runs alongside anything.
+--       PullBook.lua must contain zero CALLS into this table, permanently.
+--       Check it with `grep -n 'PG%.Session%.' PengyouGames/Games/PullBook.lua`
+--       and not with a search for the bare name: the comment that documents
+--       the invariant contains the string "PG.Session" itself.
 --
 -- Same shape as PG.Safety.OnChange above: register a callback, get told.
 -------------------------------------------------------------------------------
@@ -367,11 +458,61 @@ end
 -- Peers: who else in the group runs the addon, learned from CO|HELLO.
 -------------------------------------------------------------------------------
 
-PG.Peers = {} -- [fullName] = versionString
+PG.Peers = {} -- [fullName] = versionString, LIVE group members only (see peerPrune)
 
 local peerSeen = {} -- [fullName] = GetTime() of last HELLO received
 local lastHelloSent = 0
-local addonVersion = "0.6.0"
+-- Fallback only: overwritten at init from the .toc via GetAddOnMetadata. It
+-- still goes on the wire in CO HELLO on any build without that API, so it has
+-- to be bumped with the .toc every release.
+local addonVersion = "1.1.0"
+
+-- PG.Peers answers exactly one question - "who else IN MY GROUP runs this
+-- addon" - and both readers count the table DIRECTLY (LootGoblins.lua and
+-- RockPaperScissors.lua each do `for _ in pairs(PG.Peers)` for the join
+-- window's "N of M addon users" line, CONCURRENCY.md 6.3). So the table itself
+-- has to shrink; a filtered accessor beside it would leave both shipped counts
+-- wrong. Until 1.1.0 nothing removed an entry at all: leave the raid, change
+-- groups, let a peer log out, and they stayed counted forever - inflating M in
+-- the optimistic direction, telling a host that more people can join than can.
+--
+-- The proof of presence is the LIVE group, re-derived here rather than trusted
+-- from a cache. An age-based expiry on peerSeen is deliberately NOT used as
+-- well: HELLO is sparse by design (one per roster change, at most one a
+-- minute), so a stable raid can run all night without a single one and any TTL
+-- short enough to be useful would evict peers who never left.
+local function peerPrune()
+  if next(PG.Peers) == nil then return end
+  local live = {}
+  local function mark(unit)
+    if not UnitExists(unit) then return end
+    -- The one thing GROUP_ROSTER_UPDATE alone cannot tell us: an offline raid
+    -- member keeps their slot in the roster, so presence is not membership.
+    -- Only a definite `false` removes anyone: a secret or missing answer means
+    -- "unknown", and unknown must not delete a peer who is standing right there.
+    if UnitIsConnected then
+      local conn = UnitIsConnected(unit)
+      if not PG.IsSecret(conn) and conn == false then return end
+    end
+    local n = PG.FullName(unit)
+    if n then live[n] = true end
+  end
+  if IsInRaid() then
+    for i = 1, GetNumGroupMembers() do mark("raid" .. i) end
+  elseif IsInGroup() then
+    for i = 1, GetNumGroupMembers() - 1 do mark("party" .. i) end
+  end
+  -- "player" is deliberately absent: Comm drops self-delivered messages, so we
+  -- are never in PG.Peers, which is why both readers render `peers + 1`. Solo,
+  -- `live` stays empty and every entry goes, which is the correct answer for a
+  -- group fact held by someone who is in no group.
+  for name in pairs(PG.Peers) do
+    if not live[name] then
+      PG.Peers[name] = nil
+      peerSeen[name] = nil
+    end
+  end
+end
 
 local function sendHello()
   if not (PG.Comm and PG.Comm.Broadcast) then return end
@@ -407,6 +548,10 @@ PG.RegisterInit(function()
   end
   if PG.Comm and PG.Comm.Register then PG.Comm.Register("CO", onCoMessage) end
   PG.RegisterEvent("GROUP_ROSTER_UPDATE", function()
+    -- The only event that reports somebody arriving, leaving or going offline,
+    -- so it is the only hook the prune needs; it fires long before any join
+    -- window is drawn from the result.
+    peerPrune()
     if GetTime() - lastHelloSent > 60 then sendHello() end
   end)
   PG.After(5, sendHello) -- initial hello, deferred past Comm's prefix registration
@@ -424,6 +569,14 @@ local function onSlash(msg)
     if PG.PB and PG.PB.OpenDialog then PG.PB.OpenDialog() end
   elseif cmd == "rps" then
     if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
+  -- Two-letter code AND a word for each of the 1.1.0 games: lg/book/rps
+  -- established no single convention, and "gb" on its own is unguessable.
+  elseif cmd == "dr" or cmd == "deathroll" then
+    if PG.DR and PG.DR.OpenDialog then PG.DR.OpenDialog() end
+  elseif cmd == "gb" or cmd == "gambler" then
+    if PG.GB and PG.GB.OpenDialog then PG.GB.OpenDialog() end
+  elseif cmd == "qz" or cmd == "quiz" then
+    if PG.QZ and PG.QZ.OpenDialog then PG.QZ.OpenDialog() end
   elseif cmd == "rules" then
     if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
   elseif cmd == "settings" then
@@ -458,6 +611,42 @@ local function onSlash(msg)
       DEFAULT_CHAT_FRAME:AddMessage("PengyouGames scope: " .. table.concat(parts, "  ")
         .. "  publicIndex=" .. (idx and tostring(idx) or "none"))
     end
+  elseif cmd == "rolls" then
+    -- The /roll parser is built from this client's own RANDOM_ROLL_RESULT and
+    -- self-tests at init (BRIEF 3.2). When it fails, Death Roll and Gambler
+    -- refuse to start and the cause is a locale string nobody can see, so this
+    -- makes it visible in one command - the same job /pg comm does for the send
+    -- gates. It is also the fastest way to answer "did my roll register?".
+    if not (PG.Rolls and PG.Rolls.Ready) then
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames rolls: module not loaded.")
+    else
+      local ready = PG.Rolls.Ready()
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames rolls: patternSelfTest="
+        .. (ready and "PASSED" or "FAILED")
+        .. "  canRollForYou=" .. tostring(PG.Rolls.Available())
+        .. "  RandomRoll=" .. type(_G.RandomRoll))
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames rolls: format=" .. tostring(_G.RANDOM_ROLL_RESULT)
+        .. (ready and "" or "  -> Death Roll and Gambler will refuse to start on this client"))
+      local seen = PG.Rolls.Since(0)
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames rolls: " .. #seen .. " observed recently"
+        .. " (only while out of encounter, ready check and pull timer)")
+      for i = math.max(1, #seen - 2), #seen do
+        local r = seen[i]
+        DEFAULT_CHAT_FRAME:AddMessage("  " .. r.name .. " rolled " .. r.value
+          .. " (" .. r.low .. "-" .. r.high .. ")")
+      end
+    end
+  elseif cmd == "help" then
+    -- Six games make "an unrecognized subcommand just opens the launcher" stop
+    -- being discoverable.
+    local f = DEFAULT_CHAT_FRAME
+    f:AddMessage("PengyouGames commands (everything prints only to you):")
+    f:AddMessage("  /pg                                    open the launcher")
+    f:AddMessage("  /pg lg | book | rps | dr | gb | quiz   start that game")
+    f:AddMessage("  /pg rules                              how to play")
+    f:AddMessage("  /pg ledger                             tonight's nets and Settle Up")
+    f:AddMessage("  /pg settings                           sounds, DND, minimap, scale")
+    f:AddMessage("  /pg dnd | minimap | comm | rolls | debug")
   elseif cmd == "debug" then
     PG.debug = not PG.debug
     DEFAULT_CHAT_FRAME:AddMessage("PengyouGames: debug " .. (PG.debug and "ON" or "OFF"))
