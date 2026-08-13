@@ -10,7 +10,17 @@ local PREFIX = "PENGYOU"
 -- client would mirror a wide-scope session under v2 rules and persist ledger
 -- rows every v3 participant deliberately refused to write, so v2 and v3 must
 -- never play together (SCOPE.md 3.4).
-local WIRE_VERSION = "3"
+-- v4 (1.2.0): Death Roll and Gambler stopped adjudicating rolls from
+-- CHAT_MSG_SYSTEM and now take a ROLLED whisper from each player's own client.
+-- The bump is NOT because a field moved - a v3 client would simply drop an
+-- unknown mtype. It is because of what a v3 client would DO at a v4 table: it
+-- never sends ROLLED, the v4 host no longer watches chat for anybody else, so
+-- that player is scored as a no-show and PAYS THE WAGER, silently, with no way
+-- to know why. That is a divergent ledger between participants of one game,
+-- which is the same thing the v2->v3 bump was made for (SCOPE.md 3.4). The cost
+-- is that v3 and v4 cannot play Loot Goblins, Pull Book or RPS together either;
+-- a visible "everyone needs to update" beats quietly taking somebody's gold.
+local WIRE_VERSION = "4"
 local MAX_BYTES = 250
 
 -- Scope (audience) enum. Exactly three values; the wire code travels as the
@@ -819,7 +829,7 @@ local function onChatMsgAddon(_, prefix, message, dist, sender, _, _, _, a8, a9)
     if not warnedVersion then
       warnedVersion = true
       if DEFAULT_CHAT_FRAME then
-        DEFAULT_CHAT_FRAME:AddMessage("PengyouGames: ignoring messages from a different protocol version - everyone needs 0.6.0 or later to play together.")
+        DEFAULT_CHAT_FRAME:AddMessage("PengyouGames: ignoring messages from a different protocol version - everyone needs 1.2.0 or later to play together.")
       end
     end
     return

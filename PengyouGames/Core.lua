@@ -468,7 +468,7 @@ local lastHelloSent = 0
 -- Fallback only: overwritten at init from the .toc via GetAddOnMetadata. It
 -- still goes on the wire in CO HELLO on any build without that API, so it has
 -- to be bumped with the .toc every release.
-local addonVersion = "1.1.0"
+local addonVersion = "1.2.0"
 
 -- PG.Peers answers exactly one question - "who else IN MY GROUP runs this
 -- addon" - and both readers count the table DIRECTLY (LootGoblins.lua and

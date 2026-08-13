@@ -2,7 +2,7 @@
 ## Title: Pengyou Games
 ## Notes: Six raid-downtime minigames with a shared virtual-gold ledger. /pg to start.
 ## Author: Pengyou
-## Version: 1.1.0
+## Version: 1.2.0
 ## SavedVariables: PengyouGamesDB
 
 # ORDERING RATIONALE
