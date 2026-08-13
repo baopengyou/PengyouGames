@@ -45,7 +45,7 @@ at in game. Some of the overlap complaints are expected to disappear with it.
 
 ---
 
-## Death Roll: rolls only worked for one of the two players (being fixed)
+## Death Roll: rolls only worked for one of the two players (FIXED, shipped)
 
 Found by the owner in a two-person live test: one player's rolls registered, the other
 player's never did.
@@ -61,15 +61,36 @@ This was self-inflicted. A security audit flagged the name mapping as a wrong-pa
 and the resolution was "drop the roll rather than guess which player it was" - which is safe
 for gold and identical, from the player's seat, to "you cannot roll."
 
-**The fix, per the owner's ruling.** Each client observes only its OWN roll and reports it
-over the wire; the host adjudicates from the reported roll rather than from a system message
-it may never resolve. Name matching disappears (you always know your own name, and an addon
-message's sender is server-vouched), and Death Roll and Gambler become playable at GUILD and
-PUBLIC scope, which the group-scoped `/roll` system message had made impossible.
+**What shipped.** Each client observes only its OWN roll and reports it to the host as a
+`ROLLED | seq | value | low | high` whisper; the host adjudicates from that report rather
+than from a system message it may never resolve, and broadcasts the authoritative outcome
+exactly as before. Name matching is gone from the roll path entirely - you always know your
+own name (`PG.FullName("player")`) and an addon message's sender is vouched by the delivery
+distribution. The host's own roll is applied locally and never whispered to itself.
 
-**Also per the owner's ruling:** the strict client-side verification comes out. The host is
-trusted, as it already is in Loot Goblins, Pull Book and Rock Paper Scissors. A client whose
-own observation disagrees may warn; it will not refuse to record the game. The reasoning,
+**And the strict client-side verification came out**, per the same ruling. The host is
+trusted, as it already is in Loot Goblins, Pull Book and Rock Paper Scissors: every client
+commits from the host's `END`/`RESULT`. A client whose own observation disagrees toasts it -
+for its own roll only, as information - and records the game anyway. `deriveOutcome`,
+`crossCheckOK`, `sawDecidingRolls`, the timing gates built to make a claimed timeout
+unforgeable, and Death Roll's duplicate-short-name cancel all went with it. The reasoning,
 in the owner's words: "we can't completely stop cheating in this, and that's okay ... it's
 best to not overengineer things to the point that we cripple being able to play the game at
 all."
+
+**Both games went to guild and public** in the same change, which is what the group-scoped
+`/roll` system message had made impossible. `PG.DR.SCOPES` and `PG.GB.SCOPES` are all three
+audiences, both modules carry the RPS-shaped whisper-trust predicate (a blanket `false`
+would have dropped every JOIN, `ROLLED` and `SYNCQ` from outside the group and made the new
+scopes dead on arrival), both pass `vouch` into `PG.Ledger.Commit` so public games record,
+both gained the wide-scope heartbeat pair, and Death Roll's group-absence scan now runs at
+group scope only.
+
+**Two things to watch in the next live test.**
+
+1. *Everyone at the table needs the addon.* There is no longer any way to score a player
+   who cannot report a roll, and a 1.1.0 client at a newer host's table is scored as a
+   no-show with no warning anywhere. If somebody "rolls and nothing happens", check their
+   version before anything else.
+2. *Guild and public are newly live for these two.* Nobody has played a wide-scope Death
+   Roll or Gambler against a real server yet.

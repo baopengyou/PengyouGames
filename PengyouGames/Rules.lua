@@ -196,7 +196,7 @@ local PAGES = {
         .. "for example /roll 743 - and a timer runs. You can type it yourself "
         .. "or press the ROLL button, which asks your own client to make that "
         .. "same roll. Either way it is a real, ordinary roll that lands in "
-        .. "everyone's chat." },
+        .. "chat like any other." },
       { "b", "Roll a 1 and you are out. Everyone else plays on, starting again "
         .. "from the opening number." },
       { "b", "Roll anything else and it becomes the next player's ceiling." },
@@ -220,26 +220,32 @@ local PAGES = {
         .. "copper. Settling up is manual and on the honour system - trade or "
         .. "mail it afterwards, or agree to ignore the whole thing. If a game "
         .. "is abandoned or the host disconnects, nobody owes anybody." },
-      { "h", "Everyone can see the rolls" },
-      { "p", "The rolls are ordinary rolls, so they appear in the chat of "
-        .. "everyone in your group, including people without the addon. That is "
-        .. "the point rather than a side effect. Nothing else about the game is "
-        .. "ever printed anywhere." },
-      { "p", "It also means nobody has to trust anybody's screen. Your own copy "
-        .. "of the game works out who won from the rolls it watched land, and "
-        .. "compares that with what the host announces. If the two disagree, or "
-        .. "if you missed part of the game, your copy records nothing at all "
-        .. "and tells you why." },
-      { "h", "Why it is party only" },
-      { "p", "A roll only reaches the group you are standing in, so only your "
-        .. "own party or raid can see the same rolls you do. A guildmate in a "
-        .. "city would be asked to bet gold on evidence they cannot see, so "
-        .. "guild and public are not offered here at all." },
+      { "h", "The rolls are real rolls" },
+      { "p", "Nothing here is a number the addon made up. You type /roll, the "
+        .. "game itself picks the number, and it lands in your chat frame where "
+        .. "you - and anybody standing next to you - can read it. That is the "
+        .. "point rather than a side effect, and nothing else about the game is "
+        .. "ever printed to chat." },
+      { "p", "Your own copy of the addon watches your roll and sends it to the "
+        .. "host, and that report is what the host scores. So everyone playing "
+        .. "needs the addon: somebody without it has nothing to send their roll "
+        .. "in with and cannot take part, though they can still watch. If the "
+        .. "host ever records a different number for your roll than the one you "
+        .. "saw, your copy tells you - for your own roll only." },
+      { "h", "Playing outside your group" },
+      { "p", "Guild and realm-wide games work exactly the same way: the rolls "
+        .. "reach the table through the addon, so the other players do not have "
+        .. "to be standing next to you to see them. The thing to remember is "
+        .. "the gold - it is virtual and settling up is on the honour system, "
+        .. "so a stranger who loses can simply log out. Keep the wager small "
+        .. "with people you cannot find again." },
       { "h", "Interruptions" },
       { "p", "A boss pull, ready check or pull timer hides everything instantly "
         .. "and your turn picks up afterwards with a fresh timer. Rolls made "
         .. "while the game is hidden do not count, for anyone. Ordinary combat "
-        .. "does not interrupt the game at all." },
+        .. "does not interrupt the game at all. If the host goes quiet in a "
+        .. "guild or realm-wide game the table simply waits - they are probably "
+        .. "in a boss fight - and picks up when they come back." },
     },
   },
   GB = {
@@ -278,22 +284,27 @@ local PAGES = {
       { "p", "All gold here is virtual and the addon never moves a single "
         .. "copper. Settling up is manual and on the honour system. If the game "
         .. "is abandoned or the host disconnects, nothing at all is recorded." },
-      { "h", "Everyone can see the rolls" },
-      { "p", "The rolls are ordinary rolls, so your whole group sees them in "
-        .. "chat whether or not they have the addon. That is what makes the "
-        .. "result impossible to argue with." },
-      { "p", "It is not just a nice idea either: your own copy of the game "
-        .. "works out the result from the rolls it watched land, and refuses to "
-        .. "record anything if that disagrees with what the host announces - or "
-        .. "if you were away and missed one of the two rolls that decided it." },
-      { "h", "Why it is party only" },
-      { "p", "A roll only reaches the group you are standing in, so only your "
-        .. "own party or raid can see the same rolls you do." },
+      { "h", "The rolls are real rolls" },
+      { "p", "The number is the game's, not the addon's. You roll it yourself "
+        .. "and watch it land in your own chat frame, where anybody standing "
+        .. "next to you can read it too - nobody has to take your word for it." },
+      { "p", "Your own copy watches YOUR roll and sends it to the host, and "
+        .. "that report is what the host scores. So a player without the addon "
+        .. "cannot take part: there is nothing on their side to send their roll "
+        .. "in. They can still watch." },
+      { "h", "Playing outside your group" },
+      { "p", "Guild and realm-wide games work exactly the same way, because "
+        .. "the rolls reach the table through the addon rather than through "
+        .. "your party chat. Remember that the gold is virtual and settling up "
+        .. "is on the honour system: a stranger who loses can simply log out, "
+        .. "so keep the number small with people you cannot find again." },
       { "h", "Interruptions" },
       { "p", "A boss pull, ready check or pull timer hides everything instantly "
         .. "and the roll window re-opens afterwards, with time put back on the "
         .. "clock. Rolls made while the game is hidden do not count, for "
-        .. "anyone. Ordinary combat does not interrupt the game at all." },
+        .. "anyone. Ordinary combat does not interrupt the game at all. In a "
+        .. "guild or realm-wide game a host who goes quiet is usually in a boss "
+        .. "fight, so the table waits for them rather than giving up." },
       { "h", "Playing again" },
       { "p", "Each game is a single round. Play again and it is a brand new "
         .. "game, with a fresh join window, so nobody is ever committed to more "
@@ -369,9 +380,11 @@ local function scopeBlocks(key)
       .. "a game." }
     return out
   end
+  local n = 0
   for i = 1, #SCOPE_ORDER do
     local s = SCOPE_ORDER[i]
     if supported[s] then
+      n = n + 1
       out[#out + 1] = { "b", SCOPE_WORDS[s] }
     end
   end
@@ -381,7 +394,15 @@ local function scopeBlocks(key)
   -- two, and hosting a game you do not play in has always been allowed. Both
   -- halves are stated here rather than left to the README, because far more
   -- people read this window than read the README.
-  out[#out + 1] = { "p", "You choose the audience when you start the game." }
+  -- Five of the six games offer all three audiences and the sixth offers one,
+  -- so this sentence has to know which page it is on: "you choose" in front of
+  -- a picker with a single enabled segment reads as a bug in the picker.
+  if n > 1 then
+    out[#out + 1] = { "p", "You choose the audience when you start the game." }
+  else
+    out[#out + 1] = { "p", "There is nothing to choose here - this is the only "
+      .. "audience this game can be played to, and the reason is above." }
+  end
   out[#out + 1] = { "p", "You play one game at a time. Loot Goblins, Rock Paper "
     .. "Scissors, Death Roll, The Gambler and Quiz all want your full "
     .. "attention, so while you are in one of them the invites for the others "

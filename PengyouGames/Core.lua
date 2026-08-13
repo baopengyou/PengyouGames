@@ -91,16 +91,19 @@ local DB_DEFAULTS = {
     -- reads as false everywhere, and a stray `true` here would silently join the
     -- public channel on first login.
     scopeIn = { guild = true },
-    -- QZ is all-scopes (SCOPE.md 4.3) and is seeded to the NARROWEST of them,
-    -- matching RPS: a wider default would put a first-time host in front of the
-    -- guild before they knew the picker existed.
-    -- DR and GB are group-only, so their entries can never hold anything but
-    -- "group" - the picker offers one segment and a click writes back what is
-    -- already there. They are seeded anyway, on The Pull Book's precedent
-    -- (also group-only, also seeded): one entry per shipped game reads as a
-    -- complete list, where a half-seeded table invites the next reader to
-    -- conclude the missing games have no picker at all. copyDefaults only fills
-    -- nils, so no existing user preference is touched either way.
+    -- Every entry is seeded to "group", the NARROWEST audience, and that is the
+    -- rule rather than a per-game fact: a wider default would put a first-time
+    -- host in front of their guild - or the whole realm - before they knew the
+    -- picker existed. LG, RPS, QZ, DR and GB all offer all three segments now
+    -- (DR and GB gained guild and public when the roll started travelling over
+    -- the wire instead of relying on a /roll line nobody outside the party
+    -- could see), so for those five this really is a PREFERENCE and the picker
+    -- writes back whatever the user last clicked. PB is the one game with a
+    -- single segment, and it is seeded on the same line for the same reason it
+    -- always was: one entry per shipped game reads as a complete list, where a
+    -- half-seeded table invites the next reader to conclude the missing games
+    -- have no picker at all. copyDefaults only fills nils, so no existing user
+    -- preference is touched either way.
     scope = { LG = "group", RPS = "group", PB = "group",
               DR = "group", GB = "group", QZ = "group" },
   },

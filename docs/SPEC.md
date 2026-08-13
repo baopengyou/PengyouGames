@@ -65,8 +65,10 @@ and are summarized in §2.
     does not deliver them late - whenever `PG.Comm.Locked()` is true or any raid-critical
     safety flag is up (encounter, ready check, countdown, restriction). The gate lives in
     `Rolls.lua` and not in the games so that no game can opt into the violation, and it is
-    what makes the freeze/resume path safe: every client discards identically, so a roll
-    made during an interruption counts for nobody.
+    what makes the freeze/resume path safe. Since 2026-08-13 a roll only counts if the
+    player who made it observed it and reported it (§10a), so the gate is now decisive
+    rather than merely uniform: a roll made during an interruption is never observed by the
+    one client that could have reported it, and therefore counts for nobody.
 13. TOC: `## Interface: 120007, 120100`. First line of the .toc must be a `##` directive,
     never a bare `#` comment (12.0.7 bug skips all directives otherwise).
 
@@ -405,18 +407,21 @@ files keep their exact relative positions and the new ones are appended.
   `RANDOM_ROLL_RESULT` (handling ordinal `%1$s` specifiers) and **self-tests it at init**;
   on failure it falls back to an English literal, re-tests, and if that also fails reports
   `Ready() == false` so the two `/roll` games refuse to start rather than opening a table
-  they could never score. It never fabricates a value, never guesses a name (it normalizes
-  and reports; the GAME matches against its own frozen roster and drops on ambiguity), and
-  it enforces the 2.12 gate above. `/pg rolls` prints its state.
+  they could never score. It never fabricates a value and never guesses a name: it
+  normalizes what the system line printed and reports it, and the GAME compares that with
+  `PG.FullName("player")` and ignores every roll that is not its own player's. (Until
+  2026-08-13 the game matched against its own frozen roster and dropped on ambiguity; that
+  match, and the ambiguity rule with it, is deleted - see §10a.) It enforces the 2.12 gate
+  above. `/pg rolls` prints its state.
 - **`Data\QuizData.lua`** - the shipped question bank (Trivia, Two Truths & a Lie,
   Unscramble, Type Race). It is a **protocol artefact, not content**: question text never
   travels, only pool indices do, so any edit to it must bump `PG.QuizData.VERSION`, which
   rides on `QZ OPEN` and is how a client with a divergent bank refuses to join instead of
   scoring against different text.
-- **`Games\DeathRoll.lua` (`DR`)** - sequential-turn elimination on a real `/roll`, group
-  scope only, writes gold. Degrades exactly to the classic 1v1 duel at two players.
-- **`Games\Gambler.lua` (`GB`)** - one roll each, lowest pays highest the difference, group
-  scope only, writes gold, one round per session.
+- **`Games\DeathRoll.lua` (`DR`)** - sequential-turn elimination on a real `/roll`, all three
+  audiences, writes gold. Degrades exactly to the classic 1v1 duel at two players.
+- **`Games\Gambler.lua` (`GB`)** - one roll each, lowest pays highest the difference, all
+  three audiences, writes gold, one round per session.
 - **`Games\Quiz.lua` (`QZ`)** - four question kinds, all three audiences, **points only**:
   zero calls into the ledger, permanently.
 
@@ -428,13 +433,60 @@ the moment a `CO`/`LG`/`PB`/`RPS` message layout changes, a `Ledger.Commit` gate
 changes such that one version would refuse a row the other writes for a game both can play,
 `PG.NextToken`'s validation loosens, or the derived-scope table changes.
 
-**`DR` and `GB` verify before they commit.** Because the evidence is public, every client
-re-derives the outcome from the rolls IT observed and compares that with the host's terminal
-message: agree -> commit; disagree -> commit nothing and say so; own observation had gaps ->
-commit nothing and say so. A host-authored result with no client-side check would let a
-modified host name any roster member the winner and every client would write zero-sum, fully
-vouched, gate-passing rows crediting the wrong person - the four ledger gates are arithmetic,
-not evidence, and cannot see that.
+## 10a. How a roll reaches the host in `DR` and `GB` (2026-08-13, supersedes the paragraph
+this replaced)
+
+**Every client observes only its OWN roll and REPORTS it over the wire.** New client -> host
+whisper, identical in both modules, sent at every scope like every other 1:1 message here:
+
+```
+ROLLED | seq | value | low | high
+```
+
+`seq` is the turn number in `DR` and the round number in `GB` (which has exactly one round,
+so it is the constant 1; the field exists so both games carry one wire shape). `low` must be
+1. Every field is `PG.SafeNum` range-checked before use and a malformed field drops the whole
+message, as everywhere else.
+
+Host validation, in order, each failure a silent drop: the sender is in the frozen roster;
+`low == 1` and `high` is the ceiling this host currently expects, with `value` inside that
+range; (`DR` only) the sender is the seat whose turn is open; the sender has not already
+reported for this `seq`, first report wins; the window is open and this is the `seq` it is
+open for. On success the host does exactly what it did with an observed roll: `DR` broadcasts
+`ROLL|seq|idx|value` and closes the turn, `GB` records the roll for the round. **The host's
+own roll is applied locally at observe time and never whispered to itself** (the §6 loopback
+rule).
+
+Byte budget, bounded by what the fields are VALIDATED to rather than by what an honest turn
+produces, and it does not grow with the roster: `DR` 58 bytes, `GB` 54, both at the 24-byte
+token cap.
+
+**The host is TRUSTED, as it already is in `LG`, `PB` and `RPS`; clients commit from its
+terminal message.** The paragraph that used to sit here said the opposite: every client
+re-derived the outcome from the rolls it observed and refused to commit when its own
+reconstruction disagreed. That is deleted on the owner's ruling of 2026-08-13. It could not
+tell a modified host from ordinary message jitter, and what it produced at a real table was
+a game that played to the end and recorded nothing for anybody. A client MAY still toast a
+mismatch - "the host recorded 412 for your roll; this client saw 407" - for **its own roll
+only**, as information. It must never refuse anything over it.
+
+What was kept, because none of it costs anything at the table: the whisper allowlist
+(`WHISPERABLE` + gate i), every wire field validation, range check and secret guard, and the
+roster digest at `BEGIN`, whose real job is catching honest desync. What went with the
+derivation: `deriveOutcome`, `crossCheckOK`, `sawDecidingRolls`, the timing gates built to
+make a claimed timeout unforgeable, the sync-credit provenance window, and `DR`'s duplicate
+short-name cancel (which existed only because of system-message name resolution).
+
+The residual is named rather than hidden: a MODIFIED host can name any roster member the
+winner and every client will write zero-sum, fully vouched, gate-passing rows crediting the
+wrong person. The four ledger gates are arithmetic, not evidence, and cannot see that. This
+is the same exposure `LG`, `PB` and `RPS` have always had, and it is now accepted here too.
+
+**A player without the addon can no longer take part in either game**: there is nobody to
+report their roll. Do not build a fallback that watches system messages for them - that is
+precisely the machinery this change removed. This also un-blocked guild and public scope for
+both games (see `SCOPE.md` §0b), because a `/roll` system line never left your own party and
+that was the entire reason they were group-locked.
 
 ## 11. Launcher.lua
 

@@ -1,11 +1,25 @@
 -- Rolls.lua - the /roll observer: the addon's ONE reader of CHAT_MSG_SYSTEM.
 -- Death Roll and Gambler are settled by a REAL in-game /roll rather than by a
--- number the addon invents, because the system line is PUBLIC: everyone in the
--- group sees the identical text, addon or no addon, so the result is evidence
--- instead of a claim. That is the whole reason those two games exist, and it is
--- what lets every client re-derive the outcome from the rolls IT saw before it
--- writes a single ledger row (BRIEF 2) - the one place this suite is stronger
--- than "the host says so".
+-- number the addon invents. The number is the SERVER's: you asked for it in
+-- public, you watched it land in your own chat, and the addon never generates
+-- one and never types in chat. That is still the whole reason those two games
+-- exist.
+--
+-- WHAT CHANGED, AND IT CHANGED WHAT THIS FILE IS FOR (ROLLBRIEF 2). This used
+-- to be the evidence layer for a whole table: every client watched EVERY
+-- player's roll and re-derived the outcome before writing a ledger row. That
+-- model is gone. A client now cares about exactly one roll - its own - which it
+-- reports to the host over the wire; the host adjudicates from the reports. The
+-- old model needed a name resolved out of a chat line against a frozen roster,
+-- and the miss in that lookup is what made a real two-player game unplayable.
+-- Nothing here resolves names against anything any more: a game compares the
+-- name this file reports with PG.FullName("player") and ignores every other
+-- roll. That is also what let those two games open up to guild and public,
+-- because a system line never left your own party in the first place.
+--
+-- This file is deliberately unchanged in shape. It still reports every accepted
+-- roll to every listener, because WHICH rolls matter is the game's business and
+-- because /pg rolls diagnoses a broken locale pattern from exactly that feed.
 local ADDON, PG = ...
 
 PG.Rolls = {}
@@ -19,13 +33,18 @@ PG.Rolls = {}
 --       is the GetTime() when it was observed. One callback per module code;
 --       registering again replaces it. Dispatch is pcall-wrapped per listener,
 --       so a broken game never stops the other one and never errors out of the
---       event handler.
+--       event handler. EVERY accepted roll is reported; both games throw away
+--       everything that is not their own player's on the first line of their
+--       callback, and no filtering happens here.
 --   PG.Rolls.Since(t)
 --       Accepted rolls with at >= t, oldest first, out of a bounded ring
 --       (RING_MAX entries, RING_TTL seconds). This exists because a window can
 --       open LATE - the host's TURN/ROUND queued behind the shared 10-token
 --       bucket - and without it the player watches their own correct roll get
---       ignored. A game drains this the instant it opens a window.
+--       ignored. A game drains this the instant it opens a window, and now that
+--       the game only counts a roll it reports itself, this ring is the only
+--       thing standing between "I rolled the moment the last result printed"
+--       and "you never rolled".
 --   PG.Rolls.Request(low, high) -> ok, why
 --       Asks the CLIENT to roll for real. ok == true means RandomRoll was
 --       called and nothing more: the number arrives later down the same
@@ -47,17 +66,27 @@ PG.Rolls = {}
 --      in-encounter signalling the spec bans absolutely, arrived at by accident.
 --      It has to be impossible by construction, not by convention.
 --   3. NO GUESSING AT NAMES. This file normalizes the name the system line gave
---      it (PG.NormalizeSender) and reports that. It does not know what a roster
---      is: matching a roll to a player is the GAME's job against its own frozen
---      roster, and the game drops the roll on any ambiguity (BRIEF 3.3). A wrong
---      guess here moves gold to the wrong character with no error anywhere,
---      which is strictly worse than a window the players can watch time out.
+--      it (PG.NormalizeSender) and reports that, and it does not know what a
+--      roster is. There USED to be a rule here about the game matching that
+--      name against its frozen roster and dropping the roll on any ambiguity;
+--      that rule is deleted, along with the matching it governed. The only
+--      comparison left anywhere is against PG.FullName("player") - your own
+--      name, which you always know - so there is no ambiguity to resolve and
+--      no wrong-payout risk to trade against. A name that still fails to
+--      normalize is dropped here, exactly as before.
 --
 -- "First valid roll per actor per window wins" is NOT enforced here: this file
 -- reports every accepted roll and the games hold the windows (BRIEF 3.5).
 -------------------------------------------------------------------------------
 
-local RING_MAX = 24        -- observed rolls kept at once
+-- 48, not 24, and the reason is the rework. The ring holds EVERY roll it hears,
+-- but the only one a game now looks for in it is the local player's - so every
+-- other roll in earshot is noise that can evict it. The Gambler opens one window
+-- and up to ROSTER_CAP = 40 players roll into it at once; at 24 the player who
+-- rolled first could have their own roll pushed out before their window opened
+-- and be scored as a no-show, holding a number they watched land. One entry per
+-- raid slot plus slack costs a few dozen small tables and closes that.
+local RING_MAX = 48        -- observed rolls kept at once
 local RING_TTL = 20        -- ... and for how many seconds
 local MAX_ROLL = 1000000   -- the client's own /roll ceiling; anything past it is not ours
 local MAX_NAME = 48        -- "Name-Realm" bound: stops a greedy capture becoming a name

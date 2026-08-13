@@ -8,22 +8,36 @@
 -- the sorted roster plus the two extreme rolls, and every client turns that into
 -- the same integer rows and commits them once.
 --
--- Two properties make this file different from Loot Goblins:
+-- HOW A ROLL REACHES THE HOST (ROLLBRIEF 2, and it used to be otherwise):
 --
---   1. The numbers arrive by LOCAL OBSERVATION (PG.Rolls, reading
---      CHAT_MSG_SYSTEM), not from the host. Only the framing messages need the
---      wire, so a comms lockdown cannot lose a roll - it can only pause the
---      window (BRIEF 3.4 discards observations while the gate is shut, so a
---      freeze is a real gap and the clock stops for it).
---   2. Every client watched the same system lines the host did, so a client can
---      CONTRADICT a dishonest host. BRIEF 2: derive the outcome from the rolls
---      you saw yourself, and on disagreement commit nothing. A healthy client
---      always agrees. This is the whole reason the owner chose a real /roll: the
---      rolls are the proof, and nobody has to trust anybody's screen.
+--   EVERY CLIENT OBSERVES ONLY ITS OWN ROLL AND REPORTS IT OVER THE WIRE, as a
+--   ROLLED whisper to the host. The host adjudicates from those reports plus its
+--   own roll; it never tries to read anybody else's system line.
 --
--- The addon NEVER generates a number and never types in public chat. The player
--- types /roll, or presses a button that calls RandomRoll behind an existence
--- guard - and even then nothing is assumed until the system line is observed.
+-- The version this replaced had the host watch CHAT_MSG_SYSTEM for EVERY
+-- player's /roll and resolve the printed name against the frozen roster. That
+-- lookup misses whenever a line arrives without a realm, and the roll was then
+-- dropped in silence: a real two-player test read as "my rolls count, theirs
+-- never do". Nothing about the fix is a compromise. You always know your own
+-- name, and the SENDER of an addon message is vouched by the delivery itself, so
+-- the whole name-matching path - and the ambiguity rule that broke the game -
+-- is simply gone.
+--
+-- What the local observation still buys, and it is the reason this game uses a
+-- real /roll rather than a number the addon invents: the number on your screen
+-- is the one the client rolled, in public, and you watched it land. The addon
+-- NEVER generates a number and never types in chat. The player types /roll, or
+-- presses a button that calls RandomRoll behind an existence guard - and even
+-- then nothing is assumed until the system line is observed.
+--
+-- THE HOST IS TRUSTED here, exactly as it is in Loot Goblins, The Pull Book and
+-- Rock Paper Scissors: clients commit the ledger from its RESULT. A client may
+-- TELL its player that the host scored their own roll differently from what they
+-- watched, but it must never refuse to record a game over it. The refusal that
+-- used to live here is what turned a hardening pass into an unplayable game.
+--
+-- A player without the addon can no longer take part: there is nobody to report
+-- their roll. That is a real, small loss and it is the honest price.
 --
 -- ONE ROUND PER SESSION. Play again mints a new session (same-host supersession,
 -- CONCURRENCY.md 4.3), so there is no round number anywhere in this file, one
@@ -44,40 +58,41 @@ PG.GB = {}
 local TICK = 0.5             -- master ticker period (drives all session timing)
 local HB_INTERVAL = 10       -- host heartbeat cadence
 local HB_PROBE = 15          -- client: host silence that triggers one SYNCQ
-local HB_TIMEOUT = 35        -- client: host is dead after this much silence
+local HB_TIMEOUT = 35        -- client, GROUP scope: host is dead after this silence
+-- Wide scope (SCOPE.md 6.2), the Rock Paper Scissors constants and reasoning:
+-- outside our own group the host can be inside an encounter (or a whole M+ run)
+-- where the 12.1 comms lockdown refuses every send, while we stand in a city
+-- with a clear safety state. Silence there is a paused game, not a dead host.
+local HB_QUIET_WIDE = 150
+local HB_GIVEUP_WIDE = 300
+local QUIET_SYNC_EVERY = 60  -- at most one heal request per minute while quiet
 local BEGIN_PAUSE_SECS = 2   -- BEGIN -> ROLL, so the roster lands before the timer
+local ROLL_WAIT_PROBE = 6    -- client: BEGIN with no ROLL for this long -> SYNCQ
 local MIN_REOPEN_SECS = 3    -- floor when re-opening a frozen roll window
 local SYNC_COOLDOWN = 10     -- min secs between SYNCQ per sender (and per client send)
 local SYNC_MAX_REPLAY = 20   -- resync deltas above this many messages -> SYNCNO
--- How long OUR OWN SYNCQ keeps a whispered host reply credible (see
--- whisperCredible). Sized from the wire, not guessed: a maximal replay is
--- SYNC_MAX_REPLAY messages, Comm's outbound bucket is BUCKET_CAP = 10 refilling
--- one token per second, so the first ten leave at once and the tail lands about
--- ten seconds later; 15 covers that plus latency and a heartbeat sharing the
--- queue. It is deliberately NOT the host's syncReplayUntil (30): that constant
--- exists so a dropped replay does not abort the HOST's game, which is a
--- different question from how long a whisper stays believable to a CLIENT. Too
--- short costs a retry after SYNC_COOLDOWN and never costs gold; too long leaves
--- a standing hole across BEGIN, which is exactly the attack this closes.
-local SYNC_REPLY_SECS = 15
-local CHECK_GRACE = 1.5      -- cross-check ignores the last N secs (see crossCheckOK)
 local ROLL_CONFIRM = 2       -- ROLL button: secs before it is offered again
 local WARN_THROTTLE = 3      -- min secs between wrong-ceiling warnings
 local MAX_ROWS = 10          -- roster lines drawn in the window: derived from
                              -- the band between ROSTER_Y and the result block
                              -- at the shared Theme.METRIC.ROW_PITCH of 20
-local MAX_STRAY = 3          -- grey "also rolled" names
+
+-- ONE ROUND PER SESSION (see the file header), so the ROLLED report's `seq`
+-- field - the round number - only ever holds this. The field exists so both roll
+-- games carry the identical wire shape; ROLLBRIEF 3 fixes it and neither module
+-- improvises its own.
+local GB_ROUND = 1
 
 local MAX_WAGER = 100000     -- gold; matches the Loot Goblins buy-in cap
 local MIN_WAGER = 2          -- N == 1 makes every roll identical
 local ROSTER_CAP = 40
 local MAX_NAME_W = 64        -- inbound name-field bound (Ledger's MAX_NAME)
 
--- There is deliberately NO HB_QUIET_WIDE / HB_GIVEUP_WIDE pair here. Those exist
--- in Rock Paper Scissors because a guild or public host can be inside an
--- encounter the client knows nothing about (SCOPE.md 6.2). The Gambler is group
--- scope ONLY, so host and clients are in the same content by definition and 35s
--- of silence really is a dead host. Do not "restore" the wide constants.
+-- The wide-scope heartbeat pair above is not decoration. It used to be absent
+-- with a comment saying it was not needed because this game was group-only; the
+-- moment guild and public opened, 35s of silence stopped meaning "dead host"
+-- and started meaning "the host pulled a boss two zones away". Do not remove it
+-- again without closing the scopes first.
 
 -- Concurrency budgets (CONCURRENCY.md 2.1), identical to LG/RPS: one FULL record
 -- plus bounded lite records for sessions we merely overhear.
@@ -91,10 +106,15 @@ local LITE_TTL_MAX = 180
 local SWEEP_EVERY = 4
 local BUSY_THROTTLE = 60
 
--- SCOPE.md 1.2 applied to a game settled by /roll: a /roll line only reaches
--- your own party or raid, so nobody outside it can see the evidence the game is
--- made of. Guild and public are not "unsupported", they are impossible.
-PG.GB.SCOPES = { group = true }
+-- PARTY, GUILD AND PUBLIC. This was group-only because a /roll system line
+-- reaches nobody outside your party or raid, so no wider audience could see the
+-- evidence the game was made of. The roll now travels as an addon message
+-- (ROLLBRIEF 2) and that restriction has no technical basis left, so all three
+-- audiences are open. The rest of that one change: the wide heartbeat pair
+-- above, the RPS-shaped trust predicate at the bottom of this file, the ledger
+-- vouch in applyResult (a table at every scope, which is what Commit demands at
+-- public), the picker copy, the Rules page and the README.
+PG.GB.SCOPES = { group = true, guild = true, public = true }
 
 -- BRIEF 1.1: the launcher reads this instead of special-casing module codes.
 -- The Gambler demands a timed decision from a human, so it takes the seat.
@@ -123,12 +143,20 @@ local P = {
 --   LEFT   B host  fullName               roster remove
 --   BEGIN  B host  count, wager, digest   join closed, roster frozen
 --   ROLL   B host  secs                   window open (a repeat = timer refresh)
+--   ROLLED W ->host  seq, value, low, high   MY OWN roll, nobody else's
 --   RESULT B host  pattern, lowRoll, highRoll   TERMINAL, the sole commit point
 --   CANCEL B host  reason                 aborted; no ledger, ever
 --   HB     B host  phase                  heartbeat, every 10s, never in lockdown
 --   SYNCQ  W ->host  phase, rosterN, digest    resync request (10s cooldown)
 --   SYNCOK W host->  nothing missed
 --   SYNCNO W host->  delta too large: spectate this session
+--
+-- ROLLED is the one message this game gained and it is shared verbatim with
+-- Death Roll (ROLLBRIEF 3): same name, same field order, same validation order.
+-- `seq` is the round number (always GB_ROUND here), `value`/`low`/`high` are the
+-- roll exactly as this client observed it, and `low` must be 1. It is WHISPERED
+-- in every scope, like every other 1:1 message in this addon. The host's own
+-- roll is applied locally at observe time and never whispered to itself.
 --
 -- `pattern` is one char per participant in sorted-roster order:
 --   L  rolled, tied for the lowest valid roll   - pays
@@ -141,8 +169,11 @@ local P = {
 -- BYTE BUDGET (SPEC 2.6; submit() refuses over 250, the target is 200). Worst
 -- case is RESULT at the 40-player roster cap with a 24-byte token and 6-digit
 -- rolls: "3|GB|RESULT|" (12) + 24 + "|" + 40 + "|" + 6 + "|" + 6 = 91 bytes.
--- JOINED with a 64-byte name is 12 + 24 + 1 + 64 = 101. Everything else is
--- under 60. Nothing is multipart and no message type gains a field.
+-- JOINED with a 64-byte name is 12 + 24 + 1 + 64 = 101. ROLLED is
+-- "3|GB|ROLLED|" (12) + 24 + "|1" (seq, 2) + "|" + 6 (value) + "|1" (low, 2)
+-- + "|" + 6 (high) = 54, and it does NOT grow with the roster - one client
+-- reports one roll, so the 40-player case is still 54. Everything else is under
+-- 60. Nothing is multipart.
 -------------------------------------------------------------------------------
 
 -------------------------------------------------------------------------------
@@ -448,66 +479,21 @@ endSession = function(text)
   RefreshUI()
 end
 
--------------------------------------------------------------------------------
--- Name resolution (BRIEF 3.3) - GOLD DEPENDS ON THIS.
+-- THERE IS NO NAME RESOLUTION IN THIS FILE ANY MORE, and that is the fix.
 --
--- PG.Rolls hands us a name normalized to "Name-Realm" and knows nothing about
--- rosters; matching it to a player is ours, against our own frozen roster, and
--- ON AMBIGUITY WE DROP THE ROLL. A wrong guess moves real gold to the wrong
--- character with no error anywhere, which is strictly worse than a window the
--- players can watch time out and re-run.
--------------------------------------------------------------------------------
-
-local function myRealmSuffix()
-  local r = PG.SafeStr(GetNormalizedRealmName and GetNormalizedRealmName())
-  if not r or r == "" then return nil end
-  return "-" .. r
-end
-
--- Two roster members whose SHORT names collide, where at least one is on our own
--- realm, cannot be told apart from a system line: the same-realm member's line
--- is realm-less, and PG.NormalizeSender turns any realm-less name into ours.
--- BRIEF 3.3(d) says refuse to BEGIN rather than guess. Two members who are BOTH
--- cross-realm are fine - their lines always carry a realm and match exactly -
--- which is why the local-realm qualifier is here and not a blanket refusal.
-local function dupeShortName(list)
-  local suffix = myRealmSuffix()
-  local seen = {}
-  for i = 1, #list do
-    local full = tostring(list[i] or "")
-    local short = shortOf(full)
-    local prev = seen[short]
-    local hereMine = (suffix ~= nil) and (full:sub(-#suffix) == suffix)
-    if prev then
-      if hereMine or prev.mine then return short end
-    else
-      seen[short] = { mine = hereMine }
-    end
-  end
-  return nil
-end
-
--- Returns (rosterName, ambiguous). rosterName is nil for a stranger AND for an
--- ambiguity; `ambiguous` separates the two so a dropped-on-ambiguity roll is
--- never shown as "also rolled (not in the game)", which would be a lie.
-local function resolveRoller(S, name)
-  if S.joined[name] then return name, false end
-  -- The fallback covers the one shape an exact match misses: a cross-realm
-  -- player whose line arrived realm-less and therefore normalized onto OUR
-  -- realm. dupeShortName has already refused the roster where that could be
-  -- ambiguous, so a unique short-name hit is safe; two hits are not.
-  local short = shortOf(name)
-  local hit, n = nil, 0
-  for i = 1, #S.roster do
-    if shortOf(S.roster[i]) == short then
-      hit = S.roster[i]
-      n = n + 1
-    end
-  end
-  if n == 1 then return hit, false end
-  if n > 1 then return nil, true end
-  return nil, false
-end
+-- What stood here matched a name printed in a system line against the frozen
+-- roster, with a short-name fallback for cross-realm players and a refusal to
+-- BEGIN at all when two members shared a short name. Every part of it existed
+-- because the host was reading OTHER PLAYERS' rolls off CHAT_MSG_SYSTEM. It
+-- misses on the realm-less common case, and the round-1 resolution - "on
+-- ambiguity, DROP the roll" - was safe for gold and identical, from the seat of
+-- the player it dropped, to "you cannot play".
+--
+-- Every client now observes only ITS OWN roll, where the name is
+-- PG.FullName("player") and cannot be wrong, and reports it as a ROLLED whisper
+-- whose sender the delivery vouches for. Do not reintroduce a system-message
+-- fallback for players without the addon: that is the exact machinery this
+-- deleted, and it brings the bug back with it.
 
 -------------------------------------------------------------------------------
 -- The gold math (design ledger section 2). Integers throughout, exact by
@@ -560,152 +546,73 @@ local function outcomeRows(S)
 end
 
 -------------------------------------------------------------------------------
--- THE CROSS-CHECK (BRIEF 2) - the reason this game uses a real /roll.
+-- WHAT USED TO BE HERE: THE CROSS-CHECK, AND WHY IT IS GONE (ROLLBRIEF 4).
 --
--- BRIEF 2 gives a client three possible verdicts on the host's RESULT, and this
--- file implements all three (applyResult is where they are branched):
+-- Three functions - crossCheckOK, sawDecidingRolls and resultOnTime - let a
+-- client REFUSE to write the ledger when the host's RESULT disagreed with the
+-- rolls that client had watched, when it had not watched both deciding rolls,
+-- or when the RESULT arrived before its own window had run out. They were built
+-- on the assumption that every client sees every /roll, which is exactly the
+-- assumption this rework deletes: a client now only ever watches its own roll,
+-- so it holds no evidence about anybody else and there is nothing left to
+-- contradict the host with.
 --
---   agrees                      -> commit the rows normally
---   disagrees                   -> commit NOTHING, S.disputed, say so on screen
---   gaps in its own observation -> commit NOTHING, S.syncMissed, LG's wording
+-- They are not being replaced by a wire-borne equivalent, deliberately. The
+-- owner's ruling is that the host is TRUSTED here, exactly as it already is in
+-- Loot Goblins, The Pull Book and Rock Paper Scissors, and that a mechanism
+-- which can stop an honest game settling costs more than the cheating it
+-- prevents. If you are about to add a check that can refuse a commit, you are
+-- rebuilding this block.
 --
--- crossCheckOK is the second verdict and sawDecidingRolls is the third.
---
--- crossCheckOK runs on a non-host, non-spectator record whose roster provably
--- matches the host's (#pattern == #roster plus the BEGIN digest). It only ever
--- accuses when the host's NUMBERS contradict a roll this client watched land.
--- Four deliberate rules, the last three each preventing a FALSE accusation -
--- and a false accusation is not free: it makes one client's Settle Up disagree
--- with everyone else's for a game that was honest.
---
---   1. INSIDE the window, an observation is evidence about its own slot no
---      matter which character the host wrote there, "X" included. Excusing "X"
---      from every test - which this once did, on the reasoning that the host may
---      have missed a boundary roll we saw - handed the host the whole game: mark
---      the players holding the real extremes as absent, name any two surviving
---      rolls low and high, and every roll outside that range goes untested. The
---      cheap version is a tie: excuse one of two equal lowest rolls and the
---      other pays the entire difference alone. What keeps an honest host safe
---      here is the WINDOW below, not the character.
---   2. S.checkUntil tracks the CURRENT deadline and only ever moves FORWARD, so
---      a freeze, a re-open or a stale replayed ROLL still cannot narrow it.
---      PINNED to the first ROLL, as it was, it was a one-line way to switch this
---      whole function off: send ROLL(1), then immediately ROLL(60), and every
---      real observation lands past a limit that never moved - the loop below
---      runs zero times and returns true having compared nothing.
---   3. Observations in the last CHECK_GRACE seconds are excluded. They still
---      lock the player's own slot and still render; they simply cannot be used
---      against the host, because latency and GetTime() skew live there.
---   4. Observations from CHECK_GRACE before the first GAP onwards are excluded
---      too. S.gapAt is stamped the first time our own observation gate shuts
---      during the window (encounter, ready check, pull timer, comms lockdown):
---      PG.Rolls discards everything while it is shut, and the host's gate does
---      not shut at the same millisecond ours does, so either of us can miss a
---      player's FIRST roll around that edge and record their second as their
---      first. Two honest clients would then hold different values for the same
---      player. Everything we watched at least CHECK_GRACE before the gap is
---      still fully usable, which keeps the check alive for the ordinary
---      interrupted game instead of silently switching it off.
---
--- On false: no ledger, an explicit toast, and the session ends. Other clients
--- may still commit; divergence in the direction of "the client that caught it
--- refuses" is correct, and Commit's zero-sum gate is the second net.
+-- ownRollNote below is the one survivor and it is INFORMATION, never a refusal:
+-- your own slot, your own roll, and it catches the failure that actually
+-- happens - your report never reached the host.
 -------------------------------------------------------------------------------
 
-local function crossCheckOK(S)
-  if S.isHost then return true end     -- we produced the numbers; nothing to check
-  local res = S.result
-  if not res then return true end
-  local limit = S.checkUntil or -1
-  if S.gapAt and (S.gapAt - CHECK_GRACE) < limit then limit = S.gapAt - CHECK_GRACE end
+-- Returns a sentence when the host's RESULT says something about OUR OWN slot
+-- that our own roll does not support, or nil. It reads one character and one
+-- number, it is only ever shown to the player it is about, and NOTHING in this
+-- file branches on it: the ledger is written either way.
+--
+-- The case worth the code is the first one. A ROLLED whisper that the comms
+-- lockdown swallowed leaves us marked "X" while our own chat frame shows the
+-- roll, and "your roll never reached the host" is the difference between a bug
+-- report and a shrug.
+local function ownRollNote(S)
+  local me, res = myName(), S.result
+  if not (me and res) then return nil end
+  local v = S.rolls[me]
+  if not v then return nil end
+  local idx
   for i = 1, #S.roster do
-    local o = S.rolls[S.roster[i]]
-    if o and o.at <= limit then
-      local c = res.pattern:sub(i, i)
-      -- The range test runs on EVERY observation in the window (note 1). It is
-      -- the only test that pins low and high to the extremes we actually
-      -- watched; skipped for "X", a roll above the claimed high or below the
-      -- claimed low proved nothing and the host kept the difference.
-      if o.v < res.low or o.v > res.high then return false end
-      -- "this player never rolled", about a player we watched roll.
-      if c == "X" then return false end
-      if c == "L" and o.v ~= res.low then return false end
-      if c == "H" and o.v ~= res.high then return false end
-      if c == "-" and res.low ~= res.high
-        and (o.v == res.low or o.v == res.high) then return false end
+    if S.roster[i] == me then idx = i end
+  end
+  if not idx or idx > #res.pattern then return nil end
+  local c = res.pattern:sub(idx, idx)
+  if c == "X" then
+    return "your roll of " .. v .. " never reached the host, so you were scored"
+      .. " as not having rolled."
+  end
+  local want
+  if c == "L" then want = res.low elseif c == "H" then want = res.high end
+  if want and v ~= want then
+    return "the host recorded " .. want .. " for your roll; this client saw " .. v .. "."
+  end
+  if c == "-" then
+    -- Our slot pays and collects nothing. That is wrong two ways: a roll outside
+    -- the published range was never in this round at all, and a roll EQUAL to an
+    -- extreme (with the two extremes distinct) is a slot that should have been
+    -- L or H.
+    if v < res.low or v > res.high then
+      return "the host scored your roll inside " .. res.low .. "-" .. res.high
+        .. "; this client saw " .. v .. "."
+    end
+    if res.low ~= res.high and (v == res.low or v == res.high) then
+      return "the host scored your roll as neither the low nor the high;"
+        .. " this client saw " .. v .. "."
     end
   end
-  return true
-end
-
--- BRIEF 2's third verdict. Every gold piece in this game turns on exactly two
--- observations: the lowest roll and the highest roll. A client that did not
--- WATCH both of them has not derived this result at all - it is taking the
--- host's word for the whole amount - which is precisely the "gaps in its own
--- observation" case, and it is the shape a loading screen over the decisive
--- roll takes. The players in between move nothing, so a gap over one of them
--- costs the derivation nothing and must not block an honest commit.
---
--- Unlike crossCheckOK this uses EVERY observation, grace window included: the
--- grace exists so we do not accuse on a boundary roll, not because we doubt we
--- saw it.
---
--- The same rule then extends to every CHARGED slot, not just the two deciding
--- ones. A slot we hold no observation for is a slot crossCheckOK cannot test at
--- all, so a host that knows which roll we missed can name us a co-payer or a
--- co-receiver we never watched: "LLHXX" against a client that saw only the low
--- and the high bills an untouched bystander for half the pot, and the rows are
--- still zero-sum, still inside cap, still fully vouched. The two deciding
--- observations bound it - the host cannot make an unobserved player the SOLE
--- payer and cannot invent an amount - but "bounded theft" is still theft, and a
--- row we cannot support from something we watched is not one we should write.
---
--- THE TRADE, stated plainly: a client that missed one player's system line now
--- records nothing for the whole game rather than recording a row it did not
--- witness. That costs almost nothing in practice, because L and H are the
--- extremes: in a game with one low and one high the two tests are the same
--- test, and the extra refusals are exactly the games where somebody TIED an
--- extreme and we missed their line. "-" and "X" slots move no gold, so a gap
--- over a middling roller still commits normally - which is the ordinary shape a
--- missed line takes.
-local function sawDecidingRolls(S)
-  if S.isHost then return true end
-  local res = S.result
-  if not res or res.high <= res.low then return true end -- nothing moves, nothing to see
-  local sawL, sawH = false, false
-  for i = 1, #S.roster do
-    local o = S.rolls[S.roster[i]]
-    local c = res.pattern:sub(i, i)
-    if o then
-      if c == "L" and o.v == res.low then sawL = true end
-      if c == "H" and o.v == res.high then sawH = true end
-    elseif c == "L" or c == "H" then
-      return false -- charged on a roll nobody on this client ever watched
-    end
-  end
-  return sawL and sawH
-end
-
--- The other half of the same problem, and the reason S.deadline is forward-only
--- is not enough on its own. A host can no longer SHORTEN our window, but it can
--- still stop us watching the rest of it: whisper RESULT to one client four
--- seconds into a sixty-second round and that client derives the outcome from the
--- two or three rolls that had landed by then. Nothing it holds contradicts the
--- numbers it was handed, so crossCheckOK passes, and it commits alone.
---
--- A RESULT is therefore evidence we can act on only once one of two things is
--- true: our own window has run out, or we have watched every player on the
--- roster roll - which is precisely when an honest host resolves early
--- (maybeEarlyFinish). CHECK_GRACE of slack, because the host measures its
--- deadline from its SEND of ROLL and we measure ours from our RECEIPT: a ROLL
--- that sat in the shared token bucket puts our deadline that much later than the
--- host's and the honest RESULT then lands just before it. That is the same skew
--- band crossCheckOK already refuses to accuse inside, and this fails the safe
--- way - no ledger, not a false accusation.
-local function resultOnTime(S)
-  if S.isHost then return true end
-  if (S.rollN or 0) >= #S.roster then return true end
-  return GetTime() >= (S.deadline or 0) - CHECK_GRACE
+  return nil
 end
 
 -------------------------------------------------------------------------------
@@ -782,13 +689,13 @@ local function applyBegin(count, wager, dig)
   S.count = count
   S.wager = wager
   S.digest = dig
+  S.beganAt = GetTime()    -- the ROLL is due BEGIN_PAUSE_SECS after this
   -- S.rolls / S.rollN are NOT initialized here. Two paths reach the roll phase
   -- without ever running applyBegin - the comm prologue's forced-spectator
   -- branch, and the absorb-and-return branch above - and a nil index there is
   -- swallowed by Comm's pcall, so the client silently records nothing. They are
   -- built with the record instead. Nothing can be lost by not clearing them:
   -- rolls are only ever recorded while the window is open.
-  S.nameDupe = dupeShortName(S.roster) and true or false
   local me = myName()
   -- Size AND membership, never size alone: dig is guaranteed present by the
   -- prologue, so there is no "no digest sent" case to fall back to and a mirror
@@ -828,17 +735,17 @@ local function applyRoll(secs)
   local now = GetTime()
   local first = not S.rollOpenedAt
   S.rollOpen = true
-  -- FORWARD ONLY, for exactly the reason S.checkUntil is (crossCheckOK note 2).
-  -- Set unconditionally, as it was, this was the last value in the file that
-  -- could still move BACKWARD, and onRollObserved drops every roll at or after
-  -- it. Gate i in the comm prologue exempts "private", so a host can whisper
-  -- ROLL(1) to ONE chosen client four seconds into a sixty-second window and
-  -- truncate that client's recording alone: the rolls that decide the game never
-  -- enter its S.rolls, the RESULT it is then sent contradicts nothing it
-  -- watched, and it commits by itself while every other client disputes.
-  -- Nothing honest needs a shorter window - a re-open after a freeze re-bases
-  -- the REMAINING seconds from a LATER instant (hostReopenRoll), and a resync
-  -- replay of ROLL(remain) only restates the same instant.
+  -- FORWARD ONLY, and DELIBERATELY KEPT (ROLLBRIEF 4 asked whether it also
+  -- protects an honest re-open; it does). onRollObserved drops our own roll at
+  -- or after this deadline, so anything that moves it backward costs the player
+  -- their roll. Two honest ways that happens, both ordinary:
+  --   - a resync replay whispers ROLL(remain) while a broadcast ROLL(rollSecs)
+  --     is in flight, and whispers and party messages do not share a delivery
+  --     order. The stale one must not shorten a window the fresh one extended.
+  --   - a duplicated or late ROLL restating an instant we have already passed.
+  -- Nothing honest needs a SHORTER window: a re-open after a freeze re-bases the
+  -- REMAINING seconds from a LATER instant (hostReopenRoll), so its new deadline
+  -- is always at or after the old one and this never blocks it.
   local newDeadline = now + secs
   if not S.deadline or newDeadline > S.deadline then S.deadline = newDeadline end
   -- Clearing the freeze HERE as well as in hostReopenRoll is deliberate: an
@@ -847,15 +754,24 @@ local function applyRoll(secs)
   S.frozen = false
   S.rollRemaining = nil
   if first then
-    S.rollOpenedAt = now
+    -- WHERE THE DRAIN REACHES BACK TO, and it is not "now" any more.
+    --
+    -- The host opened this window (rollSecs - secs) seconds ago: ROLL(remain) is
+    -- exactly how a client that lost the broadcast is told about a window that
+    -- is already running (hostHandleSyncQ's replay), and a player looking at a
+    -- raid full of /roll lines will very reasonably have rolled during that gap.
+    -- The host used to see that roll on its own screen; it does not any more, so
+    -- if the drain below starts at `now` the roll is dropped in silence - which
+    -- is the precise failure this whole rework exists to remove.
+    --
+    -- Bounded by the host's OWN window and never further, so a roll made before
+    -- the game began still cannot count (harness scenario 29) and the ring's own
+    -- TTL caps it again behind that.
+    local opened = now
+    local full = S.rollSecs
+    if full and secs < full then opened = now - (full - secs) end
+    S.rollOpenedAt = opened
   end
-  -- Follows the CURRENT deadline, forward only (crossCheckOK note 2). Pinning it
-  -- to the FIRST ROLL let a host end the cross-check before the game started:
-  -- ROLL(1) puts the limit half a second in the PAST, the ROLL(60) behind it
-  -- moves the deadline but not the limit, and every roll of the round is then
-  -- outside the window crossCheckOK is willing to compare.
-  local checkTo = S.deadline - CHECK_GRACE
-  if not S.checkUntil or checkTo > S.checkUntil then S.checkUntil = checkTo end
   ShowWindow()
   -- The bar shows the deadline we are actually keeping, which is `secs` whenever
   -- the deadline moved and less when a stale ROLL failed to move it. Clamped
@@ -901,46 +817,38 @@ local function applyResult(pattern, lowRoll, highRoll)
 
   -- G1 PARTICIPATION, applied before anything is written: a referee host (I5)
   -- has no stake in its own game, a spectator could not map the pattern, and a
-  -- client that is not in the roster never sat at this table.
+  -- client that is not in the roster never sat at this table. That is the WHOLE
+  -- gate now - ROLLBRIEF 4 deleted the three verdicts that used to sit inside
+  -- it, and a client commits from the host's RESULT like every other game.
   local played = (not S.spectator) and S.seated and me and S.joined[me] and true or false
   local committed = false
-  if played and mapped and D > 0 and not S.nameDupe then
-    if not crossCheckOK(S) then
-      S.disputed = true
-    elseif not sawDecidingRolls(S) or not resultOnTime(S) then
-      S.syncMissed = true
-    else
-      -- Every name is realm-qualified and came from the JOINED stream this
-      -- client watched itself. vouch is built from the LIVE roster rather than a
-      -- snapshot frozen at BEGIN: a spectator repaired by a resync replay has a
-      -- corrected roster and would otherwise carry a stale vouch into
-      -- Commit's G2 gate and be refused for names it can see in front of it.
-      local vouch = {}
-      for i = 1, #S.roster do vouch[S.roster[i]] = true end
-      committed = PG.Ledger.Commit({
-        id = "GB:" .. S.host .. ":" .. S.token,
-        game = "GB",
-        host = S.host,
-        scope = S.scope,
-        at = (type(time) == "function") and time() or nil,
-        played = true,
-        vouch = vouch,
-        -- Every |delta| <= D <= wager - 1, so this is honest and it is the
-        -- tightest bound available - far tighter than LG's buyin * roster.
-        cap = S.wager,
-        label = "The Gambler",
-      }, rows2) and true or false
-    end
+  if played and mapped and D > 0 then
+    -- Every name is realm-qualified and came from the JOINED stream this client
+    -- watched itself. vouch is built from the LIVE roster rather than a snapshot
+    -- frozen at BEGIN: a spectator repaired by a resync replay has a corrected
+    -- roster and would otherwise carry a stale vouch into Commit's G2 gate and
+    -- be refused for names it can see in front of it.
+    local vouch = {}
+    for i = 1, #S.roster do vouch[S.roster[i]] = true end
+    committed = PG.Ledger.Commit({
+      id = "GB:" .. S.host .. ":" .. S.token,
+      game = "GB",
+      host = S.host,
+      scope = S.scope,
+      at = (type(time) == "function") and time() or nil,
+      played = true,
+      vouch = vouch,
+      -- Every |delta| <= D <= wager - 1, so this is honest and it is the
+      -- tightest bound available - far tighter than LG's buyin * roster.
+      cap = S.wager,
+      label = "The Gambler",
+    }, rows2) and true or false
   end
   S.committed = committed
 
   -- The one line the player actually reads.
   local text
-  if S.disputed then
-    text = "Nothing recorded - the result did not match the rolls this client saw."
-  elseif S.nameDupe then
-    text = "Nothing recorded - two players share a name, so rolls can't be told apart."
-  elseif S.syncMissed or (S.spectator and not S.isHost) then
+  if S.syncMissed or (S.spectator and not S.isHost) then
     text = "You missed part of this game, so no gold was recorded."
   elseif S.isHost and not S.seated then
     text = "You ran this one, so no gold was recorded for you."
@@ -967,6 +875,11 @@ local function applyResult(pattern, lowRoll, highRoll)
   S.ended = true
   ShowWindow()
   toast(text, S.host, { priority = "result" })
+  -- INFORMATION, after the result and never instead of it (ROLLBRIEF 4).
+  if mapped and not S.spectator then
+    local note = ownRollNote(S)
+    if note then toast(note, S.host, { key = "gb-mismatch" }) end
+  end
   endSession(text)
   runFX(fxResult)
 end
@@ -979,8 +892,6 @@ local function applyCancel(reason)
     -- CONCURRENCY.md 6.3: no BUSY message exists and none will, so the honest
     -- version of "nobody joined" says why that can happen.
     text = "Cancelled - not enough players joined. Others may be busy or away."
-  elseif reason == "dupe" then
-    text = "Two players in this group share a name, so rolls can't be told apart - nothing was recorded."
   elseif reason == "host" then
     text = "Cancelled by the host - no gold changes."
   else
@@ -991,18 +902,17 @@ local function applyCancel(reason)
 end
 
 -------------------------------------------------------------------------------
--- Roll observation. Registered ONCE at init: a /roll in a raid is common enough
--- that churning registrations per session would cost more than the early return
--- on the first line.
+-- Roll observation: OUR OWN ROLL, AND NOTHING ELSE.
+--
+-- Registered ONCE at init: a /roll in a raid is common enough that churning
+-- registrations per session would cost more than the early return on the first
+-- line.
+--
+-- PG.Rolls still hands us every /roll line this client can see. Exactly one of
+-- them means anything now - the one with our own name on it - and that name
+-- needs no resolving, because PG.FullName("player") cannot be wrong about who we
+-- are. Everybody else's roll reaches the host as a ROLLED whisper or not at all.
 -------------------------------------------------------------------------------
-
-local function recordStray(S, name)
-  if S.strayN >= MAX_STRAY or S.strayHas[name] then return end
-  S.strayHas[name] = true
-  S.strayN = S.strayN + 1
-  S.stray[S.strayN] = name
-  RefreshUI()
-end
 
 local function warnWrongCeiling(S, low, high)
   local now = GetTime()
@@ -1010,6 +920,16 @@ local function warnWrongCeiling(S, low, high)
   S.warnAt = now
   toast("that was /roll " .. low .. "-" .. high .. ". This game is /roll "
     .. (S.wager or "?") .. " - roll again.", S.host, { key = "gb-roll" })
+end
+
+-- Our own roll, to the host, over the wire (ROLLBRIEF 3). Whispered in EVERY
+-- scope, like every other 1:1 message in this addon. Returns whether it was
+-- accepted for sending; a false leaves S.rollSent false and the client ticker
+-- tries again while the window is open, which is the whole reason a lost report
+-- is no longer silent.
+local function reportRoll(S, value)
+  return PG.Comm.Whisper(S.host, "GB", "ROLLED", S.token,
+    GB_ROUND, value, 1, S.wager) and true or false
 end
 
 -- One accepted roll from PG.Rolls, live or drained from its ring. roll is a
@@ -1025,45 +945,54 @@ local function onRollObserved(roll)
   local at = PG.SafeNum(roll.at) or GetTime()
   if not name or name == "" or not value or not low or not high then return end
   if math.floor(value) ~= value then return end
+  local me = myName()
+  if not me or name ~= me then return end   -- ours, or it is not our business
 
   if S.phase == "join" then
-    if name == myName() and low == 1 and high == (S.wager or 0) then
+    if low == 1 and high == (S.wager or 0) then
       toast("the roll window isn't open yet - wait for the timer.", S.host,
         { key = "gb-roll" })
     end
     return
   end
   if S.phase ~= "roll" or not S.rollOpen then return end
+  -- A referee host (I5) has no seat in its own game, so its /roll is not a play.
+  -- A SPECTATOR is deliberately not excluded: its roster is out of sync, which
+  -- says nothing about whether its own roll happened, and the host - whose
+  -- roster is the frozen truth - decides. Refusing to report here would recreate
+  -- the exact failure this rework exists to remove.
+  if not S.seated then return end
   -- A crisp cutoff on the roll's OWN observation time, not on "now": a roll
   -- drained out of the ring after a late re-open is judged by when it happened.
+  -- This is the ONLY place our deadline is enforced against our own roll. The
+  -- host accepts whatever reaches it while its window is open, which is the
+  -- generous direction and costs nobody anything: the reporter already proved
+  -- it rolled in time on its own clock.
   if at >= (S.deadline or 0) then return end
-
-  local member, ambiguous = resolveRoller(S, name)
-  if not member then
-    -- Display only, bounded, never in the pattern, never in rows, never
-    -- persisted: it answers the one support question this game generates
-    -- ("why didn't my roll count?"). An AMBIGUOUS name is not shown at all -
-    -- claiming a specific stranger rolled when we cannot tell who did is worse
-    -- than silence.
-    if not ambiguous and low == 1 and high == S.wager then recordStray(S, name) end
-    return
-  end
   if low ~= 1 or high ~= S.wager then
     -- WRONG CEILING, rejected decisively. A /roll 100 in a 1000 game is not a
     -- slot in this lottery: it is near-certainly the lowest roll, so accepting
     -- it with a warning would cost a typo up to 999 gold, irreversibly. It does
     -- NOT consume the player's one-roll slot, so they can roll correctly at
-    -- once. No wire message: every client saw the same system line and warns
-    -- its own player.
-    if member == myName() then warnWrongCeiling(S, low, high) end
+    -- once, and nothing goes on the wire.
+    warnWrongCeiling(S, low, high)
     return
   end
-  if S.rolls[member] then return end   -- FIRST valid roll locks (BRIEF 3.5)
-  S.rolls[member] = { v = value, at = at }
+  if S.rolls[me] then return end   -- FIRST valid roll locks (BRIEF 3.5)
+  S.rolls[me] = value
   S.rollN = S.rollN + 1
+  if S.isHost then
+    -- The loopback rule: the host applies its own roll locally at observe time
+    -- and never whispers itself.
+    S.rollSent = true
+    RefreshUI()
+    runFX(fxMyRoll, value)
+    maybeEarlyFinish()
+    return
+  end
+  S.rollSent = reportRoll(S, value)
   RefreshUI()
-  if member == myName() then runFX(fxMyRoll, value) end
-  if S.isHost then maybeEarlyFinish() end
+  runFX(fxMyRoll, value)
 end
 
 drainRolls = function(S)
@@ -1132,26 +1061,26 @@ end
 local function buildOutcome(S)
   local lowRoll, highRoll
   for i = 1, #S.roster do
-    local o = S.rolls[S.roster[i]]
-    if o then
-      if not lowRoll or o.v < lowRoll then lowRoll = o.v end
-      if not highRoll or o.v > highRoll then highRoll = o.v end
+    local v = S.rolls[S.roster[i]]
+    if v then
+      if not lowRoll or v < lowRoll then lowRoll = v end
+      if not highRoll or v > highRoll then highRoll = v end
     end
   end
   if not lowRoll then lowRoll, highRoll = 0, 0 end
   local chars = {}
   for i = 1, #S.roster do
-    local o = S.rolls[S.roster[i]]
-    if not o then
+    local v = S.rolls[S.roster[i]]
+    if not v then
       -- A NON-ROLL IS NOT A ROLL OF ZERO. Treating a no-show as 0 would make
       -- every disconnect, loading screen and death an automatic maximum loss for
       -- something the player never did.
       chars[i] = "X"
     elseif highRoll == lowRoll then
       chars[i] = "-"
-    elseif o.v == lowRoll then
+    elseif v == lowRoll then
       chars[i] = "L"
-    elseif o.v == highRoll then
+    elseif v == highRoll then
       chars[i] = "H"
     else
       chars[i] = "-"
@@ -1201,15 +1130,32 @@ local function hostCloseJoin()
     end
     return
   end
-  -- BRIEF 3.3(d): a roster we cannot read rolls off unambiguously is a roster we
-  -- must not play for money. Refuse BEFORE the wager is at stake.
-  if dupeShortName(S.roster) then
-    if broadcast("CANCEL", "dupe") then
-      applyCancel("dupe")
-    else
-      S.joinDeadline = GetTime() + 2
-    end
-    return
+  -- The duplicate-short-name CANCEL that stood here is gone (ROLLBRIEF 6): a
+  -- table must not refuse to start over something this rare. What survives is a
+  -- warning, because the ambiguity itself did NOT go away and the comment that
+  -- stood here claiming it had was wrong.
+  --
+  -- The HOST no longer resolves anybody's name - reports arrive by whisper and
+  -- the sender is vouched. But each CLIENT still has to pick its OWN roll out of
+  -- a chat line that prints a bare short name, and PG.NormalizeSender appends
+  -- the LOCAL realm to it. So with Alice-Stormrage and Alice-Illidan at the same
+  -- table, both clients read the first "Alice" line as their own and report it:
+  -- one roll gets counted twice and the other never arrives. Nobody is cheating
+  -- and the game still settles - it just settles on the wrong numbers.
+  --
+  -- Death Roll is immune (only the seat whose turn is open ever reports, so two
+  -- Alices are never both listening), which is why this warning lives here and
+  -- not there. Telling the table is proportionate; refusing to play is not.
+  local shortSeen, clash = {}, nil
+  for i = 1, #S.roster do
+    local full = S.roster[i]
+    local short = full:match("^([^%-]+)") or full
+    if shortSeen[short] then clash = short else shortSeen[short] = true end
+  end
+  if clash then
+    toast("two players here are both called " .. clash
+      .. " - their rolls may be counted wrong. Fine to play; check the result.",
+      S.host, { priority = "result" })
   end
   local dig = rosterDigest(S.roster)
   if broadcast("BEGIN", count, S.wager, dig) then
@@ -1238,6 +1184,51 @@ local function hostHandleUnjoin(sender)
     hostRecordOp("L", sender)
     applyLeft(sender)
   end
+end
+
+-- A client reported ITS OWN roll (ROLLBRIEF 3). This is the whole inbound roll
+-- path now: the host never reads anybody else's system line, so nothing here
+-- matches a printed name against the roster and the bug that dropped one
+-- player's rolls for an entire game has no surface left.
+--
+-- `sender` is vouched by the delivery - Comm resolved it from the addon message
+-- itself - so membership is a table lookup rather than a guess.
+--
+-- Validation runs in the order ROLLBRIEF 3 fixes and ANY failure drops the whole
+-- message in silence. Death Roll implements the identical sequence; if you
+-- change one, change both.
+local function hostHandleRolled(sender, f1, f2, f3, f4)
+  local S = mySession()
+  if not S or not S.isHost then return end
+  -- Wire fields first: this is parsed text that decides gold, so nothing is read
+  -- before it is a bounded integer.
+  local seq = num(f1, 1, 999)
+  local value = num(f2, 1, MAX_WAGER)
+  local low = num(f3, 1, MAX_WAGER)
+  local high = num(f4, MIN_WAGER, MAX_WAGER)
+  if not (seq and value and low and high) then return end
+  -- The round this host currently expects. One round per session, so GB's seq is
+  -- always GB_ROUND; the field is here because both roll games carry the same
+  -- wire shape.
+  if seq ~= GB_ROUND then return end
+  -- 1. the sender is in the FROZEN roster
+  if not S.joined[sender] then return end
+  -- 2. low is 1 and high is the ceiling THIS host is running. A report on any
+  --    other ceiling is the same typo onRollObserved refuses locally, and it
+  --    does not consume the sender's one-roll slot either.
+  if low ~= 1 or high ~= (S.wager or 0) then return end
+  if value > high then return end
+  -- 3. (Death Roll only: the sender is the seat whose turn is open.)
+  -- 4. first report wins, exactly as the first observed roll used to
+  if S.rolls[sender] then return end
+  -- 5. the window is open. NOT gated on S.frozen: a roll observed a moment
+  --    before a freeze is honest and its whisper can easily land inside one.
+  --    resultSent is the real close - past it the pattern is already fixed.
+  if S.phase ~= "roll" or not S.rollOpen or S.resultSent then return end
+  S.rolls[sender] = value
+  S.rollN = S.rollN + 1
+  RefreshUI()
+  maybeEarlyFinish()
 end
 
 -- Everyone on the roster has rolled: nobody is waiting on anybody, so the window
@@ -1355,12 +1346,13 @@ hostOpen = function(wager, joinSecs, rollSecs, scope)
     toast(note)
     return
   end
-  -- A host that cannot READ roll results cannot adjudicate, and must not pretend
-  -- to: it would open a table that can never resolve. (A client in that state
-  -- may still play - typing /roll works regardless of whether you can parse the
-  -- reply - so this refusal is host-only.)
+  -- A client that cannot read its own /roll line cannot PLAY: there is nothing
+  -- for it to report, so it would sit at its own table marked as never having
+  -- rolled. The refusal is unchanged and still host-only, but its reason has
+  -- flipped with the rest of this file - it is no longer about scoring anybody
+  -- else, since the host scores from ROLLED reports it can always read.
   if not rollsReady() then
-    toast("this client can't read /roll results, so it can't score a game.")
+    toast("this client can't read /roll results, so it can't play a game.")
     return
   end
   local host = myName()
@@ -1410,9 +1402,6 @@ hostOpen = function(wager, joinSecs, rollSecs, scope)
     joined = {},
     rolls = {},              -- built HERE, not in applyBegin (see applyBegin)
     rollN = 0,
-    stray = {},
-    strayHas = {},
-    strayN = 0,
     hist = { ops = {} },     -- resync replay history
     syncAsk = {},            -- per-sender SYNCQ rate limiting
     joinDeadline = GetTime() + joinSecs,
@@ -1509,9 +1498,6 @@ local function clientAccept(rec)
     joined = {},
     rolls = {},
     rollN = 0,
-    stray = {},
-    strayHas = {},
-    strayN = 0,
     syncAllClear = allClear(), -- tracks all-clear transitions for resync
     lastHB = GetTime(),
     joinDeadlineDisplay = openedAt + cfg.joinSecs,
@@ -1577,14 +1563,6 @@ clientRequestSync = function()
                      rosterDigest(S.roster)) then
     S.lastSyncQ = now
     S.syncNeeded = false
-    -- THE PROVENANCE WINDOW OPENS HERE, and only here. hostHandleSyncQ is the
-    -- one place in this file that whispers a client, so a whispered
-    -- JOINED/LEFT/BEGIN/ROLL has no honest sender unless WE asked for it. The
-    -- budget is the half that matters: a standing timer alone leaves a hole an
-    -- attacker can sit in, but credits have to be SPENT, and once they are the
-    -- window is shut until this client genuinely asks again.
-    S.syncUntil = now + SYNC_REPLY_SECS
-    S.syncCredits = SYNC_MAX_REPLAY
   else
     S.syncNeeded = true
   end
@@ -1614,7 +1592,6 @@ local function maybeClearSpectator()
     return
   end
   S.spectator = false
-  S.nameDupe = dupeShortName(S.roster) and true or false
   toast("back in sync - you are back in the game.", S.host, { key = "gb-status" })
   RefreshUI()
 end
@@ -1654,9 +1631,12 @@ local function overflowToast()
   toast("another game is open - see the Pengyou Games window.", nil, { key = "gb-busy" })
 end
 
--- Toast / popup policy for an inbound OPEN (4.4). GB is group-only, so the
--- guild budget and the public no-popup rule are inert here; the branches are
--- kept identical to RPS so the three modules read alike.
+-- Toast / popup policy for an inbound OPEN (4.4), identical to LG and RPS.
+-- These branches used to be documented as inert because the game was group
+-- only; they are live now. PUBLIC never pops - a stranger on the realm channel
+-- must not be able to put a popup on your screen, and the launcher's list is
+-- the whole surface. GUILD spends the shared popup budget (SCOPE.md 6.3), which
+-- is counted in Widgets rather than per module so it cannot be spent twice.
 local function raiseInvite(rec)
   listOpen(rec)     -- every lite record gets a launcher row
   if PG.Session.IsSeated() then
@@ -1793,48 +1773,25 @@ local HOST_AUTHORED = {
   HB = true, JOINED = true, LEFT = true, BEGIN = true, ROLL = true,
   RESULT = true, CANCEL = true, SYNCOK = true, SYNCNO = true,
 }
-local CLIENT_AUTHORED = { JOIN = true, UNJOIN = true, SYNCQ = true }
+local CLIENT_AUTHORED = { JOIN = true, UNJOIN = true, SYNCQ = true, ROLLED = true }
 
 -- The only host-authored mtypes that legitimately arrive by WHISPER: exactly
 -- what hostHandleSyncQ sends (JOINED / LEFT / BEGIN / ROLL in the replay loop)
 -- plus its two answers. RESULT, CANCEL and HB are BROADCAST BY CONSTRUCTION and
 -- are never replayed - a done session serves nothing, and CANCEL/HB carry no
--- replayable state - so a whispered one is a private view of a game whose whole
--- premise (BRIEF 2) is that everybody watches the same rolls. WHAT BREAKS
--- WITHOUT THIS: a whispered RESULT hands one client an outcome nobody else was
--- told, and every check below then runs on the two or three rolls that had
--- landed by the moment the host chose to cut that client off.
+-- replayable state - so a whispered one is a private view of a game everybody
+-- else is being told about differently. KEPT (ROLLBRIEF 4): it costs nothing at
+-- the table and it stops the silliest per-victim tricks.
+--
+-- The SYNCQ-credit provenance window that used to sit behind this allowlist is
+-- GONE. Gate g already proves a host-authored message came from THE HOST of this
+-- exact session, so everything the window rationed was the host talking to us,
+-- and the host is trusted here now. It was fifteen lines and two record fields
+-- to ration a channel we have decided to believe.
 local WHISPERABLE = {
   JOINED = true, LEFT = true, BEGIN = true, ROLL = true,
   SYNCOK = true, SYNCNO = true,
 }
-local SYNC_ANSWER = { SYNCOK = true, SYNCNO = true }
-
--- ...and the allowlist alone is NOT enough, because JOINED, LEFT and BEGIN must
--- stay whisperable for resync to work at all. WHAT BREAKS WITHOUT THE WINDOW:
--- rosterDigest only proves our mirror matches what the host TOLD us, never the
--- real group, so an unsolicited LEFT(Dave) followed by a BEGIN carrying the
--- digest of the shortened roster deletes a roller from ONE client's world; that
--- client then cannot resolve Dave's roll at all, agrees with the host by
--- construction, and commits a fully vouched, zero-sum, in-cap set of rows
--- charging the wrong player - which is precisely the outcome BRIEF 4.1 claims
--- the digest prevents. The same window is what stops a ROLL sent to one client
--- alone deciding when that client's observation window opens and how long it
--- runs (A1-A4 of the final adversarial pass).
---
--- A credit is spent by every whisper we ADMIT, including one a later validator
--- throws away: an attacker must pay for its junk, and a maximal honest replay
--- (SYNC_MAX_REPLAY messages) is exactly affordable.
-local function whisperCredible(S, mtype)
-  if not WHISPERABLE[mtype] then return false end
-  if (S.syncCredits or 0) <= 0 or GetTime() >= (S.syncUntil or 0) then return false end
-  if SYNC_ANSWER[mtype] then
-    S.syncCredits = 0 -- the host says the replay is over: shut the window now
-    return true
-  end
-  S.syncCredits = S.syncCredits - 1
-  return true
-end
 
 -- BRIEF 4.3: declare enough parameters for the LARGEST message plus a spare.
 -- Comm dispatches unpack(parts, 5), so the fields are there - a handler that
@@ -1860,14 +1817,13 @@ local function onComm(mtype, token, sender, scope, f1, f2, f3, f4, f5)
   if rec ~= mySession() then return end   -- I3: the only full record is the involved one
   if rec.phase == "done" then return end                     -- gate k
   -- gate i: "private" is exempt because resync replays legitimately arrive by
-  -- whisper - but ONLY the replay mtypes, and ONLY while a SYNCQ of ours is
-  -- outstanding (see WHISPERABLE / whisperCredible). The non-private line is
-  -- what stops a live session's token being re-broadcast into a different
-  -- distribution; the private line is what stops the host holding a second,
-  -- private game with one victim. Client-authored whispers (JOIN/UNJOIN/SYNCQ,
-  -- inbound to the host) are untouched: they are the client's own traffic.
+  -- whisper - but ONLY the replay mtypes (see WHISPERABLE). The non-private line
+  -- is what stops a live session's token being re-broadcast into a different
+  -- distribution. Client-authored whispers (JOIN/UNJOIN/SYNCQ/ROLLED, inbound to
+  -- the host) are untouched: they are the client's own traffic, and ROLLED is
+  -- whispered BY DESIGN in every scope.
   if scope == "private" then
-    if HOST_AUTHORED[mtype] and not whisperCredible(rec, mtype) then return end
+    if HOST_AUTHORED[mtype] and not WHISPERABLE[mtype] then return end
   elseif scope ~= rec.scope then return end
 
   local S = rec
@@ -1876,6 +1832,8 @@ local function onComm(mtype, token, sender, scope, f1, f2, f3, f4, f5)
       hostHandleJoin(sender)
     elseif mtype == "UNJOIN" then
       hostHandleUnjoin(sender)
+    elseif mtype == "ROLLED" then
+      hostHandleRolled(sender, f1, f2, f3, f4)
     elseif mtype == "SYNCQ" then
       hostHandleSyncQ(sender, PG.SafeStr(f1), num(f2, 0, ROSTER_CAP), PG.SafeStr(f3))
     end
@@ -1883,6 +1841,9 @@ local function onComm(mtype, token, sender, scope, f1, f2, f3, f4, f5)
   end
   -- sender == S.host is guaranteed by gate g's key; nothing else reaches here
   S.lastHB = GetTime() -- any host traffic counts as a heartbeat
+  -- ... and it clears the wide-scope "they may be in a boss fight" state the
+  -- moment the host speaks again (SCOPE.md 6.2).
+  if S.hostQuiet then S.hostQuiet = false end
   if S.phase == "join" and (mtype == "ROLL" or mtype == "RESULT") then
     -- we missed BEGIN entirely: spectate for now and ask the host to replay it.
     -- S.rolls already exists (built with the record), so the window that opens
@@ -1982,10 +1943,20 @@ local REPLAYABLE = { JOINED = true, LEFT = true, BEGIN = true, ROLL = true }
 
 local function onDrop(mtype, token)
   local S = mySession()
-  if not (S and S.isHost and S.phase ~= "done") then return end
-  local me = myName()
+  if not S or S.phase == "done" then return end
   local t = validToken(token)
-  if not (me and t) or keyOf(me, t) ~= S.key then return end
+  if not t or t ~= S.token then return end
+  if mtype == "ROLLED" then
+    -- Our own roll report never left this client. It is not an abort - the game
+    -- is fine and everyone else's rolls are landing - so clear the sent flag and
+    -- let the client ticker re-send it while the window is open. A lost report
+    -- being SILENT is the entire bug this rework exists to fix; it does not get
+    -- to come back as a dropped whisper.
+    S.rollSent = false
+    return
+  end
+  local me = myName()
+  if not (me and S.isHost) or keyOf(me, t) ~= S.key then return end
   if not CRITICAL_DROP[mtype] then return end
   if REPLAYABLE[mtype] and S.syncReplayUntil and GetTime() < S.syncReplayUntil then return end
   toast("game aborted - addon messages were blocked mid-send.", S.host)
@@ -1999,9 +1970,14 @@ end
 -- window, it never discards a roll that was already observed. What it DOES cost
 -- is the observations made while the gate is shut - PG.Rolls discards those
 -- outright (BRIEF 3.4, SPEC 2.12), so the clock has to stop or the window would
--- burn down on rolls nobody can see. That is also why noteGap is called here: a
--- hole in our own observation stream is exactly what crossCheckOK's fourth
--- rule needs to know about.
+-- burn down on rolls nobody can see.
+--
+-- S.gapAt and noteGap were deleted with the cross-check (ROLLBRIEF 4). They
+-- recorded when our own observation stream first had a hole, so that the removed
+-- crossCheckOK could decline to accuse the host over a roll we might have missed
+-- around the edge of a freeze. We no longer watch anybody else's rolls, so there
+-- is no such hole to reason about: the only roll we can miss is our own, and we
+-- can see for ourselves whether we made it.
 --
 -- CAREFUL: S.rollOpen stays TRUE through a freeze. Only the clock stops. Do not
 -- "fix" that by clearing it - the re-open path and the drain both depend on the
@@ -2014,21 +1990,12 @@ local function hostFreeze(S)
   S.rollRemaining = math.max(0, (S.deadline or GetTime()) - GetTime())
 end
 
--- Stamped ONCE, on the first moment our observation gate shut inside an open
--- roll window. Once only, because the check narrows to "everything before the
--- first hole" and a later hole cannot make an earlier observation better.
-local function noteGap(S)
-  if S.phase ~= "roll" or not S.rollOpen or S.gapAt then return end
-  S.gapAt = GetTime()
-end
-
 local function onSafetyChange(state, trigger)
   local S = mySession()
   if not S or S.phase == "done" then return end
   local isOn = trigger:match("_ON$") ~= nil
   -- plain combat neither blocks sends nor pauses the game
   if trigger == "COMBAT_ON" or trigger == "COMBAT_OFF" then return end
-  if isOn then noteGap(S) end   -- host and client alike
   if not S.isHost then
     -- resync trigger: the session just emerged from a safety interruption
     local cur = allClear()
@@ -2120,7 +2087,6 @@ onTick = function()
       -- on the next tick.
       if S.rollOpen and not gate and not S.frozen and not S.resultSent then
         hostFreeze(S)
-        noteGap(S)
         RefreshUI()
       end
       if S.frozen then
@@ -2135,14 +2101,34 @@ onTick = function()
       end
     end
   else
+    -- BEGIN LANDED AND THE ROLL DID NOT. Nothing else in this file notices that:
+    -- the client is in the right phase with the right roster, the host's
+    -- heartbeat is healthy, so the watchdog is quiet and there is no per-round
+    -- message to reveal the gap - the window simply never opens and the player
+    -- cannot roll at all. The host used to score that player's /roll off its own
+    -- screen, which hid the whole problem; it cannot any more, so the gap has to
+    -- be asked about. hostHandleSyncQ replays ROLL(remain) for exactly this,
+    -- and clientRequestSync is rate-limited inside.
+    if S.phase == "roll" and not S.rollOpen and not S.spectator
+      and S.beganAt and (now - S.beganAt) > ROLL_WAIT_PROBE then
+      clientRequestSync()
+    end
+    -- Our own roll report has not left this client yet - a comms lockdown, an
+    -- empty send bucket, or a queued whisper the lockdown then swallowed
+    -- (onDrop clears the flag). Keep offering it for as long as the window is
+    -- open. reportRoll answers false immediately when the wire refuses, so a
+    -- long lockdown costs one function call per tick and nothing else.
+    if S.phase == "roll" and S.rollOpen and not S.rollSent then
+      local me = myName()
+      local v = me and S.rolls[me]
+      if v then S.rollSent = reportRoll(S, v) end
+    end
     local st = PG.Safety.state
     if st.inEncounter or st.restricted or PG.Comm.Locked() then
       -- the host cannot legally heartbeat here: suspend the watchdog instead of
-      -- declaring it dead. Our own roll observations are being discarded for the
-      -- same reason, which is exactly what noteGap records.
+      -- declaring it dead.
       S.lastHB = (S.lastHB or now) + TICK
-      noteGap(S)
-    else
+    elseif S.scope == "group" then
       local quiet = now - (S.lastHB or now)
       if quiet > HB_TIMEOUT then
         clientHostDead()
@@ -2153,6 +2139,26 @@ onTick = function()
         -- mirror heals; one that has died stays silent and the timeout above
         -- ends the session with no ledger. Rate-limited inside.
         clientRequestSync()
+      end
+    else
+      -- SCOPE.md 6.2. Our own safety state says nothing about the host's when
+      -- we are not in the same content, so quiet is PAUSED first and dead only
+      -- much later. Nothing changes state on the way through: a game that is
+      -- merely waiting must not be able to end itself.
+      local quiet = now - (S.lastHB or now)
+      if quiet > HB_GIVEUP_WIDE then
+        clientHostDead()
+        return
+      end
+      if quiet > HB_QUIET_WIDE then
+        if not S.hostQuiet then
+          S.hostQuiet = true
+          RefreshUI()
+        end
+        if (now - (S.quietSyncAt or 0)) > QUIET_SYNC_EVERY then
+          S.quietSyncAt = now
+          clientRequestSync()
+        end
       end
     end
     if S.syncNeeded and allClear() then clientRequestSync() end
@@ -2201,13 +2207,23 @@ local function revealRows(S)
     out[1] = { text = "Out of sync - result unavailable.", role = "fade" }
     return out
   end
+  -- The number we can honestly print. A client only ever observed its OWN roll,
+  -- so for anybody else it comes from the RESULT itself: an L slot rolled the
+  -- low and an H slot rolled the high, by definition. A middling slot's exact
+  -- number is not on the wire and is not invented here.
+  local function valueOf(name, c)
+    local v = S.rolls[name]
+    if v then return tostring(v) end
+    if c == "L" then return tostring(res.low) end
+    if c == "H" then return tostring(res.high) end
+    return "-"
+  end
   local function add(want, role, place)
     for i = 1, #S.roster do
       local name = S.roster[i]
       if res.pattern:sub(i, i) == want then
-        local o = S.rolls[name]
         local delta = (S.rows and S.rows[name]) or 0
-        local text = name .. "  -  " .. (o and o.v or "-")
+        local text = name .. "  -  " .. valueOf(name, want)
         if delta > 0 then
           text = text .. "  collects " .. PG.Money(delta)
         elseif delta < 0 then
@@ -2274,15 +2290,15 @@ end
 -- the inset, roster pitch, audience offset and footer geometry are the shared
 -- numbers, read through mt() rather than copied.
 --
--- The bottom block (stray / headline / result / mine) is anchored BOTTOM-up
--- like the other four games, not to absolute offsets: ui.mine used to be pinned
--- at -470 in a 520-tall window and drew its descenders through the whole footer
--- button row.
+-- The bottom block (headline / result / mine) is anchored BOTTOM-up like the
+-- other four games, not to absolute offsets: ui.mine used to be pinned at -470
+-- in a 520-tall window and drew its descenders through the whole footer button
+-- row.
 -------------------------------------------------------------------------------
 
 -- 560, not 520, and it is the same height as Death Roll: the bottom block owes
--- the player four separate statements (strays, the verdict, the detail, and the
--- line about them), and at 520 they were bought with roster rows.
+-- the player three separate statements (the verdict, the detail, and the line
+-- about them), and at 520 they were bought with roster rows.
 local WIN_W, WIN_H = 380, 560
 local ROSTER_Y = -196
 
@@ -2402,15 +2418,11 @@ local function ensureWindow()
   ui.empty:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(ui.empty) end
 
-  -- a list of names, prefixed: LEFT (PLAN 4)
-  ui.stray = win:CreateFontString(nil, "OVERLAY", ft("S"))
-  ui.stray:SetPoint("BOTTOMLEFT", inset, 140)
-  ui.stray:SetPoint("BOTTOMRIGHT", -inset, 140)
-  ui.stray:SetJustifyH("LEFT")
-  ui.stray:SetWordWrap(false)
-  ui.stray:SetMaxLines(1)
-  ui.stray:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
-  if Theme then Theme.Shadow(ui.stray) end
+  -- The grey "Also rolled (not in the game): ..." line stood here. It listed
+  -- non-roster players whose /roll we had watched, which this client can no
+  -- longer see at all - it reads its own roll and nothing else. Nothing moved to
+  -- fill the band: every region below is anchored BOTTOM-up and none of them
+  -- shifted.
 
   -- THE RESULT HEADLINE, on its own line and centred. The money sentence used
   -- to be the third |n-separated clause of ui.result, so three full Name-Realm
@@ -2539,23 +2551,37 @@ local function rosterLines(S, me)
       if c == "X" then
         line = P.chgray .. name .. "   no roll|r"
       elseif delta < 0 then
-        line = P.chred .. name .. "   " .. (o and o.v or res.low)
+        line = P.chred .. name .. "   " .. (o or res.low)
           .. "   pays " .. PG.Money(-delta) .. "|r"
       elseif delta > 0 then
-        line = P.chgreen .. name .. "   " .. (o and o.v or res.high)
+        line = P.chgreen .. name .. "   " .. (o or res.high)
           .. "   collects " .. PG.Money(delta) .. "|r"
       else
-        line = name .. "   " .. (o and o.v or "-") .. tag
+        line = name .. "   " .. (o or "-") .. tag
       end
     elseif o then
-      line = name .. "   " .. o.v .. tag
-    else
+      line = name .. "   " .. o .. tag
+    elseif S.isHost then
+      -- the host holds every report, so a blank really is "has not rolled yet"
       line = P.chgray .. name .. "   -|r"
+    else
+      -- ...and a client holds only its own, so it says nothing about anybody
+      -- else's roll rather than greying them out as if they had not made one.
+      line = name .. tag
     end
     lines[#lines + 1] = line
   end
   return lines
 end
+
+-- The audience, named in the window itself so nobody has to remember which one
+-- they picked. Loot Goblins' wording: at the two wide scopes the line carries
+-- the settling-up reality rather than just the label.
+local SCOPE_HEADER = {
+  group = "Party",
+  guild = "Guild game - settle up with people you can find again.",
+  public = "Public - realm-wide. Virtual gold, honour-system settling.",
+}
 
 RefreshUI = function()
   local S = mySession()
@@ -2569,7 +2595,7 @@ RefreshUI = function()
   local inRoster = (me and S.joined[me]) and true or false
   local refereed = (S.isHost and not S.seated) and true or false
 
-  ui.audience:SetText((S.scope == "group") and "Party" or "")
+  ui.audience:SetText(SCOPE_HEADER[S.scope] or "")
   ui.wager:SetText("/roll " .. (S.wager or "?"))
   ui.hint:SetText(hintText(S))
 
@@ -2580,8 +2606,13 @@ RefreshUI = function()
         or math.max(0, (S.joinDeadline or now) - now)
       -- CONCURRENCY.md 6.3: no BUSY message exists, so the host is shown what
       -- this client already knows for free - who else here runs the addon.
+      -- PG.Peers counts GROUP and private traffic only and is pruned against
+      -- the live group, so it is shown at group scope only; at guild or public
+      -- it would be a confident number about the wrong room.
       local peers = 0
-      for _ in pairs(PG.Peers or {}) do peers = peers + 1 end
+      if S.scope == "group" then
+        for _ in pairs(PG.Peers or {}) do peers = peers + 1 end
+      end
       status = #S.roster .. " in"
         .. ((peers > 0) and (" of " .. (peers + 1) .. " addon users") or "")
         .. " - rolls start in " .. math.ceil(remaining) .. "s"
@@ -2590,14 +2621,24 @@ RefreshUI = function()
       status = #S.roster .. " in - waiting for the host to start"
     end
   elseif isRoll then
-    if S.spectator then
+    if S.hostQuiet then
+      -- SCOPE.md 6.2: quiet is not dead, and nothing has been lost. Your own
+      -- roll is already reported (or will re-send from the ticker), so this is
+      -- genuinely just waiting.
+      status = "Waiting for the host - they may be in a boss fight."
+    elseif S.spectator then
       status = "Spectating - your roster is out of sync."
     elseif not S.rollOpen then
       status = "Roster locked - the roll window opens in a moment..."
     elseif S.frozen or not rollGateOpen() then
       status = "Paused - rolls don't count until this clears."
-    else
+    elseif S.isHost then
+      -- Only the host has the count: every other client reports its own roll and
+      -- hears nothing back until RESULT. Claiming a tally we do not hold would be
+      -- the sort of confident lie this file spent three passes removing.
       status = S.rollN .. " of " .. #S.roster .. " rolled"
+    else
+      status = #S.roster .. " playing - the host is counting the rolls"
     end
   else
     -- the end text itself is ui.mine's line, not this one; repeating it in both
@@ -2647,12 +2688,6 @@ RefreshUI = function()
   for i = shown + 1, #rows do rows[i]:Hide() end
   ui.empty:SetText(emptyText or "")
   ui.empty:SetShown(emptyText ~= nil)
-
-  if S.strayN > 0 and not isDone then
-    ui.stray:SetText("Also rolled (not in the game): " .. table.concat(S.stray, ", ", 1, S.strayN))
-  else
-    ui.stray:SetText("")
-  end
 
   -- The outcome. The verdict - the sentence that says how much moved - is its
   -- own centred headline; the names that produced it are the detail under it.
@@ -2710,11 +2745,12 @@ RefreshUI = function()
   elseif not inRoster then
     mineText = P.chgray .. "You are sitting this one out.|r"
   elseif me and S.rolls[me] then
-    mineText = "You rolled " .. P.chgold .. S.rolls[me].v .. "|r."
+    mineText = "You rolled " .. P.chgold .. S.rolls[me] .. "|r."
   elseif not rollsReady() then
-    -- Honest, and NOT the player's fault: this client cannot parse its own roll
-    -- lines, so it will never show one. The host is still scoring them.
-    mineText = P.chgray .. "This client can't read /roll results - the host is still scoring you.|r"
+    -- Honest, and NOT the player's fault - but the consequence changed with the
+    -- roll path: a client that cannot parse its own /roll line has nothing to
+    -- report, and the host cannot score a roll nobody told it about.
+    mineText = P.chgray .. "This client can't read /roll results, so your roll can't be reported.|r"
   else
     mineText = "Type " .. P.chgold .. "/roll " .. (S.wager or "?") .. "|r in chat."
   end
@@ -2792,12 +2828,19 @@ local function fieldValue(eb, lo, hi)
   return n
 end
 
--- SCOPE.md 5.2 cfg.reasons: on a DISABLED segment this REPLACES the availability
--- reason, which is exactly what a permanently unsupported audience needs.
+-- SCOPE.md 5.2 cfg.reasons. This used to REFUSE guild and public ("a /roll only
+-- reaches your party or raid"), which stopped being true the moment each client
+-- began reporting its own roll over the wire. Now every segment is playable and
+-- these ride along as information; the public wording is Loot Goblins' in
+-- substance, because the ledger is a claim and not a transfer.
 local function scopeNote(scope)
-  if scope == "guild" or scope == "public" then
-    return "The Gambler follows your own /roll. A /roll only reaches your party or raid,"
-      .. " so only your group can see the same numbers you do."
+  if scope == "public" then
+    return "Public - anyone on your realm. Gold here is virtual and settling up is"
+      .. " on the honour system, so a stranger who loses can simply log out."
+      .. " Fine for fun; keep the wager small with people you do not know."
+  elseif scope == "guild" then
+    return "Everyone in your guild who runs the addon, on any realm. Each player"
+      .. " rolls in their own chat and their addon reports it to the table."
   end
   return nil
 end
@@ -2815,7 +2858,7 @@ refreshDialog = function()
     note = why
   elseif not scope then
     canStart = false
-    why = "Nowhere to start a game: you're not in a party or raid."
+    why = "Nowhere to start a game: you're not in a group or a guild."
     note = why
   end
   -- The loot-roll collision is signposted, not forbidden: a wager of exactly 100
@@ -2894,7 +2937,7 @@ local function ensureDialog()
   dlgStart = PG.UI.Button(dialog, startLabel, 150, 26, function()
     local scope = dlgScope and dlgScope:Get() or nil
     if not scope then
-      toast("nowhere to start a game - you're not in a party or raid.")
+      toast("nowhere to start a game - you're not in a group or a guild.")
       return
     end
     local wager = fieldValue(dlgInputs.wager, MIN_WAGER, MAX_WAGER)
@@ -2942,12 +2985,26 @@ PG.RegisterInit(function()
     end
   end
   PG.Comm.Register("GB", onComm, onDrop)
-  -- BRIEF 4.2. The Gambler is group scope ONLY, so the group roster is the whole
-  -- proof of who may whisper us: this predicate is consulted only for whispers
-  -- that already failed the group test, and there is no such thing as a
-  -- legitimate GB whisper from outside the group. Same answer as The Pull Book's.
+  -- Whisper trust (SCOPE.md 4.3, retargeted at the registry by CONCURRENCY.md
+  -- 5.4). This was The Pull Book's blanket `false` while the game was group
+  -- only, and that was right: the predicate is consulted only for whispers that
+  -- already failed the group test, and inside a group there was no such thing as
+  -- a legitimate GB whisper from outside it. At guild and public the group test
+  -- vouches for nobody, so a blanket false drops the first JOIN, every ROLLED
+  -- report and every SYNCQ - the scopes would be dead on arrival. Rock Paper
+  -- Scissors' shape: the host, anybody already in the roster, and a stranger's
+  -- opening JOIN while OUR join window is open at a wider scope. Coarse on
+  -- purpose - every message behind it still passes the full gate chain and its
+  -- own field validation, and the router's rate limiter bounds the last case.
   if PG.Comm.RegisterTrust then
-    PG.Comm.RegisterTrust("GB", function() return false end)
+    PG.Comm.RegisterTrust("GB", function(sender)
+      local S = mySession()
+      if not S or S.phase == "done" then return false end
+      if sender == S.host then return true end
+      if S.joined[sender] then return true end
+      if S.isHost and S.phase == "join" and S.scope ~= "group" then return true end
+      return false
+    end)
   end
   -- Registered once, for the life of the session: a /roll in a raid is common
   -- enough that churning registrations would cost more than onRollObserved's

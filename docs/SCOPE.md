@@ -19,12 +19,44 @@ apply these deltas when reading it, in the style of `CONCURRENCY.md` section 0.3
 
 | Section | Delta |
 |---|---|
-| Sections 0 and 1.2, "not every game gets every scope" | **Extended, not changed.** Six games now: `LG` party+guild+public, `RPS` party+guild+public, `QZ` party+guild+public, `PB` party only, `DR` party only, `GB` party only. Each still declares `PG.<code>.SCOPES` in its own file and the picker still reads it. |
-| Section 1.2's reasoning for `PB` being party-only | **Applies verbatim, and harder, to `DR` and `GB`.** Those two are settled by a real in-game `/roll`, whose system message reaches only the party or raid you are standing in. A guild-scope roll game would have *no witnesses at all* - the host would be dictating gold outcomes from evidence nobody else can see, which is strictly worse than the Pull Book's situation. Guild and public are not "unsupported" for them, they are impossible. Treat as closed. |
+| Sections 0 and 1.2, "not every game gets every scope" | **Extended, not changed.** Six games now: `LG` party+guild+public, `RPS` party+guild+public, `QZ` party+guild+public, `PB` party only, `DR` party only, `GB` party only. Each still declares `PG.<code>.SCOPES` in its own file and the picker still reads it. **The `DR`/`GB` half of this row is SUPERSEDED by section 0b - both are all three scopes now.** |
+| Section 1.2's reasoning for `PB` being party-only | ~~**Applies verbatim, and harder, to `DR` and `GB`.**~~ **SUPERSEDED IN FULL by section 0b.** This row said guild and public were not merely unsupported for the two roll games but *impossible*, and told the reader to treat it as closed. It was wrong, and the premise it rested on was removed rather than argued with: the roll no longer travels as a system message at all. Section 1.2's reasoning still applies verbatim to `PB` alone. |
 | Section 4.4's blanket `if meta.scope == "public" then return false end` | **Already superseded before 1.1.0** by the owner decision of 2026-08-12 recorded in 1.2 and implemented in `Ledger.lua`'s header: the blanket stop was replaced by gate **G1** (a client writes rows only for a session it joined and played). The four gates are what make public safe. 1.1.0 changes nothing here; the note exists because the code block above is still printed as a "hard rule" that the shipped persistence layer deliberately does not contain. |
 | Section 4.4's premise that only `RPS` reaches the public channel without gold | **`QZ` is the second.** It is points-only and contains **zero calls** into the ledger, permanently - checkable with `grep -n 'PG\.Ledger\.' PengyouGames/Games/Quiz.lua`, the escaped form, so the check does not match its own documentation. Its persistence is a medal tally and a name-free counter in `db.qz`, and at non-group scope only the local player's own record is persisted (the `RPS` rule). |
 | Section 2.3, all 1:1 traffic goes by whisper at every scope | **Unchanged and newly load-bearing.** `QZ` answers are typed into the addon window and whispered; nothing in it ever calls `SendChatMessage`. |
-| The "nothing is visible to non-users" property | **Amended for `DR` and `GB` only.** The addon still prints nothing anywhere. Those two games ask the PLAYER to type `/roll` (or press a button that asks their own client to), and the resulting system line is visible to the whole group, addon or not. That is deliberate: it is the evidence every client re-derives the outcome from before committing a row. |
+| The "nothing is visible to non-users" property | **Amended for `DR` and `GB` only.** The addon still prints nothing anywhere. Those two games ask the PLAYER to type `/roll` (or press a button that asks their own client to), and the resulting system line is visible to whoever is grouped with them, addon or not. ~~That is deliberate: it is the evidence every client re-derives the outcome from before committing a row.~~ **The trailing clause is superseded by 0b:** the system line is no longer evidence anybody else reads. It is visible because a real `/roll` is how the number is produced, and that is all. |
+
+---
+
+## 0b. Roll-rework delta (2026-08-13) - `DR` and `GB` open to guild and public
+
+A two-player live test found that only one player's rolls ever registered. The host adjudicated
+by watching `CHAT_MSG_SYSTEM` for **everyone's** `/roll` and resolving the printed name against
+the frozen roster; a name printed without a realm is normalized onto the LOCAL realm, so the
+lookup agreed for some pairs of players and missed for others, and a miss dropped the roll in
+silence. From the dropped player's seat that is indistinguishable from "you cannot play".
+
+**The model now:** every client observes only its OWN roll and reports it to the host over the
+wire, as `ROLLED | seq | value | low | high` whispered to the host at every scope (`seq` is the
+turn number in `DR`, the round number in `GB`). The host adjudicates from the report and
+broadcasts the authoritative outcome exactly as before; its own roll is applied locally and
+never whispered to itself (the section 6 loopback rule this codebase follows everywhere).
+
+There is no name resolution left anywhere in the roll path. You always know your own name
+(`PG.FullName("player")`), and the SENDER of an addon message is vouched by the delivery
+distribution rather than parsed out of text.
+
+**Consequences for this document:**
+
+| Section | Delta |
+|---|---|
+| 0a rows 1 and 2, and section 1.2's table | `PG.DR.SCOPES` and `PG.GB.SCOPES` are `{ group = true, guild = true, public = true }`. Six games: `LG`, `RPS`, `QZ`, `DR`, `GB` all three; `PB` party only, and now genuinely the only exception. The audience restriction on the roll games rested entirely on the `/roll` system message being group-only, and nothing in the roll path reads a system message about anybody else any more. |
+| 4.3, "PB registers a trust predicate that returns `false` unconditionally" | **Still true of `PB`, and no longer true of `DR` or `GB`.** Both now register the LG/RPS predicate verbatim (host, or already joined, or `S.isHost and S.phase == "join" and S.scope ~= "group"`). This is not optional dressing: the predicate is consulted only for whispers that fail the group test, so a blanket `false` at a wider scope drops every `JOIN`, every `ROLLED` report and every `SYNCQ` from outside the group, and the new scopes would be dead on arrival with no error anywhere. |
+| 4.4, `meta.vouch` required at public | Both games pass it. `DR` passes `S.vouched`, accumulated from the `JOINED`/`LEFT` stream the client watched itself; `GB` builds one from its live roster at commit time. A missing `vouch` at public scope is refused by `Ledger.Commit` with reason `"vouch"`, which would look like a mystery at the table rather than like a bug. |
+| 6.2, wide-scope heartbeats | Both games gained the RPS pair (`HB_QUIET_WIDE = 150`, `HB_GIVEUP_WIDE = 300`, one heal request per minute while quiet). At group scope the 35s rule is unchanged. Outside the group our own safety state says nothing about the host's, so a host in an encounter must read as PAUSED, not dead. |
+| Group-scope facts inside the two games | `DR`'s absence scan (`hostScanGone`/`SHORT_TURN`) and both games' `PG.Peers` join-window count are GROUP facts and are now gated on `S.scope == "group"`. Outside the group every player is legitimately "not in my group" - unguarded, the absence scan would hand every seat a 4-second turn and the peer count would describe the wrong room. |
+| The "no witnesses" objection in the superseded row above | Answered by deletion, not by argument. A client no longer re-derives anything and no longer refuses to commit when it disagrees; the host is trusted here exactly as it is in `LG`, `PB` and `RPS`. A client still toasts a mismatch for ITS OWN roll, as information only. Owner's ruling, 2026-08-13. |
+| Non-addon players | **They can no longer take part in `DR` or `GB`.** There is nobody to report their roll, and no fallback that watches system messages for them - that is the machinery this change deleted. Stated on the Rules pages and in the README. |
 
 ---
 

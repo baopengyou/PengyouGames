@@ -9,9 +9,9 @@ gold, never posts to chat itself, and hides all of its UI the instant anything
 raid-critical happens.
 
 Only people running the addon see anything -- with one deliberate exception. Death Roll
-and The Gambler are settled by real `/roll` results, which means the *rolls* are visible
-to your whole group whether or not they have the addon. That is the point of those two
-games, and it is spelled out under [Games that use /roll](#games-that-use-roll).
+and The Gambler are settled by real `/roll` results, so your roll is visible in chat to
+whoever is standing around you, addon or no addon. That is the point of those two games,
+and it is spelled out under [Games that use /roll](#games-that-use-roll).
 
 ## Playing with people on 1.0.0
 
@@ -28,6 +28,13 @@ symptom to expect, and the fix is for everyone to update.
 Updating did *not* break compatibility for the three original games on purpose. Bumping
 the message version would have made 1.0.0 and 1.1.0 players unable to play Loot Goblins
 together, which is a much worse trade than a silently uninvited player.
+
+**Death Roll and The Gambler also need matching versions with each other.** How a roll
+reaches the host changed after 1.1.0: each player's addon now reports its own roll instead
+of the host reading everyone's chat. A player on 1.1.0 sitting at a newer host's table
+never reports a roll and is scored as though they never rolled -- they will see their own
+number in chat and nothing happen. There is no version warning for this, so if a Death
+Roll table has one player who never seems to roll, check their version first.
 
 ## Installation
 
@@ -94,14 +101,20 @@ only be played by people who can see the thing it is scored from.
 | Loot Goblins | Party, Guild, Public |
 | Rock Paper Scissors | Party, Guild, Public |
 | Quiz | Party, Guild, Public |
+| Death Roll | Party, Guild, Public |
+| The Gambler | Party, Guild, Public |
 | The Pull Book | Party only -- scored from the pull you are personally standing in |
-| Death Roll | Party only -- a `/roll` only reaches your own group |
-| The Gambler | Party only -- same reason |
 
-The two `/roll` games are the strictest case. A roll appears in the chat of your party or
-raid and nowhere else, so a guildmate in a city would be asked to bet gold on evidence
-they cannot see. Guild and Public are not merely switched off for those two: they are
-impossible, and the start dialog says so on hover instead of hiding the option.
+The Pull Book is now the only exception, and it is a real one: the book is settled by the
+boss fight you are personally standing in, so there is nothing a guildmate in a city could
+see.
+
+The two `/roll` games used to be listed here as party-only for a similar-sounding reason
+-- a `/roll` line reaches your own party and nowhere else. That reason is gone. Each
+player's own addon now reports their own roll to the host over the addon wire instead of
+the host trying to read everyone's chat, so the audience is no longer limited by who can
+see your chat frame. The price is stated plainly below: everyone at the table needs the
+addon.
 
 Public uses a hidden chat channel that the addon joins for you. Nothing is ever printed
 to your chat windows, but it does occupy one of your ten channel slots, so it is opt-in
@@ -143,13 +156,23 @@ the addon is deliberately not invisible, so here is exactly what happens:
   -- and you type it. There is also a ROLL button that asks your own client to make that
   same roll for you; either way it is an ordinary roll, produced by the server, that the
   addon merely *watches*. The addon never invents a number and never types into chat.
-- **Your group sees it.** The roll lands in the chat of everyone in your party or raid,
-  including people without the addon. Nothing else about the game is printed anywhere.
-- **That is what makes the result unarguable.** Because everyone watched the same rolls,
-  every player's copy of the game works out the winner from the rolls **it** saw and
-  compares that against what the host announced. If the two disagree, that client records
-  nothing and says so. If you were away and missed a roll that mattered, same answer:
-  nothing recorded, and it tells you. Nobody has to trust anybody's screen.
+- **Whoever is around you sees it.** It is an ordinary roll, so it lands in the chat of
+  everyone in your own party or raid, addon or no addon. In a guild or realm-wide game
+  that is still true of the people standing next to you -- it is simply not how the *other
+  players* learn your number. Nothing else about the game is ever printed to chat.
+- **Your addon reports your roll; the host scores the reports.** Your copy watches your
+  own roll only and sends it to the host over the addon wire, and the host works out the
+  result and tells the table. The host used to try to read *everybody's* roll out of chat
+  and match the printed names against the table -- that is what broke, and in a real
+  two-player game it meant one player's rolls never registered at all. Watching one name
+  you always know -- your own -- is what removed that whole class of bug, and it is what
+  opened these two games to Guild and Public.
+- **So everyone playing needs the addon.** A player without it has nothing to report their
+  roll with and cannot take part; they can still watch. That is a real, small loss and it
+  is the honest price of the two things above.
+- **If the host records a different number than you saw, you are told.** For your own roll
+  only, as information -- it will not stop the game being recorded. The host is trusted
+  here exactly as it is in Loot Goblins, The Pull Book and Rock Paper Scissors.
 - **Rolls made while the game is hidden do not count** -- not for you, not for anyone. If
   a boss pull, ready check or pull timer is up, the addon stops watching entirely, on
   every client alike, and the game resumes afterwards with time put back on the clock.
@@ -328,11 +351,11 @@ person.
   communicates only over hidden addon messages and prints only to the player's own chat
   frame. It has never called a chat function and still does not. The honest asterisk is
   Death Roll and The Gambler: those two are settled by a real `/roll`, which the player
-  types (or triggers with the ROLL button), and a roll result is visible to your whole
-  group including people without the addon. That is deliberate -- it is what makes those
-  two games auditable -- but it does mean they are the only two games in the suite that
-  are not invisible to non-users. The other four leave no trace in chat or the combat log
-  at all. If you want a completely silent raid, those are the two to skip.
+  types (or triggers with the ROLL button), and a roll result lands in the chat of anyone
+  grouped with them, addon or not. That is deliberate -- the number is the server's rather
+  than the addon's -- but it does mean they are the only two games in the suite that are
+  not invisible to non-users. The other four leave no trace in chat or the combat log at
+  all. If you want a completely silent raid, those are the two to skip.
 - **M+ and PvP self-disable**: patch 12.1 blocks addon messaging for the entire duration
   of a Mythic+ run and any PvP match (and during boss encounters). Pengyou Games respects
   this completely: nothing is sent, no bet windows open, and anything that could not be
