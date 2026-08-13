@@ -15,14 +15,37 @@ LUA=${1:-/opt/homebrew/bin/lua}
 LOGS=${2:-1000}
 LUAC=$(dirname "$LUA")/luac
 
+# print only the tail of a verbose check, but still fail on failure. Defined
+# here rather than beside its first use: under `set -e` a pipeline's status is
+# the LAST command's, so `lua ... | tail -3` would report tail's success and
+# swallow a real failure.
+quiet() {   # quiet <command...> : print only the tail, but still fail on failure
+  out=$(mktemp) || return 1
+  if "$@" > "$out" 2>&1; then
+    tail -3 "$out"; rm -f "$out"
+  else
+    rc=$?
+    cat "$out"; rm -f "$out"
+    return $rc
+  fi
+}
+
 echo "== syntax check (luac -p) =="
-for f in "$DIR"/../sim/*.lua; do
+for f in "$DIR"/../sim/*.lua "$DIR"/../fog/*.lua; do
   "$LUAC" -p "$f" && echo "  ok $(basename "$f")"
 done
 
 echo
 echo "== A.5 greps (plus clock, RNG and Lua 5.1 compatibility) =="
 "$LUA" "$DIR/greps.lua"
+"$LUA" "$DIR/greps.lua" "$DIR/../fog"
+
+echo
+echo "== fog of war: every rule in docs/IDLE_BATTLE_FOG.md, one at a time =="
+# Here and not in the M2 gate: this is a CORRECTNESS property with exactly one
+# acceptable answer, which is the whole basis of the M1/M2 split. It also
+# asserts that fog memory stays OUT of stateHash, which nothing else can see.
+quiet "$LUA" "$DIR/fogtest.lua"
 
 echo
 echo "== smoke: Part C arithmetic landmarks =="
@@ -41,16 +64,6 @@ echo "== hash coverage: every field moves the state hash =="
 # NOT piped into tail. Under `set -e` a pipeline's status is the LAST command's,
 # so `lua ... | tail -3` would report tail's success and swallow a real failure --
 # turning a verbose check into a silent one.
-quiet() {   # quiet <command...> : print only the tail, but still fail on failure
-  out=$(mktemp) || return 1
-  if "$@" > "$out" 2>&1; then
-    tail -3 "$out"; rm -f "$out"
-  else
-    rc=$?
-    cat "$out"; rm -f "$out"
-    return $rc
-  fi
-}
 quiet "$LUA" "$DIR/hashcover.lua"
 
 echo

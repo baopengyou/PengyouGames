@@ -31,7 +31,35 @@ Binding design documents (this code implements them, it does not supersede them)
 tools/ci.sh                  # the whole M1 gate at 1000 logs. This is the one to run.
 tools/ci.sh 50               # same gate, 50 command logs instead of 1000, seconds
 tools/ci.sh 1000 /path/lua   # pick the interpreter (luac is looked for beside it)
+
+tools/m2.sh                  # the whole M2 gate: 1,632 scripted matches against C.6
+tools/m2.sh 1                # same gate, 272 matches, ~25 s
 ```
+
+**They are two gates, not one, and both must be run.** `tools/m2.sh`'s header gives
+the full reasoning; the short version is that M1 is a correctness property with one
+acceptable answer and M2 is a balance property measured against a provisional
+document, and folding the second into the first makes a tuning question turn the
+determinism gate red. **M2 is red while M1 is green**, which is exactly the situation
+that would have destroyed the meaning of `tools/ci.sh` had they been merged.
+`tools/m2.sh` is a front door onto `sweep/run.sh`, which stays the single definition
+of what the M2 gate does.
+
+**M2 now measures two INFORMATION REGIMES and the gate is the fogged one.** `fog`
+applies `../docs/IDLE_BATTLE_FOG.md` -- the owner's binding fog model, implemented in
+`fog/Fog.lua` -- to the enemy half of what a line is shown; `full` is Ruling 1's shared
+state unfiltered, which is what M2's first pass silently measured. Every M2 report prints
+which regime produced its numbers. See Finding 1.
+
+> **THE REGIME USED TO BE CALLED `a3` AND IT IS NOW CALLED `fog`. THE CURRENT NUMBERS ARE
+> IN FINDING 9; FINDING 8 HOLDS THE SAME MODEL PLAYED BY A ROSTER THAT NEVER SCOUTED, AND
+> EVERYTHING OLDER THAN THAT WAS MEASURED UNDER `a3`.** `a3` was a three-bucket "muster bar" this
+> implementation invented because fog had never been specified; the owner has now specified
+> it and `IDLE_BATTLE_FOG.md` section 8.1 deletes the bar outright. **The M2 tables in this
+> README are therefore VOID, not stale and not a baseline** -- the doc says so itself in
+> section 8.4 -- and the rename exists so that no old number can be quoted as if it were
+> comparable. Run `tools/m2.sh` to get numbers under the model that actually ships. See
+> Finding 8.
 
 Individual checkers, all runnable on their own:
 
@@ -49,8 +77,45 @@ lua tools/mechanics.lua          # rules the random logs rarely reach
 lua tools/rulescover.lua         # every ruleset value is inside rulesHash
 lua tools/hashcover.lua          # every state field moves the hash
 lua tools/mirror.lua 2000        # A.2: a mirrored match mirrors exactly
+lua tools/fogtest.lua            # FOG: every rule in docs/IDLE_BATTLE_FOG.md
+                                 #   INCLUDING section 3a contact reveal,
+                                 #   one at a time, against fog/Fog.lua
 lua harness/selftest.lua         # the committed golden hashes
 lua harness/fuzz.lua 1000        # the milestone + mid-run arrival + invariants
+lua sweep/sweep.lua 6            # M2: the C.6 cross-check, metric by metric, with
+                                 #   a delta column. Informational; always exits 0.
+lua sweep/sweep.lua 6 Rush-horse # ...or one line against the whole pool. Reports
+                                 #   THAT LINE ONLY and prints no C.6 comparison:
+                                 #   the other 16 lines play 2*seeds matches each,
+                                 #   all against the named line, so every roster
+                                 #   aggregate off that run is meaningless.
+lua sweep/verdict.lua 6          # M2: the milestone asserted, BOTH regimes. THE gate.
+lua sweep/verdict.lua 6 800000   # ...at a different seed base, to test seed luck.
+                                 #   800000 is the one that moves a clause.
+lua sweep/verdict.lua 6 500000 fog  # ...one regime only, half the runtime
+lua sweep/determinism.lua 40 fog # M2: the policy layer replays byte-identically,
+                                 #   INCLUDING each side's fog memory
+lua sweep/determinism.lua 40 full   # ...and again under the other regime
+lua sweep/fogaudit.lua           # M2: which lines react to something the fog
+                                 #   never renders, AND how much of the board any
+                                 #   line ever looks at. Per line: the lowest
+                                 #   position it EVER sees an enemy unit at, the
+                                 #   share of its threat detections the fog
+                                 #   deletes, the mean sections it has lit and
+                                 #   explored out of 8, and the share of its
+                                 #   decisions taken against a board showing
+                                 #   nothing at all. Diagnostic; exits 0.
+lua sweep/fogaudit.lua 2 full    # ...one regime. "full" is the one that can still
+                                 #   see what "fog" is deleting, so it is the one
+                                 #   that sizes the defect.
+lua sweep/scoutprobe.lua         # M2: WHAT BUYING SIGHT IS WORTH, decomposed
+                                 #   into the body and the threshold, over three
+                                 #   rosters that differ in nothing else.
+                                 #   Diagnostic; exits 0.
+lua sweep/scoutprobe.lua 6 500000   # ...at the gate's own sample size and seeds
+lua sweep/famstat.lua            # M2: is the family-spread clause measurable at all?
+lua sweep/probe.lua 6 Balanced   # M2: what one building costs against a control
+lua sweep/probe.lua 6 Turtle-eco # ...and against a second, differently-minded one
 ```
 
 Every one of them exits non-zero on failure, so any of them is usable as a CI step.
@@ -107,11 +172,14 @@ the same process, so it must never silently switch itself off.
 **Two caveats, stated plainly because a future agent will otherwise read the table as
 "M1 is finished".**
 
-1. **No Lua 5.1 interpreter exists on this machine**, so "runs under 5.1" is currently
-   proven *statically* by `tools/comptest.sh` (which rejects every 5.2+/5.3+/5.4+
-   construct) rather than by execution. Installing `lua5.1` and running
-   `tools/ci.sh 1000 $(which lua5.1)` would close this. Until then the first real 5.1
-   execution happens inside WoW, which is the worst possible place to discover a problem.
+1. **No true Lua 5.1 interpreter exists on this machine**, so "runs under 5.1" is proven
+   *statically* by `tools/comptest.sh` (which rejects every 5.2+/5.3+/5.4+ construct) plus
+   *dynamically* under **LuaJIT 2.1, which implements 5.1 semantics with doubles**:
+   `sh tools/ci.sh 1000 $(which luajit)` is **GREEN (5/5 steps, 1000 logs)** with
+   `SUITE HASH 1404498451`, bit-identical to the Lua 5.5 run. That is the numeric model
+   WoW uses and it is the half that matters most. What is still missing is PUC 5.1 itself,
+   whose standard library differs from LuaJIT's in a few corners; installing `lua5.1` and
+   running `tools/ci.sh 1000 $(which lua5.1)` would close it completely.
 2. **The cross-machine clause is untested.** Everything here has run on one CPU. The
    arithmetic is written so that this cannot matter (see rule 1 below), but "cannot matter"
    is a claim, and the milestone asks for a measurement. Running `tools/ci.sh` on a second
@@ -201,9 +269,33 @@ sim/                 the simulation. Nothing in here may touch WoW, the UI or th
                      tostring - all three would differ across Lua versions.
   Rand.lua           the sim's own integer LCG. See rule 3.
 
+fog/                 THE FOG OF WAR MODEL (../docs/IDLE_BATTLE_FOG.md), and a
+                     SIBLING of sim/ rather than a file inside it. The reason is
+                     A.5 grep 1: greps.sh and greps.lua DISCOVER their file list
+                     from sim/ and assert that nothing in it can ask what is
+                     visible. Put the fog model in there and that sentence
+                     becomes self-referential -- the directory that must not be
+                     able to ask now defines the answer -- and M7's proof ("a
+                     match with Fog stubbed to always-true hashes identically")
+                     stops being possible without editing sim/. Outside sim/ the
+                     guarantee is structural: there is no fog module in the sim's
+                     require namespace at all. HELD TO THE SIM'S DETERMINISM
+                     RULES, because the M2 policies consume it.
+  Fog.lua            section arithmetic derived from the ruleset, per-entity
+                     visibility for enemy units / buildings / keep, CONTACT
+                     REVEALS (doc section 3a -- you see what you are fighting,
+                     entity-scoped, read off the sim's own targeting predicate),
+                     the front-slot shield, and the per-side MEMORY store --
+                     which lives here and NOT in sim state and NOT in
+                     Hash.state, for the three reasons its own MEMORY block
+                     gives.
+
 tools/               checkers and the first test suite. NOT held to the sim's determinism
                      rules - these run on one machine and may use io, os and pairs freely.
   ci.sh              THE M1 GATE. greps + comptest + luac -p + BOTH suites. Run this.
+  m2.sh              THE M2 GATE, beside ci.sh where a future engineer will look
+                     for it. A front door onto sweep/run.sh; its header argues
+                     why M2 is a sibling of the M1 gate and not a step inside it.
   greps.sh           the four A.5 greps, over every .lua file found under sim/.
   comptest.sh        Lua 5.1 / 5.4 compatibility and determinism hazards.
   strip_lua.awk      blanks comments and string literals (line numbers preserved) so the
@@ -228,6 +320,12 @@ tools/               checkers and the first test suite. NOT held to the sim's de
   hashcover.lua      mutates each state field in turn and proves the hash notices.
   mirror.lua         the A.2 side-symmetry test: N random mirrored matches plus a
                      deterministic same-tick mutual-spoils case.
+  fogtest.lua        EVERY RULE IN docs/IDLE_BATTLE_FOG.md, ONE AT A TIME, each
+                     against a hand-built board and each asserted with its
+                     NEGATION -- visible here, invisible one section away. Also
+                     asserts the two things nothing else can see: that fog memory
+                     does not move stateHash, and that the muster bar is DELETED
+                     rather than disabled. Runs inside the M1 gate.
 
 harness/             the SECOND suite, and not redundant with tools/. Three things live
                      ONLY here, and the M1 gate is dishonest without them:
@@ -254,11 +352,109 @@ harness/             the SECOND suite, and not redundant with tools/. Three thin
   greps.lua          the harness's own independent implementation of the greps.
   logs/hand.iblog    the hand-written replay artifact the goldens are keyed to.
 
+policy/              M2. The scripted hands on the mouse. HELD TO THE SIM'S
+                     DETERMINISM RULES, because a policy WRITES the command log:
+                     one that reads a clock or rolls math.random makes the two
+                     clients play different matches while every M1 check stays
+                     green. greps.sh, greps.lua and comptest.sh all run over
+                     this directory.
+  Policy.lua         the interface a line implements, the read-only view it is
+                     handed (a flat table of integers, rebuilt each poll -- a
+                     policy holds no reference to the sim at all), the order
+                     constructors, and the per-match instance with its own
+                     sim/Rand.lua stream. Also owns THE INFORMATION REGIME
+                     (M.VISION: "fog", which applies fog/Fog.lua to the foe half
+                     of the view, or "full", Ruling 1's shared state unfiltered)
+                     and asserts A.11.4's wire budget against
+                     POLL/MAX_ORDERS_PER_POLL at load time. It CONSUMES the fog
+                     model and does not implement one: the renderer must apply
+                     the same rules, and two implementations of "what can be
+                     seen" would be two different games.
+  lines.lua          the seventeen lines, four per family plus `Pathfinder` in
+                     mixed, one parametric engine and seventeen configurations.
+                     Each carries a note saying which Part B or Part C claim it
+                     is testing. Every line declares ONE attention trigger
+                     (`reactAt`), whether it BUYS SIGHT (`scout`) and HOW OFTEN
+                     (`scoutEvery`), and line() enforces the relationships at
+                     load: a line that buys nothing may not name a threshold
+                     below REACT_MIN (the midline) or a cadence at all, a line
+                     that declares a scout may go as deep as SCOUT_SIGHT and no
+                     deeper, and no line may refresh faster than
+                     SCOUT_EVERY_MIN. FIVE of the seventeen scout --
+                     `Pathfinder` at the floor cadence and Raid-counter,
+                     Turtle-eco, Counterpunch and Adaptive at the default one --
+                     and the other twelve are the controls that make them
+                     readable. See Findings 7, 8, 9 and 10.
+
+sweep/               M2. The match driver, the round-robin, and the statistics
+                     needed to tell a finding from a coincidence.
+  driver.lua         ONE MATCH: two lines, a seed, a ruleset. The only place the
+                     two worlds meet, and the only file that can let a policy
+                     cheat -- so everything that could is named in its header.
+                     Sim-affecting, and checked as such.
+  measure.lua        THE ROUND-ROBIN, as a measurement: returns integers, prints
+                     nothing, asserts nothing. Owns the FROZEN seed schedule, the
+                     single transcription of C.6's published table, and Part E's
+                     thresholds -- so the four consumers below cannot drift
+                     apart or quote three different copies of Part C at once.
+  sweep.lua          THE REPORT. C.6's own table, in C.6's own order, three
+                     columns wide (measured / published / delta) with every
+                     delta past 5 points marked "!" and past 10 marked "!!".
+                     Always exits 0: a report that aborts on the first bad
+                     clause hides the ten metrics below it.
+  verdict.lua        THE GATE. Part E's milestone, asserted, one screen, exits
+                     non-zero. Re-runs the same frozen seed schedule in its own
+                     process, so a number that differs between the report and
+                     the gate is a policy-layer determinism bug neither could
+                     have caught alone.
+  fogaudit.lua       WHICH LINES ARE WRITTEN AGAINST A BOARD THE FOG NEVER
+                     DRAWS, AND HOW MUCH OF IT ANY LINE EVER LOOKS AT. Its
+                     `EYE` column -- the share of lane-polls in which a line
+                     can see ANY part of the enemy half -- is the one to read
+                     when the question is what a scout bought; `lit` is a mean
+                     over 8 sections and a tripwire lights one of them, so it
+                     cannot resolve the answer (Finding 10).
+                     Per line and per regime: whether the line DECLARES a scout,
+                     the lowest own-frame position it ever sees an enemy unit at,
+                     the share of its own threat detections that happen at or
+                     below the midline (the fog's DEFECT under `full`, the
+                     scout's DIVIDEND under `fog`), the mean sections of a lane
+                     it has LIT and has ever SEEN out of 8, and the share of its
+                     decisions taken against an enemy half showing nothing
+                     whatever. It rides on driver.run's `onPoll` tap, whose
+                     return value the driver discards, so the counts describe the
+                     sweep the GATE measures rather than a second,
+                     differently-driven one.
+  scoutprobe.lua     WHAT BUYING SIGHT IS WORTH, and it is the controlled half
+                     of Finding 9. Three rosters differing in nothing but the
+                     scout and the threshold it makes satisfiable, over one
+                     frozen seed schedule: no sight, sight with the old
+                     threshold, sight with the threshold restored. B-A prices
+                     the BODY, C-B prices the THRESHOLD. Diagnostic; exits 0;
+                     builds its variants as copies so the shipped roster is
+                     never mutated.
+  famstat.lua        Is the failing clause measurable? Four tests: a permutation
+                     null for the family label, a seed-noise floor with the
+                     roster held fixed, an exact roster jackknife, and the
+                     building-spend correlation with its own null. The answer
+                     turned out to be no, which is the largest finding in M2.
+  probe.lua          What ONE building costs, against a control line identical
+                     in all nineteen configuration fields except its opening.
+                     Carries a standard error on every row, because the whole
+                     question is whether a 6-point gap is a fact or a coin.
+  determinism.lua    the policy layer's own M1: byte-identical atoms on replay,
+                     isolation between matches, an exact mirror when the seats
+                     are swapped, and no order bypassing the sim's input gate.
+  run.sh             the M2 gate's implementation: greps, comptest, luac,
+                     determinism, the report, then the verdict. tools/m2.sh is
+                     the front door onto it.
+
 README.md            this file.
 ```
 
-`sim/` is loaded two ways and must stay loadable both ways. Under the harness it is
-`require("sim.Sim")`. Inside WoW there is no `require`, so each file falls back to a global
+`sim/` and `fog/` are loaded two ways and must stay loadable both ways. Under the harness it
+is `require("sim.Sim")` / `require("fog.Fog")`. Inside WoW there is no `require`, so each
+file falls back to a global
 `IB_SIM_MODULES` table that the addon's load order must populate first
 (`local Hash = IB_SIM_MODULES and IB_SIM_MODULES.Hash or require("sim.Hash")`).
 `comptest.sh` warns about this on every file that uses `require`, deliberately - it is the
@@ -270,10 +466,37 @@ one WoW-shaped assumption left in headless code.
 
 | # | Rejects | Because |
 |---|---|---|
-| 1 | `Fog.`, any visibility predicate, any render-layer or WoW-UI symbol | Fog of war is a pure render filter (A.3). A sim that can ask what is visible can branch on it, and the two clients do not have the same renderer state. M7's real proof is that a match with `Fog.Visible` stubbed to always-true produces a bit-identical hash. |
+| 1 | in mode `sim`: `Fog.`, any visibility predicate, any render-layer or WoW-UI symbol. In mode `client`: the same, except that `Fog.` is allowed **only** in a file that requires `"fog.Fog"` | Fog of war is a pure render filter (Ruling 1). A sim that can ask what is visible can branch on it, and the two clients do not have the same renderer state. M7's real proof is that a match with the fog model stubbed to always-true produces a bit-identical hash. The two modes and why the scope is explicit are below the table. |
 | 2 | `FullName`, `myName`, `UnitName`, the `"player"` token, any identifier containing `player` | A.2. Sides are 1 and 2. |
 | 3 | float literals, exponent literals, `/` outside `math.floor(...)`, bare `floor(` without the `local floor = math.floor` alias | rule 1 |
 | 4 | `pairs(`, `next(`, and `table.sort(` (flagged for hand-verification, since a comparator that ever compares table identity is a desync) | rule 2 |
+
+**GREP 1 NOW HAS AN EXPLICIT SCOPE, AND THAT IS A CHANGE WORTH READING.** "Zero references
+to `Fog.`" is a statement about the SIMULATION. The renderer (M7) and `policy/Policy.lua`'s
+view builder are CLIENTS -- they are the layer fog exists FOR, and a client that cannot name
+the fog module cannot apply fog. Before `fog/Fog.lua` existed, grep 1 over `policy/` was
+vacuously true, and vacuous truth is not a check. So both implementations take a MODE:
+
+| mode | grep 1 asserts | run over |
+|---|---|---|
+| `sim` (default) | nothing in this directory references `Fog.`, `IBFog`, a visibility predicate, a render-layer symbol or a WoW UI API | `sim/`, and `fog/` |
+| `client` | a file may say `Fog.` **only if it requires `"fog.Fog"`**, the one audited model. Every other grep-1 pattern still fires | `policy/`, `sweep/` |
+
+This is a per-directory scope chosen by the caller and printed in the output; it cannot
+silence a line, and it is deliberately not the alternative on offer -- renaming the import
+so `Fog.` never appears would make grep 1 pass over a directory that genuinely consults
+visibility, and these checkers **prefer a false positive to a miss**. `fog/Fog.lua` itself
+runs in the strict `sim` mode and passes with zero hits: it defines the model through a
+plain module table and never reaches for a render layer or a WoW API.
+
+`tools/greps.lua`, the independent Lua implementation, carries three more that the shell
+one does not: no clock, no `math.random`, and **grep 8 - no duplicate key in one table
+constructor**. Lua keeps the last of `{ minStack = 3, ..., minStack = 1 }` and says nothing;
+`luac -p` accepts it and the constructor function cannot see it, because the literal has
+already collapsed by the time any code runs. That shipped a defence line whose source
+declared `minStack = 3` and which ran with 1, worth 25pp on that line and 2.3pp on the
+statistic the M2 milestone gates on. Both gates now run both implementations over every
+sim-affecting directory.
 
 Both shell checkers match against `strip_lua.awk`'s output, so the sentence "no `pairs()`
 in sim code" inside a comment is not reported as a violation, and "Lua 5.1" in prose is not
@@ -318,6 +541,1541 @@ An exception mechanism is how these greps die.
 7. **New iteration over a map?** Add a parallel ordered key array. There is no other
    acceptable answer.
 8. **New tie anywhere?** Break it by lowest entity id.
+9. **Touching what anything can SEE?** It goes in `fog/Fog.lua` and nowhere else, and
+   `tools/fogtest.lua` gets a case for it. Two implementations of "what is visible" -- one
+   in the renderer and one in the policy view -- are two different games, and the whole
+   reason fog is a separate module is that M7 and M2 must apply the same rules. Nothing
+   under `sim/` may reference it; A.5 grep 1 enforces that and must stay in `sim` mode.
+10. **Adding to fog memory?** It stays OUT of `Hash.state`. Memory is a fold over the
+   hashed state trajectory plus a side index, the sim never reads it, and a divergence in
+   it is a rendering bug rather than a forked match -- so hashing it would make `ci.sh`, the
+   determinism gate, go red for something that cannot affect a match. Extend `Fog.memHash`
+   instead, which `sweep/determinism.lua` asserts across replays.
+
+---
+
+## What M2 is, and what it found
+
+Part E states the milestone:
+
+> 1,000 simulated matches terminate - by razed keep or by clock - reproducing C.6 within a
+> few points: **median 380-430 s, >=75% inside the 5-10 minute band, >=80% decided by a razed
+> keep, family spread under 10pp.** This is where Part C gets its first test in the shipping
+> language rather than in Python, and where the two models are cross-checked. **A disagreement
+> between the Lua sim and the Python sim is a finding, not a nuisance.**
+
+> ### EVERY NUMBER IN THIS SECTION IS VOID. READ THIS BEFORE READING ANY OF THEM.
+>
+> The owner defined fog of war on 2026-08-13 (`../docs/IDLE_BATTLE_FOG.md`, binding, and
+> it supersedes `IDLE_BATTLE_DECISIONS.md` Q9a). Every fogged column below was measured
+> against a **three-bucket "muster bar" that this implementation invented** because fog had
+> never been specified, and section 8.1 of the new doc deletes it: *"This replaces the
+> muster bar entirely. There is no aggregate signal about the enemy half... the derived
+> 2,800/5,600 HP thresholds are void."* Section 8.4 says the same thing about the numbers:
+> *"Expect the M2 distribution to move, and treat pre-fog measurements as void rather than
+> as a baseline."*
+>
+> The muster bar has been deleted from the tree, the model it is replaced by is
+> `fog/Fog.lua`, and the regime is renamed `a3` -> `fog` so no old number can be quoted as
+> comparable. **The tables below are kept, unedited, as the RECORD OF WHAT WAS MEASURED
+> UNDER A GUESS.** They are not a baseline and no clause verdict in them is current. Run
+> `tools/m2.sh` for numbers under the model that ships. **Finding 8 is what changed and
+> what it means; read it first.**
+>
+> What is NOT void: Finding 4 (Q10's tiers never fire -- a structural claim about an exact
+> integer tie), Finding 6 (peak concurrent units -- identical under both regimes), the
+> full-information column as an upper bound, and `rulesHash 297242539`. **Nothing in
+> `sim/Rules.lua` moved in this pass either.**
+>
+> **THE CURRENT FOGGED NUMBERS ARE IN FINDING 10** -- 1,632 matches under `fog/Fog.lua`
+> WITH the owner's section 3a contact reveal, played by a seventeen-line roster that now
+> spans the sight axis: median **426 s PASS**, band **76.1% PASS**, razed keep **80.1%
+> PASS**, family spread **16.8pp FAIL**. M2 is still RED. At seed base 500000 only family
+> spread fails; at 600000, 700000 and 800000 the razed-keep clause fails too and at 600000
+> so does the median, so **which clauses fail moves with the seed again** -- the table in
+> the M2 section has all four bases.
+>
+> **Finding 9's fogged column is now the BEFORE column of Finding 10**, and Finding 8's is
+> the before column of Finding 9. Each measured the same ruleset under a different fog
+> model or a different roster; none of them is a current reading.
+
+**How to tell: run `tools/m2.sh` and read the last line.** THE CURRENT TABLE IS IN
+FINDING 10; the one below it is Finding 9's and the one below that is the muster-bar record
+and is void.
+
+**CURRENT, seed base 500000, 1,632 matches (17 lines, all 272 ordered pairs, 6 seeds each).
+The two columns to the right of the gate are what each half of the last pass did, and they
+are separable because the first half changed nothing but the fog model:**
+
+| Milestone clause | target | **fog, contact + sight axis - THE GATE** | *fog, contact only (16 lines)* | *fog, before this pass (Finding 9)* |
+|---|---|---|---|---|
+| median match length | 380-430 s | **426 s PASS** | *414 s PASS* | *406 s PASS* |
+| inside the 5-10 minute band | >= 75% | **76.1% PASS** | *75.3% PASS* | *72.5% FAIL* |
+| decided by a razed keep | >= 80% | **80.1% PASS** | *80.9% PASS* | *80.0% PASS* |
+| family spread | under 10pp | **16.8pp FAIL** | *14.7pp FAIL* | *11.6pp FAIL* |
+
+Both regimes, from `tools/m2.sh` on the shipped tree, seed base 500000:
+
+| Milestone clause | target | fog (THE GATE) | full (upper bound) |
+|---|---|---|---|
+| matches simulated | >= 1,000 | **1,632 PASS** | 1,632 PASS |
+| every match terminated | 0 unfinished | **0 PASS** | 0 PASS |
+| median match length | 380-430 s | **426 s PASS** | 434 s |
+| inside the 5-10 minute band | >= 75% | **76.1% PASS** | 77.3% |
+| decided by a razed keep | >= 80% | **80.1% PASS** | 78.2% |
+| family spread | under 10pp | **16.8pp FAIL** | 13.8pp |
+| no order bypassed the input gate | 0/0/0/0/0, <= 120 atoms/min | **0/0/0/0/0 @20 PASS** | 0/0/0/0/0 @21 PASS |
+
+**AND THE SEED BASE STILL DECIDES WHICH CLAUSES FAIL, WHICH IS A LOSS THIS PASS SHOULD BE
+READ AS OWNING.** `lua sweep/verdict.lua 6 <base> fog` on the shipped tree:
+
+| seed base | median | band | razed keep | spread | clauses |
+|---|---|---|---|---|---|
+| 500000 | 426 s | 76.1% | 80.1% | 16.8pp | RED: **spread** |
+| 600000 | 432 s | 77.8% | 79.1% | 15.9pp | RED: **median keep spread** |
+| 700000 | 428 s | 77.6% | 78.0% | 14.6pp | RED: **keep spread** |
+| 800000 | 426 s | 77.2% | 78.3% | 15.5pp | RED: **keep spread** |
+
+**The band clause now passes at all four bases having failed at all four; the razed-keep
+clause now fails at three of four having passed at all four by a tenth of a point.** The
+first is contact reveal and it is a fix to the instrument (Finding 10, and the A/B holds the
+roster and the seeds fixed). The second is the seventeenth line: at base 500000 contact
+alone moved razed keeps 80.0% -> 80.9% and adding `Pathfinder` moved them back to 80.1%,
+and blinding `Pathfinder` moves them by 0.2pp -- so it is the line's PRESENCE and not its
+scouting. **A milestone clause that moves 2pp when one line of seventeen is added is
+measuring the roster**, which is Finding 2's conclusion arriving for the third time from a
+third direction.
+
+Status at 1,440 matches **per
+information regime** (16 lines, all 240 ordered pairs, 6 seeds each), Lua 5.5.0 / arm64
+macOS, `rulesHash 297242539`, seed base 500000. **VOID -- measured under the muster bar,
+see the block above:**
+
+| Milestone clause | target | **A.3 fog - THE GATE** | *before recalibration* | full information | *before* |
+|---|---|---|---|---|---|
+| matches simulated | >= 1,000 | **1,440 PASS** | 1,440 PASS | 1,440 PASS | 1,440 PASS |
+| every match terminated | 0 unfinished | **0 PASS** | 0 PASS | 0 PASS | 0 PASS |
+| median match length | 380-430 s | **432 s FAIL** | *428 s PASS* | 419 s PASS | *414 s PASS* |
+| inside the 5-10 minute band | >= 75% | **76.5% PASS** | *74.7% FAIL* | 76.7% PASS | *76.8% PASS* |
+| decided by a razed keep | >= 80% | **75.9% FAIL** | *75.6% FAIL* | 80.6% PASS | *80.9% PASS* |
+| family spread | under 10pp | **13.8pp FAIL** | *22.9pp FAIL* | 16.6pp FAIL | *14.2pp FAIL* |
+| no order bypassed the input gate | 0/0/0/0/0, <= 120 atoms/min | **0/0/0/0/0 @21 PASS** | *same* | 0/0/0/0/0 @21 PASS | *same* |
+
+**SUPERSEDED BY FINDING 8 -- READ THE BANNER ABOVE. M2 IS STILL RED, but on the BAND (and,
+at one seed base of two, family spread), not on the three clauses named below.** The
+paragraph that follows describes the muster-bar roster and is kept as the record of it.
+
+**M2 IS STILL RED, on three clauses, and they are not the same three.** The *before*
+columns are the roster as it stood when eleven of the sixteen lines were reacting to a
+position A.3 never renders; the bold columns are the same sixteen lines expressed in terms
+the fogged board actually supplies. **Nothing in `sim/Rules.lua` moved to produce either
+column and `rulesHash` is still 297242539.** Finding 7 is the recalibration, what each
+change was made FOR, and what each one alone moved.
+
+The short version: **the band clause was an artefact of a mis-calibrated roster and passes
+now; the razed-keep clause is not and did not move (-4.1pp from target, was -4.4pp); the
+family-spread clause halved and still fails by 3.8pp; and the median clause has crossed the
+430 s ceiling and now fails at every seed base sampled.**
+
+**And unlike before, WHICH THREE FAIL NO LONGER MOVES WITH THE SEED.** At seed bases
+500000 / 600000 / 700000 / 800000 the fogged column now fails `median keep spread` at all
+four. The band clause -- which the previous version of this README correctly called "a coin
+whose result was reported as a measurement" -- now passes at all four (76.5 / 76.4 / 76.1 /
+75.5%), though 75.5% against a 75.0% threshold is still inside its own standard error. The
+full table is in Finding 7.
+
+**The gap between the two regime columns is the largest thing M2 found, and it is
+Finding 1.** Nothing in `sim/Rules.lua` was changed to produce any of these numbers, and
+`rulesHash` is still 297242539: every fix in this pass is in `policy/`, `sweep/` or
+`tools/`.
+
+Full length distribution against C.6's, in seconds, both regimes:
+
+| | p10 | p25 | median | p75 | p90 | mean |
+|---|---|---|---|---|---|---|
+| this sim, A.3 fog | 195 | 307 | **432** | 592 | 600 | 424 |
+| this sim, full info | 193 | 308 | **419** | 551 | 600 | 415 |
+| C.6 (Python) | 233 | 310 | **406** | 526 | 600 | 412 |
+| delta (fog - C.6) | -38 | -3 | **+26** | +66 | 0 | +12 |
+
+**Where the two models are comparable, they agree to within a couple of points. Where
+they disagree, it is on the metrics that are computed from the sixteen policies rather
+than from the sim** - and Part C did not record its sixteen policies, nor which information
+regime they played under. That distinction is the spine of everything below.
+
+Nine findings, in descending order of how much they should change the document. All nine are
+reproducible from this tree with the commands given. **Findings 1, 2, 3 and 6 correct
+earlier entries in this README**, which were written under an unstated information regime,
+from the round-robin alone, at one seed base, and - for one of the sixteen lines - against
+a config the source did not declare:
+
+> **The roster itself had a bug, and every M2 number in this README moved when it was
+> fixed.** `Counterpunch` set `minStack` twice in one table constructor; Lua silently keeps
+> the last, so a line whose source declared `minStack = 3` shipped running 1. `luac -p`
+> accepts that, and `Policy.define` cannot see it because the literal has already collapsed
+> before any code runs. One dead assignment was worth 25pp on that line, 4.8pp on the
+> defence family, and 2.3pp on the exact statistic the milestone gates on; it also put
+> decision-leverage-low 13pp away from C.6 where the corrected roster agrees to 3.1pp.
+> **`tools/greps.lua` grep 8 now fails the build on a duplicate key in any table
+> constructor, and both M2 and M1 gates run it.**
+
+### Finding 10 - CONTACT REVEALS, and a roster that finally spans the sight axis. The band clause was an instrument defect and it is now green; the scouting half bought nothing measurable and that is the finding
+
+`lua tools/fogtest.lua` proves the model (464 checks, was 335); `lua sweep/fogaudit.lua`
+sizes what the roster can see; `lua sweep/verdict.lua 6 <base> fog` re-measures. **This
+finding closes open item 13, rewrites open item 17, and opens open item 19.**
+
+**PART ONE: THE OWNER RULED, AND IT WAS A TWO-SIDED DEFECT RATHER THAN THE ONE THAT WAS
+REPORTED.** `IDLE_BATTLE_FOG.md` section 3a: *"A unit also reveals any enemy entity it is in
+combat with, whatever section that entity is in. You can see what you are fighting."* The
+half that was in open item 13 is the attacker: melee range is 60 and their wall is at
+observer 1,300, so `BUILD_BLOCKS_ADVANCE` parks the attacker at 1,240, which is section 5,
+and it could not see the building it was destroying. **The half nobody had written down is
+the defender, and it is the bigger one.** Two Spears deployed on the same tick meet 60 apart
+at own-frame 970 and 970 -- so the defender is standing in its own section 4 and the stack
+killing it is in section 5, and under the section rule alone *a defender could not see the
+army it was fighting in its own half's doorway*. `tools/fogtest.lua` section 15 marches both
+boards rather than asserting them.
+
+**HOW CONTACT IS DETERMINED, AND IT IS THE SIM'S OWN PREDICATE RATHER THAN A SECOND ONE.**
+An enemy entity is in contact with one of your units when it is inside that unit's weapon
+envelope -- `|observer coordinate of the entity - my unit's position| <= my range` -- which
+is character for character the test `Sim.unitAttacks` applies when it picks a target. Three
+consequences, each of which was a choice and each of which is in `fog/Fog.lua`'s CONTACT
+block:
+
+| question | answer, and why |
+|---|---|
+| the envelope or the victim the resolve loop picked? | THE ENVELOPE. Combat resolves every 5 ticks and picks at most `targets` of them; vision is per tick and per entity. Otherwise a Bow among five bodies would see three, and WHICH three would depend on entity ids. |
+| whose range? | THE OBSERVER'S. Symmetric for every melee engagement in C.3 (both are 60), so a defender sees its attacker. NOT symmetric when the shooter outranges the target. Open item 19a. |
+| does it light the section? | NO. Entity-scoped, and it is structural: `visibleSections` is untouched, so `lit`, `seen` and section memory are exactly what they were. The audit's `lit` column not moving is the check. |
+
+**AND IT MOVED THE CLAUSE THE MILESTONE HAD BEEN FAILING AT EVERY SEED BASE.** Same
+sixteen lines, same seeds, same ruleset -- the ONLY change is the fog model, so this column
+pair is a clean A/B and the rarest thing in this README:
+
+| clause | before (Finding 9) | + contact reveals | moved by |
+|---|---|---|---|
+| median match length | 406 s PASS | **414 s PASS** | +8 s |
+| inside the 5-10 minute band | **72.5% FAIL** | **75.3% PASS** | **+2.8pp** |
+| decided by a razed keep | 80.0% PASS | **80.9% PASS** | +0.9pp |
+| family spread | 11.6pp FAIL | **14.7pp FAIL** | +3.1pp |
+
+**The band clause had failed at all four sampled seed bases and at every roster this
+README has published, and it was 2.5pp short. It was not a balance problem. It was a
+defender that could not see the army in front of it**, answering late, losing fast, and
+ending matches under five minutes. The share of a line's decisions taken against an enemy
+half showing nothing at all (`blind`) fell across the whole roster at once, **7.6-22.6% ->
+5.9-13.5%**, which is the mechanism in one column.
+
+**PART TWO: THE ROSTER NOW SPANS THE SIGHT AXIS, WHICH IT DID NOT BEFORE.** Finding 9 gave
+four lines a scout; `sweep/fogaudit.lua` then measured `lit` at 4.23-4.83 sections out of 8
+against a free floor of 4.00, with the four scouts *indistinguishable* from the twelve blind
+lines. Every scout bought sight at exactly one rate, so the roster had one point on the axis
+and no way to price the mechanic. Three changes, in the order they were decided:
+
+1. **`scoutEvery` is a declared per-line field**, defaulting to the derived one-lane cadence
+   (220 ticks) and floored at a second derived constant, `SCOUT_EVERY_MIN` = 86 -- one
+   traversal split across the three lanes there are to watch, plus one order delay. Below
+   that a line is buying a second pair of eyes for ground the first pair already lights.
+   `line()` refuses a cadence under the floor and refuses one declared by a line that buys
+   no sight at all.
+2. **`Pathfinder`, a seventeenth line, whose whole identity is eyes**: a tripwire into its
+   blindest lane at the floor cadence, no buildings, no economy, cheap bodies with whatever
+   is left. It is an ADDITION and not a replacement -- every other line carries a Part B or
+   Part C claim nothing else tests, and open item 10 says deleting lines biases family
+   means. The price of adding is stated where it lands: **1,632 matches instead of 1,440,
+   `mixed` is a five-line family, and every seed moves**, because the seed schedule is keyed
+   to the ordinal of the ordered pair. So this half is a roster change measured at the same
+   seed base and NOT the same matches replayed, and it is reported that way.
+3. **`Policy.darkLane` ranks on `lit` before `seen`, and that is a bug fix.** It ranked on
+   `seen` alone, which is cumulative and never falls: a line that scouts all match saturates
+   all three lanes, ties, and sends every remaining body to lane 1 for the rest of the
+   match. That is `pressedLane`'s defect (Finding 7) in a new place -- a tiebreak standing in
+   for an answer. `lit` is the live term the mechanic is about, so coverage rotates to the
+   lane whose section has just gone dark.
+
+**WHAT IT BOUGHT, AND THE ANSWER IS "ALMOST NOTHING, MEASURABLY".** `Pathfinder` buys
+**42.8 tripwires and 428 Levy a match, about a quarter of a side's base income.** Blinding
+that one line and changing nothing else:
+
+| | scouting | blinded | delta |
+|---|---|---|---|
+| `lit` (mean sections of 8) | 4.73 | 4.70 | **+0.03** |
+| `EYE` (share of lane-polls with ANY live sight of the enemy half) | 44.5% | 40.5% | **+4.1pp** |
+| whole-sweep median / band / keep | 433 s / 76.6% / 78.4% | 434 s / 76.4% / 78.6% | **nothing** |
+
+**And the largest second-order move in the same table is +3.3pp**, on `Rush-spear`, which
+changed in no way whatever and merely played a `Pathfinder` carrying 428 more Levy of
+pressure. **The sight a scout buys, measured in sections, is inside the noise of what the
+scout's own cost does to the match.** The ceiling is one section per living body, a lane is
+eight sections, and a body sent into a contested lane never reaches the enemy half at all --
+it halts 60 units short of whatever is holding the doorway, which the 970/970 board above is
+the proof of.
+
+**AND YET THE TRIPWIRES ARE WORTH 15.7pp OF WIN RATE TO THE LINE THAT BUYS THEM, WHICH
+MEANS THE OBVIOUS CONCLUSION IS THE WRONG ONE.** `lua sweep/scoutprobe.lua 2 500000`, 544
+matches per variant, the same roster with the scout removed and the thresholds put back to
+the free floor:
+
+| variant | median | band | razed keep | spread | `Pathfinder` |
+|---|---|---|---|---|---|
+| A no sight, thresholds at the free floor | 419 s | 73.8% | 80.5% | 16.4pp | **63.2%** |
+| B + the body, thresholds unchanged | 427 s | 76.4% | 78.6% | 17.9pp | **75.7%** |
+| C + the thresholds restored (**ships**) | 433 s | 76.6% | 78.4% | 18.5pp | **78.9%** |
+
+**+12.5pp for the body and +3.2pp for the threshold, against a standard error of about 6pp
+at 64 matches a line -- so the body is real and the threshold is not resolved.** Put beside
+the `lit`/`EYE` table above, that is a contradiction worth stating rather than resolving
+by picking the flattering half: **the tripwires are worth a great deal and the sections
+they light are worth nothing measurable, so whatever they are buying is not the section.**
+Two candidates, and this pass did not separate them:
+
+1. **CONTACT, not illumination.** Since section 3a a body reveals whatever it bumps into,
+   wherever that is -- and `lit` and `EYE` count SECTIONS, so they cannot see it at all. A
+   tripwire that walks into a lane and meets something now renders that something. If this
+   is the mechanism, the fog doc's "buy sight" mechanic works, but through 3a rather than
+   through section 3, and the audit is measuring the wrong quantity.
+2. **A SPLIT-PUSH BY ACCIDENT.** A 10-Levy body sent into the darkest lane is a body sent
+   into the lane the enemy is NOT defending -- `darkLane` prefers exactly that -- and if it
+   survives it walks 2,000 units to an undefended keep. Under this ruleset that may simply
+   be a better use of 428 Levy than adding it to a concentrated attack, and the word
+   "scout" would then be decoration on a distributed raid.
+
+**Separating them is the next measurement and it is cheap**: a variant whose scouts are
+bought and then held at the midline isolates illumination from contact from raiding. It is
+named here rather than guessed at, and open item 17 carries it.
+
+**`lit` IS A BAD INSTRUMENT FOR THIS AND THE AUDIT NOW SAYS SO.** A tripwire lights ONE
+section of eight, so a line buying sight in a tenth of its lane-polls moves `lit` by 0.10
+and looks identical to a line that bought nothing. `sweep/fogaudit.lua` now prints `EYE`
+beside it -- the share of lane-polls in which this line can see any part of the enemy half
+at all, which is the unit the decision is actually made in.
+
+**THE `lit` STATISTICS, BEFORE AND AFTER, WHICH IS THE MEASUREMENT THAT WAS ASKED FOR.**
+480-544 matches, fogged regime, `lua sweep/fogaudit.lua 2 fog`:
+
+| roster | `lit` range | `blind` range | `EYE` range |
+|---|---|---|---|
+| before this pass (16 lines) | 4.23 - 4.83 | 7.6 - 22.6% | not measured |
+| + contact reveals (16 lines) | 4.22 - 4.91 | 5.9 - 13.5% | not measured |
+| + the sight axis (17 lines, SHIPS) | 4.24 - 4.91 | 5.5 - 13.0% | 14.8 - 53.2% |
+
+**Contact reveals moved `lit` by nothing at all, which is the entity-scoped claim holding in
+the aggregate**, and it moved `blind` by 6-9 points on every line. The scouting pass moved
+`lit` by nothing either, and the reason is the mechanic rather than the roster. **The line
+with the most sight in the roster is still `Skirmish` (`EYE` 53.2%), which buys none: it
+trickles small stacks into three lanes and illuminates the ground it fights on.** After two
+passes aimed squarely at this, vision in this sim is still overwhelmingly a by-product of
+attacking, and that is a fact about the model and not about the sixteen -- now seventeen --
+lines.
+
+**AND THE UPPER BOUND SEPARATES THE TWO HALVES OF THIS PASS FOR FREE, WHICH IS THE
+CLEANEST ATTRIBUTION IN THIS README.** Under `full` there is no fog to reveal anything
+into, and `Policy.darkLane` returns 0 in every lane so not one scout is ever issued -- so
+contact reveal and the whole scouting mechanic are BOTH inert in that column, and anything
+it does move is the seventeenth line and the seeds:
+
+| clause | full, before this pass | full, now | moved by |
+|---|---|---|---|
+| median match length | 420 s | 434 s | +14 s |
+| inside the 5-10 minute band | 76.4% | 77.3% | +0.9pp |
+| decided by a razed keep | 82.2% | **78.2%** | **-4.0pp** |
+| family spread | 14.9pp | 13.8pp | -1.1pp |
+
+**So the razed-keep clause fell because a seventeenth line was added to the pool, not
+because of anything about sight**, and the median rose the same way. `Pathfinder` finishes
+at **73.6%**, which makes it one of the stronger lines rather than the sacrificial probe it
+was expected to be -- cheap bodies, a high `react` and a threshold at `SCOUT_SIGHT` are a
+good strategy in this ruleset even when the sight it pays for cannot be measured. That is
+worth stating precisely because it is the opposite of the result that would have flattered
+the mechanic: the line wins with the eyes it buys, but blinding it does not move its
+sweep (open item 17), so what is winning is the shape of the line and not what it can see.
+
+**AND THE NEW TESTS HAVE TEETH, ASSERTED BY MUTATION RATHER THAN CLAIMED.** Five deliberate
+breaks of `fog/Fog.lua`'s contact block, each run against `tools/fogtest.lua`'s 464 checks
+and each reverted:
+
+| mutation | result |
+|---|---|
+| contact is always true | 25 checks fail |
+| the shield no longer outranks contact for the back slot | 9 fail |
+| units get no contact route (buildings keep theirs) | 6 fail |
+| contact also lights the section it reveals into | 2 fail |
+| `unitReach` ignores the Fletcher aura, so it stops mirroring `Sim.unitRangeOf` | 2 fail |
+
+The last one is the one worth having: it is caught by a BEHAVIOURAL check -- the sim itself
+parks a Bow behind a Fletcher 326 units short of the wall -- so the fog model and the sim
+cannot drift on what a unit can reach without the build going red.
+
+**NOTHING IN `sim/Rules.lua` WAS TOUCHED. `rulesHash` is 297242539 before and after.**
+
+### Finding 9 - the roster now BUYS SIGHT, and the measurement says the fog doc's own answer to the fog is under-powered
+
+`lua sweep/scoutprobe.lua` decomposes it; `lua sweep/fogaudit.lua` sizes what it buys;
+`lua sweep/verdict.lua 6 <base> fog` re-measures. **This finding replaces Finding 8's fogged
+column with a current one and closes the first half of open item 17.**
+
+**WHAT WAS WRONG, AND IT WAS NOT THAT ANY LINE COULD SEE TOO MUCH.** `Policy.fillFoe` had
+already been written against `fog/Fog.lua` and it audits clean: enemy units only in sections
+the observer lights, enemy buildings only out of frozen memory behind the front-slot shield,
+enemy keep HP remembered, enemy Levy / bank / income / spend / loadout flatly zero.
+Re-checking every field of the view against the doc turned up exactly **one** disclosure
+route, and it is a contradiction between two documents rather than a bug -- `keepDamageDealt`
+makes the enemy keep's exact live HP derivable with no sight at all, which is now open
+item 18. **No line reads it.** So the defect was on the other side of the interface: the
+sixteen lines were asking for perceptions the fogged board does not supply, and six of them
+had been left with an intent that had no expression at all.
+
+**AND THE FOG DOC ALREADY SAID WHAT THE EXPRESSION IS.** Section 3: *"send one cheap body
+forward and you buy sight of exactly where it is standing, for exactly as long as it
+lives."* A body in the first fogged section pulls the earliest satisfiable threat threshold
+from own-frame 1,001 ("they are already in my half") down to **751** ("they are still 250
+units short of it"). That is `Fog.SCOUT_SIGHT`, derived from the section table, and it is
+what makes "answer a push before it arrives" a sentence again.
+
+**FOUR LINES OF SIXTEEN BUY IT, AND THE TWELVE THAT DO NOT ARE THE MEASUREMENT.** The test
+applied to every line was one question -- *does this line's own stated intent require a
+perception the fog grants only to a body in the enemy half?* -- and the answer was written
+down before the sweep was run:
+
+| line | scouts | why, in its own words | `reactAt` |
+|---|---|---|---|
+| `Raid-counter` | **yes** | "the counter to what it SEES in the lane". With no sight bought, what it sees is what has already crossed -- the one moment a counter draw is worth least. | 1150, **unchanged**: its scout is for the type draw and the lane choice, not for the threat trigger |
+| `Turtle-eco` | **yes** | "meet every push". A push is met at the midline or not at all, and the answer costs 2 s of order delay plus a march. | 1001 -> **751**. Its source said 700; a body would have to hold section 6 to deliver that, which is an attack and not a tripwire, so 751 is the nearest honest equivalent and the 50-unit concession is stated |
+| `Counterpunch` | **yes** | its whole idea is holding a reserve and *swinging* it. There is no right moment without sight. | 1001 -> **900**, its original value **restored verbatim** -- 900 is inside the window one tripwire renders |
+| `Adaptive` | **yes** | "the closest thing here to a person", and it has three sight-hungry sub-decisions at once: a reactive Arrow Tower keyed to enemy Levy in a lane, a counter draw, and "attack the lane they left open" | 1001 -> **900**, restored verbatim |
+| `Turtle-pure`, `Wall` | no | the **defence controls**. `Turtle-pure` exists to ask whether a side that commits NOTHING forward can win on Q10's ladder; a body past the midline is a commitment forward. Their 600 and 800 are **dropped outright, not re-expressed.** | 1001 |
+| `Trader` | no | the **reactive-build control for `Adaptive`**. The two are near-twins and exactly one of them buys the sight that lets the trigger fire in time to lay a 60-tick Trap Pit. | 1001 |
+| `Skirmish` | no | the **exploration control**. It lights more of the board than anyone (`seen` 7.70 of 8) without ever spending a body ON sight, which is what separates "explores" from "scouts" in the audit. | 1100 |
+| `Greed-pure` | no | its identity is the words *"before a single unit"*, and a tripwire is a unit. `line()` now refuses a line declaring both `scout` and `holdUntilBuilt`. **This is the one intent this pass deliberately left dead**; the alternative was making the pure-economy probe impure to improve its result. | 1001 |
+| the other 7 | no | never claimed to read the enemy before contact. Notes corrected where they claimed otherwise (`Rush-horse`'s "least-defended lane" is a read it cannot make). | unchanged |
+
+**THE SCOUT IS AN ORDER, NOT A PERMISSION, AND EVERY PART OF THE PRICE IS PAID.** One
+cheapest body (`SCOUT_TYPE`, read off the hashed `UNITS` table, not named), refreshed no more
+often than one lane traversal by that body plus one order delay (`SCOUT_EVERY = 220` ticks,
+derived from `LANE_LEN / march + ORDER_DELAY`), bought after the same reserve as the army,
+consuming one of the two orders that poll. **Nothing in either constant was chosen by
+looking at a win rate.** Measured cost: **17-21 scout orders and 174-204 Levy a match**,
+which against that line's own earned Levy is **12-14%** -- about an eighth of its economy. And the aiming rule (`Policy.darkLane`) reads
+`lit`, `seen` and `maxPos` of the polled side's OWN lanes only -- a scout is never aimed
+with the information it is being sent to fetch -- which also means it returns 0 when a lane
+is fully visible, so **the full-information regime issues zero scout orders in a whole
+sweep** and stays a real upper bound.
+
+**WHAT IT BUYS, AND THIS IS THE PART THAT SHOULD REACH THE DOC OWNER.**
+`sweep/fogaudit.lua`'s SUB-MID column under `fog` is the early-warning dividend: threat
+detections that exist only because a body of that line's was standing in that section.
+Beside it, the same column under `full` is what the fog takes away from that line:
+
+| line | dividend (`fog`) | deleted by the fog (`full`) | recovered |
+|---|---|---|---|
+| `Turtle-eco` | **2.2%** | 9.3% | 24% |
+| `Counterpunch` | **0.4%** | 5.6% | 7% |
+| `Adaptive` | **0.5%** | 20.0% | 2% |
+
+**So buying sight recovers under a quarter of what the fog deleted, for about an eighth of
+that line's economy.** The mechanism is not mysterious and it is arithmetic rather than roster
+luck: the window a tripwire at the midline opens is **250 units wide**, which is 12 sim
+ticks of a Horse and 25 of a Spear, against an `ORDER_DELAY` of **20**. A warning shorter
+than the order delay is not a warning. Open item 17 is rewritten around this.
+
+**AND IT COSTS WIN RATE, WHICH IS REPORTED RATHER THAN DESIGNED AWAY.** 1,440 matches,
+fogged, seed base 500000, per line (standard error ~3.7pp at 180 matches per line):
+
+| line | scouts | before | after | delta |
+|---|---|---|---|---|
+| `Adaptive` | yes | 84.7% | **78.8%** | **-5.9pp** |
+| `Counterpunch` | yes | 61.1% | **58.3%** | -2.8pp |
+| `Turtle-eco` | yes | 37.7% | **35.5%** | -2.2pp |
+| `Raid-counter` | yes | 66.1% | **68.3%** | +2.2pp |
+| the twelve that do not scout | - | - | - | **+8.8pp in total**, none past 1 SE |
+
+Three of the four lines that pay for sight are worse off and the fourth is inside its own
+noise. **That is the finding.** It is not a reason to take the scout away again: the four
+lines could not otherwise express what their sources say they are, and a roster that plays
+a strategy nobody would choose because it scores better is the same defect as a roster that
+cheats, wearing the other mask.
+
+**THE CONTROLLED DECOMPOSITION, because a pass that moves milestone numbers has to say which
+half moved them.** `lua sweep/scoutprobe.lua 2 500000` -- three rosters differing in nothing
+else, 480 matches each:
+
+| variant | median | band | razed keep | family spread |
+|---|---|---|---|---|
+| A no sight, thresholds at the free floor | 396 s | 71.2% | 81.4% | 9.5pp |
+| B + the body, thresholds unchanged | 406 s | 72.7% | 80.6% | 9.6pp |
+| C + the thresholds restored (**ships**) | 405 s | 72.7% | 80.4% | 9.2pp |
+
+**The BODY moves the clauses and the THRESHOLD moves nothing** (`C - B` is +0.0pp on the
+band, -0.2pp on razed keeps). Which is worth stating plainly: the part of this pass that
+restores what the fog took away from three lines' *stated intent* is, on the aggregate
+statistics, free -- and the part that costs is the 180 Levy. A reader looking for a roster
+tuned to pass will not find it here; the change that would have been worth doing for the
+numbers is the one that did nothing.
+
+**THE MILESTONE, RE-MEASURED. STILL RED, ON THE SAME TWO CLAUSES.** 1,440 matches per
+column, `lua sweep/verdict.lua 6 500000 fog`:
+
+| Milestone clause | target | **fog, scouting roster - THE GATE** | *fog, before (Finding 8)* | full information | *full, before* |
+|---|---|---|---|---|---|
+| matches simulated | >= 1,000 | **1,440 PASS** | 1,440 PASS | 1,440 PASS | 1,440 PASS |
+| every match terminated | 0 unfinished | **0 PASS** | 0 PASS | 0 PASS | 0 PASS |
+| median match length | 380-430 s | **406 s PASS** | *395 s PASS* | 420 s PASS | *415 s PASS* |
+| inside the 5-10 minute band | >= 75% | **72.5% FAIL** | *71.0% FAIL* | 76.4% PASS | *76.5% PASS* |
+| decided by a razed keep | >= 80% | **80.0% PASS** | *82.5% PASS* | 82.2% PASS | *83.2% PASS* |
+| family spread | under 10pp | **11.6pp FAIL** | *12.0pp FAIL* | 14.9pp FAIL | *16.4pp FAIL* |
+| no order bypassed the input gate | 0/0/0/0/0, <= 120 atoms/min | **0/0/0/0/0 @21 PASS** | *same* | 0/0/0/0/0 @21 PASS | *same* |
+
+**FOUR SEED BASES, BOTH ROSTERS, so nothing above is one draw.** `lua sweep/verdict.lua 6
+<base> fog`:
+
+| seed base | before: median / band / keep / spread | clauses | after: median / band / keep / spread | clauses |
+|---|---|---|---|---|
+| 500000 | 395 s / 71.0% / 82.5% / 12.0pp | RED: band spread | **406 s / 72.5% / 80.0% / 11.6pp** | RED: band spread |
+| 600000 | 397 s / 71.8% / 82.9% / 12.2pp | RED: band spread | **403 s / 73.1% / 80.1% / 14.2pp** | RED: band spread |
+| 700000 | 399 s / 72.2% / 81.8% / **8.7pp** | RED: **band only** | **406 s / 73.8% / 80.1% / 11.8pp** | RED: band spread |
+| 800000 | 393 s / 71.2% / 84.0% / 15.7pp | RED: band spread | **406 s / 72.9% / 82.0% / 15.7pp** | RED: band spread |
+
+**FIVE READINGS, INCLUDING THE TWO THAT GO AGAINST THE WORK.**
+
+1. **The band clause is the stable failure and it moved toward its target without reaching
+   it**: +1.3 to +1.7pp at every base, 72.5-73.8% against 75.0%, still 1.2-2.5pp short and
+   well outside the ~1.1pp standard error. The mechanism is the same one Finding 8 named --
+   with warning this thin, matches end fast -- and the scout shortens the under-five-minute
+   tail without closing it (27.4% under the band, was 28.9%).
+2. **The razed-keep clause went from comfortable to exactly on the line**: 82.5% -> 80.0% at
+   base 500000, and 80.0-82.0% across the four. It still passes at every base, but a clause
+   passing to the tenth of a point is not a clause anyone should quote as met. Matches got
+   slightly less decisive because a tenth of two economies is now walking forward to look
+   rather than to fight: clock matches 17.4% -> 19.9%, draws 0.6% -> 1.4%.
+3. **Family spread improved at the base the README publishes and got WORSE at the base where
+   it used to pass** (8.7pp PASS -> 11.8pp FAIL at 700000). That is Finding 2's conclusion
+   arriving again from a new direction: a statistic that flips on the seed base is a coin,
+   and this pass has now moved it in both directions without touching a rule.
+4. **WHICH clauses fail no longer moves with the seed at all.** Before, one base of four
+   failed a different set; now all four fail `band spread`. A verdict that does not change
+   its mind when the seeds move is worth more than either of the clauses that moved.
+5. **The full-information column barely moved, and that is a check on the work rather than a
+   result.** Under `full` no scout is ever issued, so the whole roster change reduces to
+   three restored thresholds -- and the column moves by +5 s, -0.1pp, -1.0pp, -1.5pp. If the
+   scouting machinery had leaked one bit of unpaid-for information into the view, this is
+   the column where it would have shown up as a gain.
+
+**NOTHING IN `sim/Rules.lua` WAS TOUCHED. `rulesHash` is 297242539 before and after, `tools/ci.sh
+1000` is GREEN (5/5 steps, 1000 logs, 19,644,042 ticks, 0 desyncs), `SUITE HASH` is unchanged
+at 1404498451, and `tools/fogtest.lua` now runs 335 checks (was 289) -- a new section 14
+that pins the scout's geometry and its NEGATION (one section deeper is not rendered), that
+the sight dies with the body, that scouting is a declared minority property of the roster,
+that both scout constants are derived from the ruleset, and that no line reads the one
+disclosure route open item 18 is about.**
+
+### Finding 8 - fog was specified, the muster bar was deleted, and the roster had NO pre-contact channel at all
+
+**SUPERSEDED IN ITS NUMBERS BY FINDING 9, WHICH GAVE FOUR LINES THE ONE THING THIS FINDING
+SAYS THEY WERE MISSING.** What survives is everything about the MODEL -- the section table,
+what memory keeps, what the muster bar's deletion removed, the mutation testing, and the
+argument for where memory lives. The fogged clause numbers below are Finding 9's *before*
+column: they measure the owner's fog model played by a roster that never bought sight, and
+the doc's own section 3 says that is not the game. Read them as the baseline for Finding 9
+and not as a current verdict.
+
+`lua tools/fogtest.lua` proves the model; `lua sweep/fogaudit.lua` sizes what it does to
+the roster; `tools/m2.sh` re-measures. **This finding voids every PRE-fog number in this
+README and supersedes the fog half of Findings 1 and 7.**
+
+**WHAT THE OWNER SPECIFIED, and it is not what was implemented.** A lane is 8 vision
+sections of 250 units. You always see sections 1-4 -- your half, out to the midline -- and
+**nothing at all** in 5-8, so an approaching enemy is invisible until it crosses. One of
+your own units makes visible **the section it is standing in and no other**. Anything you
+have seen persists **frozen at its last-seen state**; enemy BUILDINGS and the enemy keep's
+HP are remembered that way, enemy UNITS are not ghosted. Their back slot is visible only
+when their front slot is empty or destroyed AND you have a unit in section 7. Enemy
+economy and loadout are never visible by any route.
+
+**WHAT THAT DELETES.** The old model's only pre-crossing signal was a three-bucket muster
+bar driven by total marching HP, with thresholds this implementation DERIVED (2,800 /
+5,600) because A.3 gave none - the one number in M2 that was neither in Part C nor forced
+by it, escalated as open item 8. The new doc removes the signal rather than fixing the
+thresholds. So:
+
+| gone | replaced by |
+|---|---|
+| `Policy.MUSTER_*` (5 constants) and the per-lane `muster` field in the view | nothing. Section 2 of the doc: *"There is no early warning, no aggregate, no 'something is coming' indicator."* |
+| `Policy.ALARM_PRESSURE / ALARM_HEAVY / ALARM_NEVER` and the `alarm` field on all 16 lines | nothing. A line's only trigger is `reactAt`, satisfied by a unit it can actually SEE. |
+| the derived 2,800 / 5,600 HP cut points | nothing. Open item 8 is CLOSED by the doc. |
+| `hp < maxHp` building disclosure (a building became visible by being damaged) | per-side MEMORY of the section you stood in. The old rule's inversion -- "there is a wall here AND I have already started chewing it" -- is gone. |
+| enemy keep HP, exact from tick 0 | keep HP as last seen. This is a direct contradiction between A.3 and the fog doc; the fog doc is later and binding, so it wins. Flagged as an open item. |
+
+**SIX LINES LOSE A CHANNEL AND NOTHING COMPENSATES THEM, WHICH IS THE POINT.**
+*(FINDING 9 HAS SINCE COMPENSATED THREE OF THE SIX, BY MAKING THEM PAY FOR IT.
+`Turtle-eco`, `Counterpunch` and `Adaptive` now buy sight; `Turtle-pure`, `Wall` and
+`Greed-pure` deliberately still do not, and are the controls. The paragraph below is the
+state this finding measured.)*
+`Turtle-pure`, `Turtle-eco`, `Wall`, `Counterpunch`, `Greed-pure` and `Adaptive` all
+declared `alarm = PRESSURE` -- an intent to answer a build-up before it arrived. Under the
+section model that intent is only expressible by SCOUTING, and **not one of the sixteen
+lines spends a body on sight.** Their `reactAt`, `react`, openings, mixes, cadences,
+`minStack` and `convertAt` are untouched: this pass is the SUBTRACTION of a channel, not a
+retune. **The roster was deliberately not re-tuned to recover what this costs**, and it
+must not be - the doc says to expect the distribution to move, and a roster selected to
+pass is as useless as a policy that cheats. That is the same refusal Finding 7 made about
+the median clause, applied to a bigger change.
+
+**THE LARGEST THING THIS OPENS UP, AND IT IS AN OPEN ITEM RATHER THAN A RESULT.**
+*(DONE IN FINDING 9, AND THE ANSWER WAS NOT THE FLATTERING ONE: four lines now buy sight,
+it costs ~180 Levy a match, and it recovers under a quarter of the warning the fog deleted.
+The `lit` / `seen` reading below still stands for the twelve that do not.)* The doc
+makes vision something you BUY: *"send one cheap body forward and you buy sight of exactly
+where it is standing, for exactly as long as it lives... It also means vision is earned and
+lost continuously through a match rather than being a fixed property of a build."* That is
+a whole strategic axis the roster does not touch. `sweep/fogaudit.lua` now reports `lit`
+and `seen` -- mean sections of a lane a line can see now, and has ever seen, out of 8 -- so
+the gap is measured rather than asserted. **240 matches, fogged regime, all sixteen lines:**
+
+| | floor | measured range | what it means |
+|---|---|---|---|
+| `lit` | **4.00** (the four free home sections) | **4.25 - 4.93** | a quarter to a full section of the enemy half is illuminated at any moment |
+| `seen` | 4.00 | **4.91 - 7.72** | cumulative and never falls, so it climbs for lines that push |
+| `minPos` | - | **0 for all sixteen** | every line sees an enemy unit at their-frame 0 at some point: a unit that reaches THEIR keep is in section 8 and watches their reinforcements spawn |
+
+**AND THE READING IS THE OPPOSITE OF FLATTERING.** Every unit above the 4.00 floor is an
+ATTACK that happens to illuminate the ground it is standing on. **Not one line in the
+roster spends a body on sight.** So `lit` measures where the roster FIGHTS, not what it
+chose to LOOK at, and `seen` is a proxy for aggression rather than for reconnaissance --
+which is why `Skirmish` tops it at 7.72 and `Greed-pure`, which fields nothing for two
+minutes, sits at 4.91. A deliberate scout would show as `lit` rising while the attack does
+not. **Until one exists, the fogged sweep measures a game with a mechanic nobody is
+playing**, and that is a far larger caveat on the fogged column than the muster thresholds
+ever were. Open item 17.
+
+**AND ONE CONSEQUENCE OF THE DOC THAT MAY NOT BE INTENDED, ESCALATED RATHER THAN PATCHED.**
+C.3 gives Spear and Horse a 60-unit range, and `BUILD_BLOCKS_ADVANCE` stops an attacker at
+range of the building it is hitting. Their front slot sits at observer coordinate 1,300,
+which is section 6 - so a unit grinding it stands at **1,240, which is section 5**, and
+under the doc's rule *"not the sections before it, not the sections after it"* **it never
+sees the building it is attacking.** A Bow stops at 980, still in its own half. The
+sequence the doc describes still works (crack the front blind, walk through section 6 and
+learn the slot is now empty, reach 1,640 in section 7 and see the back building, reach
+1,940 in section 8 and see the keep) - but "you cannot see the wall you are hitting" reads
+like an accident of the grid rather than a design intent, and section 5's own example
+*"even from a unit standing right next to it"* suggests the author pictured the attacker
+INSIDE section 6. It is implemented literally, tested literally, and raised as open item 13.
+
+**AND IT WAS RE-MEASURED. THE MILESTONE IS STILL RED, ON TWO CLAUSES, AND THEY ARE NOT THE
+SAME TWO.** 1,440 matches, fogged regime, seed base 500000, `lua sweep/verdict.lua 6 500000
+fog` -- the same frozen seed schedule as every column this README has ever published:
+
+| Milestone clause | target | **fog model - THE GATE** | *muster bar (VOID)* |
+|---|---|---|---|
+| matches simulated | >= 1,000 | **1,440 PASS** | 1,440 PASS |
+| every match terminated | 0 unfinished | **0 PASS** | 0 PASS |
+| median match length | 380-430 s | **395 s PASS** | *432 s FAIL* |
+| inside the 5-10 minute band | >= 75% | **71.0% FAIL** | *76.5% PASS* |
+| decided by a razed keep | >= 80% | **82.5% PASS** | *75.9% FAIL* |
+| family spread | under 10pp | **12.0pp FAIL** | *13.8pp FAIL* |
+| no order bypassed the input gate | 0/0/0/0/0, <= 120 atoms/min | **0/0/0/0/0 @21 PASS** | *same* |
+
+**THREE OF THE FOUR MEASURED CLAUSES MOVED, AND THE DIRECTION IS COHERENT.** Deleting the
+only pre-contact warning means a defence answers a push only once it is already in its own
+half -- two seconds of order delay and up to 1,000 units of march too late. So attacks land:
+**razed keeps 75.9% -> 82.5%, clearing an 80% target this sim had never met**, and matches
+**get shorter, median 432 s -> 395 s**, which puts the median clause back inside its band
+from the wrong side of it. The clause that broke is the 5-10 minute BAND (76.5% -> 71.0%),
+and it broke for the same reason: more matches now end fast, below the 5-minute floor,
+rather than grinding. **Family spread improved and still fails** (13.8 -> 12.0pp), which is
+consistent with Finding 2's conclusion that the statistic has no power at four lines per
+family, and with its measurement that a change of instrument alone moves it by ~9pp.
+
+**NOTHING IN `sim/Rules.lua` WAS TOUCHED TO PRODUCE ANY OF THIS.** `rulesHash` is 297242539
+before and after. The entire movement above is a change in **what the sixteen lines are
+allowed to perceive**, which is the third time in this README that a correction to the
+INSTRUMENT has moved a milestone-deciding number by more than the margin it was being
+judged on -- and it is the strongest single argument for open item 3, which asks Part E to
+say out loud which information regime it is a claim about.
+
+**AND THE SECOND SEED BASE SEPARATES THE TWO FAILURES, WHICH IS THE MOST USEFUL THING IN
+THIS FINDING.** Same roster, same schedule, `lua sweep/verdict.lua 6 <base> fog`, plus the
+upper bound for scale:
+
+| run | median | band | razed keep | family spread | clauses |
+|---|---|---|---|---|---|
+| fog, base 500000 | 395 s | **71.0%** | 82.5% | 12.0pp | **RED: band spread** |
+| fog, base 700000 | 399 s | **72.2%** | 81.8% | **8.7pp** | **RED: band** |
+| full information, base 500000 | 415 s | 76.5% | 83.2% | 16.4pp | RED: spread |
+
+1. **THE BAND IS THE ONE STABLE FAILURE.** 71.0% and 72.2% against a 75.0% threshold, at
+   both bases, roughly 3-4pp under and well outside the ~1.1pp standard error on a 75% share
+   at 1,440 matches. **It is the clause to take to the doc owner**, and it is a NEW failure
+   -- the muster-bar roster passed it at all four bases. The mechanism is stated above and is
+   not mysterious: with no early warning, more matches end under five minutes.
+2. **FAMILY SPREAD FLIPS FROM FAIL TO PASS ON THE SEED BASE ALONE**, 12.0pp -> 8.7pp,
+   crossing the 10pp threshold in one step. That is the sharpest demonstration this README
+   has of Finding 2's conclusion -- **the clause is a coin at four lines per family** -- and
+   it should be read as evidence for open item 4 rather than as a clause that nearly passes.
+3. **THE UPPER BOUND FAILS ONLY ON SPREAD, AND FAILS IT BY MORE (16.4pp).** Under full
+   information the median, band and razed-keep clauses all pass. So the gap between the two
+   regimes is now concentrated in the BAND (76.5% -> 71.0%) rather than in decisiveness,
+   which is the reverse of Finding 1's shape: **razed keeps no longer separate the two
+   regimes at all** (83.2% vs 82.5%) where they used to differ by 5.3pp. Finding 1's
+   headline -- that the information regime moves clauses by more than their margins --
+   survives intact; its specific claim about WHICH clause does not.
+
+**CAVEATS, STATED RATHER THAN LEFT TO BE DISCOVERED.** Two seed bases, not four. And the
+whole column carries open item 17: **no line in this roster scouts**, so every number above
+is the fog model played by a roster that never buys sight -- which, given that the doc's
+central new mechanic is buying sight, is a larger caveat than any of the statistics.
+
+**WHERE MEMORY LIVES, AND WHY IT IS NOT IN THE STATE HASH.** Memory is a per-side store
+created by `Fog.newMemory` and owned by the CONSUMER -- the renderer in M7, `sweep/driver.lua`
+in M2 -- and folded once per sim tick (`Fog.OBSERVE_EVERY = 1`, a declared cadence, not the
+poll cadence: memory must not depend on how often a policy happens to look). It is not sim
+state and it is not in `Hash.state`. Three reasons, any one sufficient:
+
+1. **It is derived, and hashing a derived value hides its staleness.** `memory(t)` is a fold
+   over the hashed state trajectory, the side index and the cadence. This README's own
+   checklist already settles the class: *"hashing a value you can recompute HIDES a stale
+   cache, because both clients compute the same wrong number and agree."*
+2. **A disagreement in it is not a forked match.** The sim never reads memory -- grep 1 makes
+   that structural -- so two clients whose memories differ are still playing one match with
+   one of them drawing it wrong. In `Hash.state` it would make `tools/ci.sh` go RED for a
+   render bug, which is exactly the M1/M2 conflation `tools/m2.sh`'s header exists to refuse.
+3. **It would be a compatibility break for nothing.** `Hash.state` feeds the heartbeat and
+   the committed goldens; adding a render fold invalidates every recorded match log to buy a
+   check on something that cannot affect a match.
+
+**So how is it checked?** `Fog.memHash` digests a store on demand. `sweep/determinism.lua`
+now asserts both sides' memories are bit-identical across a replay, and `tools/fogtest.lua`
+asserts the fold is deterministic, that mutating a store does not move `stateHash`, and that
+the mirrored board produces a bit-identical memory from the other seat. That proves the
+property that matters -- both clients compute both memories and agree -- without putting one
+render field inside the number the heartbeat carries.
+
+**WHAT IS IN THE TREE NOW.** `fog/Fog.lua` (a sibling of `sim/`, not a file inside it -
+the file-layout section gives the grep-1 argument), `tools/fogtest.lua` with 289 checks
+wired into `tools/ci.sh`, memory owned by `sweep/driver.lua` and digested into
+`sweep/determinism.lua`'s replay comparison, and `sweep/fogaudit.lua` re-expressed against
+sections. **`rulesHash` is unchanged at 297242539, `SUITE HASH` is unchanged at 1404498451,
+and `tools/ci.sh 1000` is GREEN (5/5 steps).**
+
+**AND THE TESTS HAVE TEETH, WHICH IS ASSERTED BY MUTATION RATHER THAN CLAIMED.** Six
+deliberate breaks of `fog/Fog.lua`, each run against `tools/fogtest.lua`:
+
+| mutation | result |
+|---|---|
+| remove the front-slot shield | 2 checks fail |
+| make every section always visible | 4,049 fail |
+| let a unit also light the last section | 3,504 fail |
+| update building memory while unseen | 6 fail |
+| 5 sections per half instead of 4 | **fails at load** (the CHECKS block) |
+| drop the frame conversion in `sectionOfEnemy` | **fails at load** |
+
+The last two are the strongest form: the module refuses to load rather than computing a
+wrong map, because its section table is asserted against `Rules.lua`'s landmarks at require
+time.
+
+### Finding 7 - the roster was recalibrated for A.3, and it did NOT rescue the milestone
+
+**SUPERSEDED IN PART BY FINDING 8.** The `alarm` field this finding introduced no longer
+exists: the owner's fog doc deletes the muster bar it read. What survives is the diagnosis
+- eleven of sixteen lines named an attention threshold nothing rendered at - and the two
+`Policy` defects it found (`pressedLane` returning lane 1 on a blank board, and `full` not
+being a superset of the fogged regime). The numbers below are void.
+
+
+`lua sweep/fogaudit.lua` sizes the defect; `lua sweep/verdict.lua 6` measures the effect.
+**This finding closes the mechanism Finding 1 proposed and mostly refutes it.** Finding 1
+ended with "the mechanism is not the ruleset, it is the roster... `policy/lines.lua`, not
+`sim/Rules.lua`, is the thing to change". The roster has now been changed. One clause
+recovered, one halved and still fails, one did not move at all, and one broke.
+
+**THE DEFECT, PER LINE, MEASURED RATHER THAN ASSERTED.** Every line declares `reactAt`, an
+own-frame position the enemy's leading unit must reach before the line answers. Under A.3
+an enemy unit is not rendered until `pos > POS_MIDLINE`, so `sweep/fogaudit.lua` reports the
+lowest position any line EVER saw one at as **1,001-1,010 under `a3`, against 0 under
+`full`**. Eleven lines named a threshold at or below 1,000. The predicate did not fail; it
+silently became a different one - "the instant anything crosses" - for all eleven at once,
+which is also why nothing in the tree went red. The `ERASED` column below is measured under
+`full`, the only regime that can still see what `a3` is deleting: it is the share of that
+line's own threat detections that happen where A.3 renders nothing.
+
+| line | family | old `reactAt` | ERASED (full) | how it was broken | now |
+|---|---|---|---|---|---|
+| Adaptive | mixed | 900 | **20.2%** | answers 100 units before contact; unreachable | `alarm = PRESSURE`, `reactAt = 1001` |
+| Turtle-pure | defence | 600 | **13.1%** | earliest threshold in the roster, most thoroughly unreachable | `alarm = PRESSURE`, `reactAt = 1001` |
+| Turtle-eco | defence | 700 | **11.9%** | "meet every push" - before it arrives | `alarm = PRESSURE`, `reactAt = 1001` |
+| Wall | defence | 800 | **8.3%** | blocks, then answers early | `alarm = PRESSURE`, `reactAt = 1001` |
+| Counterpunch | defence | 900 | **5.6%** | holds a reserve to swing at a push it cannot see | `alarm = PRESSURE`, `reactAt = 1001` |
+| Greed-pure | economy | 900 | **2.0%** | defenceless for 2 min, answers just before contact | `alarm = PRESSURE`, `reactAt = 1001` |
+| Granary-bank | economy | 1000 | 1.2% | threshold ON the midline; only pos == 1000 exactly is erased | `reactAt = 1001`, no alarm |
+| Balanced | mixed | 1000 | 0.7% | same | `reactAt = 1001`, no alarm |
+| Trader | mixed | 1000 | 0.7% | same | `reactAt = 1001`, no alarm |
+| Greed-lite | economy | 1000 | 0.5% | same | `reactAt = 1001`, no alarm |
+| Late-eco | economy | 1000 | 0.4% | same | `reactAt = 1001`, no alarm |
+| Rush-horse | aggro | 1400 | 0.0% | **not broken by fog** - broken by the PATCH; see below | `reactAt = 1400`, no alarm |
+| Split-push | aggro | 1300 | 0.0% | same | `reactAt = 1300`, no alarm |
+| Rush-spear | aggro | 1250 | 0.0% | same | `reactAt = 1250`, no alarm |
+| Raid-counter | aggro | 1150 | 0.0% | same | `reactAt = 1150`, no alarm |
+| Skirmish | mixed | 1100 | 0.0% | same | `reactAt = 1100`, no alarm |
+
+**SO IT IS SIXTEEN LINES AND NOT ELEVEN, AND THE OTHER FIVE WERE BROKEN BY THE FIX.** The
+previous pass patched the eleven by giving every line a muster-bar trigger derived from its
+own `reactAt`: at or below the midline earned a PRESSURE trigger, above it earned a HEAVY
+one. That handed the four aggro lines and `Skirmish` a pre-emptive answer their
+configuration never asked for and their notes explicitly disclaim - `Rush-horse` exists to
+test "answers a threat only once it is at the gates, which is the whole aggro bet". **And
+the rule was chosen by which numbers it moved**, which its own comment recorded: the two
+flat alternatives were rejected because one dropped razed keeps to 73.5% and the other
+dropped the band to 74.5%. That is selecting an instrument on the reading it produces, and
+it is the thing the next reviewer is looking for. The trigger is now a DECLARED per-line
+field (`alarm`), so it can be read rather than re-derived.
+
+**WHAT CANNOT BE EXPRESSED, STATED RATHER THAN AVERAGED AWAY.** Six lines declared four
+distinct sub-midline thresholds (600 / 700 / 800 / 900 / 900 / 900) and A.3 has **one usable
+rung** to receive them: `sweep/fogaudit.lua` measures `bar >= pressure` lit in 2-6% of
+lane-polls and **`bar >= heavy` in 0.0-0.1%**, so HEAVY is not a second attention level, it
+is silence spelled differently. Their separation on the attention axis is **gone and cannot
+be restored** - the enemy half is three-valued, and that is the instrument A.3 specifies,
+not a limitation of this file. What still separates those six is `react` (52-80), the
+opening, the mix, the cadence, `minStack` and `convertAt`. No line was dropped: all sixteen
+survive with a documented loss, and `Raid-counter`'s note ("the counter to what it SEES in
+the lane") turned out to have been fog-honest all along, since `Policy.counterType` only
+ever counted rendered units.
+
+**THE SECOND DEFECT, WHICH WAS BIGGER THAN THE FIRST.** `Policy.pressedLane` started its
+best-score search at -1, which no lane can fail to beat, so on a board where every lane
+scored 0 it answered "lane 1". Under full information that state ends at the enemy's first
+deploy. **Under A.3 it is a quarter of the match**: `fogaudit` measures **16.8%-35.1% of
+every line's decisions** taken against an enemy half showing no rendered unit, no lit bar
+and no standing Levy. Three lines choose their deploy lane from that answer
+(`target = "guard"`), two place their reactive building with it, and every unscripted front
+slot in an opening goes where it points - so `Wall`, `Turtle-eco` and `Turtle-pure` were
+playing "focus lane 1" for the first minutes of every match, and `Balanced` put its Trap Pit
+in lane 1 in all 1,440 of them. It returns 0 now, and every caller already handled 0.
+`Policy.openLane` was left alone deliberately and the reasoning is in its header: a tiebreak
+between three lanes that are genuinely equally undefended is determinism rule 6, while a
+tiebreak between three lanes nobody can see is an invention.
+
+**THE THIRD, AND IT IS ABOUT THE UPPER BOUND RATHER THAN THE GATE.** `Policy.fillView` built
+the muster bar only under `a3`, so the regime published as "an upper bound on how well
+anyone can play" was MISSING a field the restricted regime had. Ruling 1 puts every enemy
+unit's HP on both clients, so the bar - a three-way bucketing of a sum `full` already holds
+exactly - is strictly coarser than what that regime is entitled to. The bar is now built in
+both, so `full` is an actual superset of `a3` and the two columns differ only in what the
+board shows, not in which roster parameters are inert.
+
+**WHAT EACH CHANGE MOVED, SEPARATELY, at 1,440 matches per regime and seed base 500000.**
+Every change was made because the thing it touched was broken; the columns are here so that
+claim can be checked rather than believed:
+
+| stage | a3 median | a3 band | a3 keep | a3 spread | full median | full band | full keep | full spread |
+|---|---|---|---|---|---|---|---|---|
+| as measured before this pass | 428 s | 74.7% | 75.6% | 22.9pp | 414 s | 76.8% | 80.9% | 14.2pp |
+| + `pressedLane` returns 0 on a blank board | 432 s | 76.7% | 76.0% | 17.3pp | 419 s | 77.7% | 80.1% | 12.7pp |
+| + the sixteen lines recalibrated (`alarm` / `reactAt`) | 432 s | 76.5% | 75.9% | 13.8pp | 415 s | 76.5% | 83.2% | 16.4pp |
+| + the muster bar built under `full` too | **432 s** | **76.5%** | **75.9%** | **13.8pp** | **419 s** | **76.7%** | **80.6%** | **16.6pp** |
+
+The last row changes the `a3` column by nothing at all, which is the point: it is a fix to
+the upper-bound column and it stayed there.
+
+**AND IT IS NOT SEED LUCK, IN EITHER DIRECTION.** The recalibrated roster under A.3, four
+seed bases, 1,440 matches each:
+
+| seed base | median | band | keep | spread | clauses |
+|---|---|---|---|---|---|
+| 500000 | 432 s | 76.5% | 75.9% | 13.8pp | **RED: median keep spread** |
+| 600000 | 434 s | 76.4% | 74.1% | 13.6pp | **RED: median keep spread** |
+| 700000 | 438 s | 76.1% | 76.3% | 11.1pp | **RED: median keep spread** |
+| 800000 | 439 s | 75.5% | 75.1% | 14.5pp | **RED: median keep spread** |
+
+Before the recalibration the four bases failed four *different* combinations. **A verdict
+that no longer changes its mind about which clause is broken when the seeds move is the
+single most useful thing this pass produced**, and it is worth more than the two clauses
+that changed state.
+
+**THE FOUR HONEST CONCLUSIONS, INCLUDING THE ONE THAT GOES AGAINST THE WORK.**
+
+1. **The band clause was a roster artefact and is now genuinely passing** - 74.7% -> 76.5%,
+   and at all four seed bases rather than at one. Most of that came from the `pressedLane`
+   fix (+2.0pp), not from the attention recalibration (-0.2pp).
+2. **The razed-keep clause is not a roster artefact.** It moved 75.6% -> 75.9% across the
+   entire recalibration and sits 4.1pp under target at every seed base. Finding 1's
+   hypothesis that the fogged decisiveness gap is a roster effect is **refuted**: it
+   survives an honestly calibrated roster intact, and it is now the strongest candidate for
+   a genuine disagreement between this sim and C.6's 85%.
+3. **The median clause BROKE, and that is a real result rather than a regression to undo.**
+   428 s -> 432 s, and 432-439 s across four bases against a 380-430 s ceiling. A roster
+   that answers pressure only when it can actually see it fights longer, and the honest
+   number is a few seconds outside Part E's band. The temptation to buy those 2 s back by
+   re-tuning `alarm` is exactly the thing this pass exists to refuse: **a roster selected to
+   pass is as useless as a policy that cheats.**
+4. **Family spread halved, 22.9pp -> 13.8pp, and the clause still fails and still cannot be
+   measured.** `lua sweep/famstat.lua 6 1 20000` re-run on the recalibrated roster:
+   `P(null >= measured) = 84.1%` (was 55.9%), so the measured spread is now *further* inside
+   the null than before - the four family labels carry even less detectable information than
+   they did. `P(null < 10pp) = 6.5%`. Finding 2 stands unchanged in its conclusion and its
+   numbers are updated in place.
+
+**One thing this pass BROKE that was not a number in the milestone, and it must not be
+buried**: Finding 2 recommends replacing the family-spread clause with "every family has a
+line above 70% and no line above 90%". Under A.3 the recalibrated roster's best defence line
+is `Counterpunch` at **65.0%**, where the old roster's best was `Wall` at 74.4% (`Wall` is
+now 58.3%). **So this sim now misses the proposed clause for defence under BOTH regimes** -
+by 5.0pp under fog, where it used to pass by 4.4pp, and by 0.6pp under full information,
+where it already missed. Aggro, economy and mixed still clear it in both
+(`Rush-horse` 77.7 / 75.5%, `Granary-bank` 87.7 / 84.4%, `Adaptive` 73.6 / 78.6%). **A
+clause that one honest recalibration of the instrument moves by 9pp on the family it
+decides is not a robust clause either**, and open item 4 is updated to say so rather than
+quietly keeping the recommendation that flattered the earlier roster.
+
+### Finding 1 - the whole first pass was measured under PERFECT INFORMATION, and that is worth more than two clauses' margins
+
+`lua sweep/verdict.lua 6` prints both columns; `lua sweep/verdict.lua 6 500000 a3` runs one.
+
+`Policy.fillView` handed every line a verbatim copy of the enemy side. Three of its field
+groups directly contradict A.3's default-vision table:
+
+| what the view carried | A.3 says |
+|---|---|
+| foe `bank / earned / spent / wasted / levyFlat` | *"Enemy Levy / bank / income / spend - Not rendered"* |
+| every foe slot's identity, HP, done-flag and occupancy | *"Enemy buildings, not yet disclosed - Nothing, not even that the slot is occupied"* |
+| every foe unit's type, HP and position, anywhere on the board | *"Enemy units in their half - Nothing individual. One per-lane muster bar, 3 buckets"* |
+
+These were not unused fields; the lines are built on them. `Policy.openLane` scores lanes as
+`f.supply + 120*(frontB>0) + 60*(backB>0)`, which is the enemy's **undisclosed building
+occupancy plus their exact hidden unit supply**, and it is the lane rule for `target = "open"`
+- 9 of the 16 lines, including all three of the strongest. `Policy.pressedLane` and
+`threatLane` read exact hidden `supply` and `maxPos` at `reactAt` thresholds as low as 600,
+which is deep inside the enemy's own half. `Policy.counterType` read exact enemy unit-type
+counts anywhere on the board.
+
+**The defence offered for this was true and answered the wrong question.** `Policy.lua` and
+this README argued from Ruling 1 that a policy reading enemy state "is reading what its own
+client already has". That is about what the CLIENT holds. A.3's table is about what the
+PLAYER sees, and it is the player who plays the match Part E's milestone is characterising.
+
+**What changed.** `policy/Policy.lua` now carries `M.VISION`, a named regime with both
+settings runnable and printed in every report header. Under `"a3"` the foe half of the view
+is filtered exactly as A.3 renders it: enemy purse zeroed; an enemy building's slot renders
+EMPTY until `hp < maxHp` discloses it (which latches permanently, since nothing in M1 or M2
+heals); an enemy unit is individually visible only once `pos > POS_MIDLINE`, i.e. once it is
+in my half; and everything behind that line is summarised by A.3's three-bucket muster bar,
+read back as a coarse Levy estimate. **This is not an approximation for this roster** - A.3's
+two vision-granting buildings, Watchtower and Shrine, are built by none of the sixteen lines,
+so `"a3"` here *is* A.3's default vision rather than a lower bound on it.
+
+**What it did, at 1,440 matches per regime. These are the numbers as they stood when the
+regime was introduced, against the pre-recalibration roster; Finding 7 re-measures both
+columns against a roster that can actually perceive the fogged board:**
+
+| clause | full information | A.3 fog | moved by |
+|---|---|---|---|
+| median | 414 s PASS | 428 s PASS | +14 s |
+| inside the 5-10 min band | 76.8% PASS | **74.7% FAIL** | -2.1pp |
+| decided by a razed keep | 80.9% PASS | **75.6% FAIL** | -5.3pp |
+| family spread | 14.2pp FAIL | 22.9pp FAIL | +8.7pp |
+
+**Two consequences, and they are the reason this is Finding 1.**
+
+1. **The two clauses M2 used to pass, it passed by 1.8pp and 0.9pp** - and the information
+   regime, an unstated and until now untested choice, moves them by 2.1pp and 5.3pp. The
+   margin was smaller than a term nobody had priced. **This half stands.**
+2. ~~**The mechanism is not the ruleset, it is the roster.**~~ **PARTLY REFUTED BY
+   FINDING 7, which did the experiment this paragraph proposed.** The observation was
+   correct: `reactAt` - the per-line attention parameter, set between 600 and 1400 across
+   the roster - is unreachable below the midline, and eleven of the sixteen lines had one
+   inside the enemy's own half, so the sixteen lines were indeed calibrated against a board
+   no player is ever shown. The *inference* - that the fogged column's failures are
+   therefore a roster effect - does not survive the fix. Recalibrating all sixteen lines
+   onto signals A.3 renders **recovered the band clause (74.7% -> 76.5%), halved the family
+   spread (22.9 -> 13.8pp, still failing), moved the razed-keep clause by 0.3pp, and pushed
+   the median out of its band.** Two of the three fogged failures were not about the roster.
+   See Finding 7 for the per-line defect list and the staged measurement.
+
+**And the one number in M2 that is neither in Part C nor forced by it: the muster bar's
+thresholds.** A.3 specifies three buckets driven by total marching HP and gives no cut
+points. They are derived in `Policy.lua` rather than chosen - three equal shares of the most
+marching HP a 200-Levy lane can hold at C.3's best HP-per-Levy body (Spear, 42 HP/Levy, so
+8,400 HP), read back at the lower edge of each bucket - but the fogged column is genuinely
+sensitive to them, which is why this is escalated rather than quietly tuned:
+
+| muster model (480 matches) | median | band | razed keep | family spread |
+|---|---|---|---|---|
+| **2,800 / 5,600 HP -> 66 / 133 Levy (shipped, derived)** | 424 s | 75.6% | 75.8% | 21.2pp |
+| 2,800 / 5,600 -> read back as 0 (unseen lane assumed empty) | 425 s | 73.3% | 77.7% | 13.7pp |
+| 2,100 / 4,200 -> 50 / 100 | 443 s | 75.2% | 73.7% | 18.0pp |
+| 4,200 / 6,300 -> 100 / 150 | 429 s | 74.1% | 74.5% | 15.5pp |
+| *full information, for scale* | *415 s* | *77.0%* | *80.4%* | *12.7pp* |
+
+**The razed-keep clause fails under every one of them and the band clause under most, so the
+direction of Finding 1 is not a threshold artefact - but the size of it is not settled, and
+family spread moves 7.5pp on this choice alone.** No fogged number should be quoted against
+Part C until A.3 fixes the buckets. See open item 8.
+
+**This table was measured against the PRE-RECALIBRATION roster and has not been re-run, so
+it is a sensitivity to the cut points and not a current reading. `sweep/fogaudit.lua` has
+since added a fact about the shipped cut points that the table cannot show and that open
+item 8 needs: at 2,800 / 5,600 HP the bar reads `pressure` in 2-6% of lane-polls and
+`heavy` in 0.0-0.1%.** The heavy bucket is essentially never rendered, so the top third of
+A.3's own three-state widget is dead at the derived thresholds - which is why the
+recalibrated roster maps every pre-contact intent onto `pressure` and no line declares
+`alarm = HEAVY`. That is a rendering fact as much as a balance one and it should reach the
+doc owner with the rest of item 8.
+
+### Finding 2 - the family-spread clause is not measurable at four lines per family
+
+`lua sweep/famstat.lua` (~8 min; numbers below are the **A.3 fog** regime at 1,440 matches
+per replicate, seed base 500000). **Re-measured on the recalibrated roster
+(`lua sweep/famstat.lua 6 1 20000`); the conclusion did not move and the numbers got
+worse.** Family win rate here is the arithmetic mean of **four hand-written lines** whose
+individual win rates run from 2.7% to 87.7%. A mean of four samples drawn from a spread that
+wide has a standard error of the same order as the 10pp threshold being tested, so the first
+question is not "is the ruleset balanced" but "can this statistic tell a balanced ruleset
+from an unbalanced one". Five tests say no.
+
+**1. Permutation.** Deal the sixteen measured line win rates into four *arbitrary* groups
+of four, 20,000 times, and build the distribution of family spread under the null
+hypothesis that the family label carries no information at all:
+
+| null family spread | p05 | p25 | median | p75 | p95 |
+|---|---|---|---|---|---|
+| labels shuffled, recalibrated roster | 9.0pp | 16.5pp | **22.8pp** | 29.1pp | 37.8pp |
+| *labels shuffled, before recalibration* | *9.6pp* | *17.7pp* | *24.3pp* | *31.2pp* | *40.6pp* |
+
+The measured 13.8pp sits at the **16th percentile of that null**: `P(null >= measured) =
+84.1%`. The real family grouping is indistinguishable from random grouping - and it is now
+*narrower* than random grouping rather than merely indistinguishable from it. **The sweep
+has not detected a family effect, and recalibrating the roster made the label carry less
+detectable information, not more** (before: measured 22.9pp at the 44th percentile,
+`P(null >= measured) = 55.9%`). And the number this README previously called decisive:
+`P(null spread < 10.0pp) = 6.5%`, against 5.5% before. **A roster with this dispersion
+fails the milestone clause about 93% of the time with the families assigned at random.**
+
+**1b. But that is a statement about THIS ROSTER's dispersion, not about the ruleset - and
+the earlier version of this finding got that wrong.** It concluded that the clause "is very
+nearly unpassable by any ruleset", which does not follow from its own evidence: the null is
+computed from sixteen win rates the ruleset and the roster produce *jointly*. `famstat.lua`
+now runs the obvious control - shrink the same sixteen rates toward 50% and re-run the
+identical permutation, which changes the roster's dispersion and nothing about the ruleset:
+
+| roster dispersion | spread | null median | P(null < 10pp) |
+|---|---|---|---|
+| as measured (leverage 85.0pp) | 13.8pp | 22.8pp | **6.5%** |
+| shrunk to C.6's own leverage (55.0pp) | 8.9pp | 14.7pp | **21.0%** |
+| half this dispersion | 6.9pp | 11.4pp | **38.2%** |
+| a quarter of it | 3.5pp | 5.7pp | **96.9%** |
+
+**The clause is passable** - by a roster whose lines sit within about 20pp of each other -
+and it is three times more passable at the dispersion C.6 itself reports. What the
+permutation shows is that the statistic has **no power at this dispersion**, not that the
+clause is unreachable. A layout that passes need not be a lucky draw.
+
+**2. Seed noise, and the thing this table used to throw away.** Four replicates of the full
+1,440 matches with the roster held exactly fixed and only the seed base moved. `famstat.lua`
+computed a complete round-robin for each replicate and printed only the family columns, so
+**every other milestone clause was measured four times and discarded.** It now prints them,
+with a per-row verdict, because a replicate that would fail a clause must never again be
+computed and thrown away:
+
+**THE RECALIBRATED ROSTER, A.3, four bases** (`lua sweep/verdict.lua 6 <base> a3`, the same
+frozen seed schedule; the family columns were re-measured only at 500000, so the other three
+rows carry the four milestone numbers and not the family split):
+
+| seed base | regime | aggro | economy | defence | mixed | spread | band | keep | median | clauses |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 500000 | a3 | 53.9 | 40.1 | 53.1 | 52.7 | 13.8pp | 76.5% | 75.9% | 432 s | **RED: median keep spread** |
+| 600000 | a3 | - | - | - | - | 13.6pp | 76.4% | 74.1% | 434 s | **RED: median keep spread** |
+| 700000 | a3 | - | - | - | - | 11.1pp | 76.1% | 76.3% | 438 s | **RED: median keep spread** |
+| 800000 | a3 | - | - | - | - | 14.5pp | 75.5% | 75.1% | 439 s | **RED: median keep spread** |
+| 500000 | full | 53.8 | 39.7 | 50.1 | 56.3 | 16.6pp | 76.7% | 80.6% | 419 s | RED: spread |
+
+**BEFORE the recalibration, for comparison. Four bases, and four different answers to the
+question "which clause is broken":**
+
+| seed base | regime | aggro | economy | defence | mixed | spread | band | keep | median | clauses |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 500000 | a3 | 53.8 | 36.5 | 59.4 | 50.2 | 22.9pp | 74.7% | 75.6% | 428 s | **RED: band keep spread** |
+| 600000 | a3 | 54.6 | 37.9 | 59.0 | 48.4 | 21.1pp | 74.1% | 75.9% | 429 s | **RED: band keep spread** |
+| 700000 | a3 | 55.2 | 39.8 | 57.9 | 46.9 | 18.1pp | 75.4% | 77.0% | 441 s | **RED: median keep spread** |
+| 800000 | a3 | 54.0 | 37.6 | 57.3 | 50.9 | 19.7pp | 74.0% | 76.5% | 433 s | **RED: median band keep spread** |
+| 500000 | full | 55.8 | 41.6 | 53.6 | 48.8 | 14.2pp | 76.8% | 80.9% | 414 s | RED: spread |
+| 600000 | full | - | - | - | - | 16.1pp | 76.1% | 81.7% | 427 s | RED: spread |
+| 700000 | full | - | - | - | - | 12.1pp | 75.8% | 80.5% | 411 s | RED: spread |
+| 800000 | full | - | - | - | - | 14.1pp | 75.1% | 82.4% | 418 s | RED: spread |
+
+Match randomness moved the spread by **4.8pp** under fog before the recalibration and
+**3.4pp** after it. It is not the seeds, and playing 10,000 matches instead of 1,440 would
+not close a 10pp gap.
+
+**And the band column is the clearest single argument for having done this work.** Before
+the recalibration it read 74.0 / 74.1 / 74.7 / 75.4% under fog against a >= 75.0%
+threshold - failing at three bases of four and passing at the fourth - and under full
+information 75.1 / 75.8 / 76.1 / 76.8%, where **75.1% of 1,440 is 1,081 matches against a
+pass threshold of exactly 1,080: it passed by ONE MATCH at seed base 800000.** At 1,440
+matches the standard error on a 75% share is about 1.1pp, so a 75.0% threshold measured at
+75.1% is comfortably inside its own noise. **On the recalibrated roster the same clause
+reads 75.5 / 76.1 / 76.4 / 76.5% and passes at all four**, which is the difference between a
+measurement and a coin - though 75.5% is still only half a standard error clear, so the
+clause remains thin rather than safe. See open item 3.
+
+**3. Roster jackknife.** Delete one line of sixteen and recompute exactly from the pair
+matrix, so the dropped line goes as an opponent too:
+
+- without `Greed-pure`: **1.3pp** (lowest, and the only deletion that would PASS)
+- without `Greed-lite`: 10.8pp
+- without `Raid-counter`: 13.2pp
+- ...
+- without `Rush-spear`: 22.9pp
+- without `Granary-bank`: **31.1pp** (highest)
+
+**Deleting one line of sixteen swings the clause across a 29.8pp range**, wider than the
+threshold being tested by a factor of nearly three, and **one of the sixteen deletions
+(`Greed-pure`, at 2.7% the worst line in the pool) would take the clause from 13.8pp to
+1.3pp and turn the milestone green on its own.** That is a milestone one line moves, which
+is a statement about the roster. (Before the recalibration the range was 12.4-40.0pp and no
+single deletion passed under fog; the recalibration made the clause *more* sensitive to one
+line, not less.)
+
+**4. And the roster deliberately overshot - by more than it used to.** `policy/lines.lua`
+says in its own header that the lines within a family are "deliberately far apart", to
+reproduce C.6's headline that decision leverage (26.9-55.0pp) is five times family spread.
+It overshot: within-family leverage here is **24.5-85.0pp** against C.6's 26.9-55.0pp
+(before the recalibration, 30.0-81.1pp). The low end now agrees with C.6 to 2.4pp; the high
+end is 1.5x and the honest recalibration widened it. **The two dispersions moved in opposite
+directions** - lines got further apart (81.1 -> 85.0pp) while their family means got closer
+together (22.9 -> 13.8pp) - which is exactly what a mean of four noisy samples does and is
+another way of saying the family statistic is not measuring the lines.
+
+**5. Building spend does not explain it either.** The standing explanation was that win
+rate is nearly a linear function of building spend, so building-heavy families are
+structurally punished. Kendall's S over the sixteen lines is **-29 of 120 pairs, two-sided
+p = 19.7%** - not significant (before: -27, p = 23.0%). The best line in the pool opens with
+a 100-Levy Granary and the worst buys three buildings.
+
+**What this means for Part C.** The permutation null cannot be run against C.6's own
+numbers, because **Part C recorded four of its sixteen policy names and nothing else.** The
+clause as written compares two rosters, under two unrecorded information regimes, and
+attributes the difference to the sim.
+
+**The correction is to the milestone, not to `Rules.lua`.** Part C already states the
+constraint the design actually cares about, in C.6's own prose: *"All three pure
+archetypes have a top line above 70%, which meets the design's 'live path to victory'
+constraint literally rather than approximately."* That is a floor on the best line per
+family, not a mean over an arbitrary four, and it is robust to which lines somebody wrote
+- adding a bad line cannot break it.
+
+**RE-MEASURED ON THE CURRENT ROSTER UNDER THE OWNER'S FOG MODEL (Finding 9), and the
+proposed replacement clause now fails on BOTH of its halves rather than one.** `lua
+sweep/sweep.lua 6`, 1,440 matches, seed base 500000:
+
+| family | best line | fog, scouting roster | in [70,90]? |
+|---|---|---|---|
+| aggro | Rush-horse | 71.1% | yes, by 1.1pp |
+| economy | **Granary-bank** | **94.4%** | **NO -- 4.4pp ABOVE the 90% ceiling** |
+| defence | **Counterpunch** | **58.3%** | **NO -- 11.7pp below the 70% floor** |
+| mixed | Adaptive | 78.8% | yes |
+
+The economy row is new and it is a correction to this README rather than a change in the
+sim: `Granary-bank` was over 90% in the muster-bar reading too (93.8% in Finding 8's
+roster) and the table below never checked the ceiling. **So the clause C.6's own prose
+derives is missed at both ends by this roster**, which strengthens rather than weakens the
+argument that no summary of sixteen hand-written lines is stable enough to gate on.
+
+*The table this replaces, measured under the muster bar and kept as the record:*
+
+| family | best line (A.3) | A.3 fog | in [70,90]? | best line (full) | full info | in [70,90]? |
+|---|---|---|---|---|---|---|
+| aggro | Rush-horse | 77.7% | yes | Rush-horse | 75.5% | yes |
+| economy | Granary-bank | 87.7% | yes | Granary-bank | 84.4% | yes |
+| defence | **Counterpunch** | **65.0%** | **NO, by 5.0pp** | Wall | **69.4%** | **NO, by 0.6pp** |
+| mixed | Adaptive | 73.6% | yes | Adaptive | 78.6% | yes |
+
+*Before the recalibration this table read `Rush-horse` 76.6 / 78.6, `Granary-bank`
+83.3 / 87.7, `Wall` 74.4 / 69.4 and `Adaptive` 74.1 / 78.6 - so the defence row passed under
+fog and failed under full information. It now fails under both, and by 5.0pp rather than by
+a rounding error. Nothing about the ruleset changed between those two readings.*
+
+**Recommendation: replace "family spread under 10pp" with "every family has a line above
+70% and no line above 90%"** - it tests what the design says it wants, it survives a change
+of roster, and it is the clause C.6's own text derives. **The recommendation stands and its
+caveat has got much worse, which is stated here rather than dropped: this sim now MISSES the
+proposed clause for defence under both regimes, by 5.0pp under fog and 0.6pp under full
+information.** The history of that one cell is the argument against adopting the clause as a
+hard threshold: an earlier version of this README reported defence's best line at 70.0%,
+exactly on the threshold; the `Counterpunch` duplicate-key fix moved it to 74.4%; and
+Finding 7's recalibration - which changed no rule, only what the lines are allowed to
+perceive - moved it to 65.0%. **Three successive corrections to the INSTRUMENT moved a
+milestone-deciding number by 9pp without anyone touching `Rules.lua`.** The honest reading
+is that at four lines per family **no summary of the roster is stable to 5pp, let alone
+1pp**. If the clause is adopted it must be adopted with a stated tolerance, or with more
+than four lines per family - see open item 10, which is now the blocking piece of work for
+this item rather than a nice-to-have.
+
+### Finding 3 - a building costs real win rate, but NOT in proportion to its price
+
+`lua sweep/probe.lua 6 Balanced` and `lua sweep/probe.lua 6 Turtle-eco` (~75 s each).
+**This finding replaces the earlier "a building costs 0.15pp of win rate per Levy" entry
+in this README, whose second half does not survive a control.**
+
+A control line - `Balanced` with its opening stripped and all nineteen other configuration
+fields inherited - plays the whole pool from both seats. Each variant is that control plus
+exactly one opening building. 192 matches per variant; a win rate at that sample size has
+a standard error of about 3.5pp, so two variants need to clear roughly 10pp before their
+order means anything.
+
+**NOT RE-MEASURED SINCE FINDING 9, AND THE TABLE BELOW IS STALE IN A KNOWN DIRECTION.** The
+probe holds ONE control against the whole pool, and four lines in that pool now buy sight
+(Finding 9), so every cell moved by whatever scouting opponents are worth. The control
+itself is unaffected in kind -- `Balanced` and `Turtle-eco`... `Turtle-eco` **does** now
+scout, so the second control column is a scouting control and the first is a blind one,
+which is a difference the table does not label. `sweep/probe.lua` inherits `cfg.scout` from
+its control like every other field, so both probes remain internally controlled; what is
+not current is the comparison to these published numbers. **Re-run both before quoting
+either.** The conclusions -- that a building costs real tempo, that the penalty does not
+track price, and that the failures are the lane-scoped buildings -- rest on same-price gaps
+within one column and are not disturbed by a level shift.
+
+**Re-measured under A.3 fog after the `Counterpunch` fix; every number below moved and the
+conclusion did not.** Both controls, 192 matches per variant:
+
+| opening | cost | vs `Balanced` control (52.8%) | sigma | vs `Turtle-eco` control (74.2%) | sigma |
+|---|---|---|---|---|---|
+| **nothing at all** | 0 | - | - | - | - |
+| Trap Pit | 50 | -8.6pp | 1.7 | **+0.2pp** | 0.0 |
+| Watchtower | 70 | -10.1pp | 2.0 | -1.9pp | 0.4 |
+| Palisade | 90 | **+2.4pp** | 0.4 | -9.7pp | 2.1 |
+| Granary | 100 | -8.6pp | 1.7 | -7.6pp | 1.6 |
+| Arrow Tower | 110 | -4.9pp | 0.9 | **+4.4pp** | 1.0 |
+| Redoubt | 110 | -12.7pp | 2.5 | -13.8pp | 3.0 |
+| Smithy | 110 | -18.5pp | 3.7 | -8.1pp | 1.7 |
+| Fletcher | 110 | -12.7pp | 2.5 | -11.7pp | 2.5 |
+| Levy Post | 120 | -13.3pp | 2.6 | -6.5pp | 1.4 |
+| **Stables** | **120** | **-15.9pp** | 3.2 | **-18.5pp** | 4.0 |
+| Shrine | 140 | -18.5pp | 3.7 | -15.9pp | 3.4 |
+
+**Clause A - buying a building costs win rate - is CONFIRMED for most of the catalogue and
+is large, but it is NOT universal.** Nine of eleven are negative against the roaming
+control and ten of eleven against the defensive one, several past 3 sigma. The tempo
+mechanism in `policy/lines.lua`'s reserve comment is real: a building is bought by fielding
+nothing for the ~40 s it takes to save the whole price, because a partial reserve buys
+nothing. **But three cells are positive** - Palisade for the roaming control, Trap Pit and
+Arrow Tower for the defensive one - and none of the three is significant, which is the
+useful part: **for the right control the tempo cost of the right building is inside the
+noise.** Under the previous full-information measurement all eleven were negative and nine
+were past 2.5 sigma, so the fog moves this too.
+
+**Clause B - "the penalty tracks the PRICE, not the effect" - REMAINS REFUTED, and the
+evidence for refuting it is now weaker in one place and stronger in another. Say both.**
+
+1. **Hold the price exactly fixed and the penalty still moves.** At **110 Levy** against the
+   defensive control, Arrow Tower is +4.4pp and Redoubt -13.8pp: an **18.2pp gap at 4.0
+   sigma** between two buildings that cost identical Levy and therefore lose identical
+   tempo. That single same-price gap is 80% of the spread of the *whole* table across its
+   whole price range (22.9pp). Against the roaming control the widest same-price gap is
+   13.6pp at 2.7 sigma, against a whole-table spread of 20.9pp.
+2. **The correlation is control-dependent, and this is the arm that got weaker.** Against
+   `Balanced` the cost-versus-win-rate rank correlation is **Kendall S = -30, p = 1.2%** -
+   significant, and `probe.lua`'s own READ line for that control now says "the penalty does
+   track the price". Against `Turtle-eco` it is **S = -24, p = 6.1%** - not significant at
+   5%, but not the "p = 36.8%, gone" the earlier measurement reported either. **A
+   relationship that is p=1% for one control and p=6% for the next is a weaker refutation
+   than this README previously claimed**, and the honest statement is that price is *a*
+   term, not that it is not a term.
+3. **The round-robin does not support it.** Across all sixteen lines, building spend against
+   win rate is Kendall S = -27 of 120 pairs, **two-sided p = 23.0%** (`sweep/famstat.lua`
+   test 5). The best line in the entire pool, `Granary-bank` at 83.3%, opens with a
+   100-Levy Granary.
+
+**What the data actually points at, and it survived the re-measurement intact.** The
+buildings at the bottom for the roaming control - Stables, Shrine, Smithy, Redoubt,
+Fletcher - are precisely the **lane-scoped** effects, which are worth nothing to a line
+whose `target = "open"` sends it wherever the enemy is not. Give the control a reason to
+stay in its lane and they recover: **Smithy -18.5pp -> -8.1pp, Arrow Tower -4.9pp -> +4.4pp,
+Trap Pit -8.6pp -> +0.2pp, Levy Post -13.3pp -> -6.5pp.** The two that fail under *both*
+controls are **Stables** (-15.9 / -18.5) and **Shrine** (-18.5 / -15.9), and Stables is
+lane-scoped twice over - a march bonus and a Horse discount, both only in its own lane.
+
+**So the earlier recommendation in this README - "move C.4's band down to 4-8 ticks of
+income", i.e. halve every price - stays withdrawn.** A uniform reprice would leave the
+lane-scoped buildings exactly where they are in the ordering, because their problem is
+that their effect is conditional on a commitment the buyer has not made, not that they are
+dear. It would also make Trap Pit and Arrow Tower, which are already inside the noise for
+a control that fights in one lane, strictly better. **Any repricing is per-building, and
+the evidence for it is two control lines that disagree about how much price matters.**
+
+**One further correction, to an instruction this README used to give.** An earlier version
+said *"do not reprice anything to close the family-spread clause - the statistic cannot see
+the change"*. That is withdrawn as unsupported: a repricing does move the statistic, by
+more than the threshold. What it also does is trade one clause for others - scaling costs
+down lengthens the median and reduces decisiveness - so the accurate warning is
+**"repricing is not the way to close the family-spread clause, and `Rules.lua` should still
+not be touched for that reason"**, which is a different sentence with a different
+justification.
+
+### Finding 4 - Q10's tiers 2, 3 and 4 do not fire
+
+Of the 346 matches that reached the clock under A.3 fog: **T1 97.3%, T2 0%, T3 0%, T4 0%,
+draw 2.6%.** C.6 states T1 54%, T2 25%, T3 17%, draw 4% and Q10 concludes "every tier
+fires, so nothing in Q10 is dead code". The full-information regime gives the same shape
+over its own clock matches, so this is not a fog effect - and **the recalibrated roster
+gives the same shape again**, which matters because it is the only finding here that a
+change of roster could not have rescued and did not.
+
+Tier 2 can only be reached when both sides have removed **exactly** the same cumulative
+number of HP from the enemy keep. Against a 48,000 HP keep taking chip damage all match
+that is a coincidence, not an outcome - and the 2.5% of draws are the matches where NEITHER
+side ever touched a keep, so they tie at 0 and fall straight past every tier to tier 5.
+There is no observed path to T2/T3/T4 at these numbers. This agrees with what M1 already
+recorded (random logs never reach T2-T4 either; `tools/mechanics.lua` covers them by
+hand-building terminal states) and it is now confirmed under real play.
+
+This does not make the ladder wrong - Q10's ORDERING is still the thing that makes the
+pure-turtle exploit unreachable, and that part is confirmed below. It makes the *claim*
+about tier frequency wrong, and it means T2-T4 will ship untested by anything except a
+unit test unless tier 1 is coarsened (bucketing `keepDamageDealt`, e.g. to whole percent of
+KEEP_HP, would make ties common enough for the lower tiers to matter).
+
+**Unlike Findings 1, 2 and 3 this one is not a statistical artefact and cannot become one:**
+it is a structural claim about an exact integer tie, and 0 occurrences in 350 clock
+matches is not a sample-size problem.
+
+### Finding 5 - C.6's per-line numbers are not reproducible in principle, and it is worth saying why
+
+| line | C.6 | here, A.3 fog | here, full info | |
+|---|---|---|---|---|
+| Rush-horse | 77.8 (best line in the pool) | **77.7** (best in pool) | 75.5 (2nd in pool) | **agrees to 0.1pp** |
+| Greed-pure | 73.3 (best economy line) | **2.7** (worst in pool) | 6.1 (worst in pool) | disagrees by 71pp |
+| Turtle-eco | 71.4 (best defence line) | 40.5 | 36.1 | disagrees by 31pp |
+| Balanced | 59.2 | 46.6 | 48.3 | disagrees by 11-13pp |
+
+*(Recalibrated-roster figures. Before Finding 7 they read 76.6 / 78.6, 2.2 / 7.7,
+44.4 / 47.2 and 47.2 / 40.0. **`Rush-horse` moved TOWARD C.6 under fog, from 1.2pp out to
+0.1pp out, and away from it under full information** - which is a second, independent sign
+that A.3 default vision is the regime C.6 was measured under, now from a roster that could
+not have been tuned toward that agreement because nothing in it was chosen by looking at
+C.6's table.)*
+
+The earlier reading of this table was that the two models disagree about what a building
+buys. **After Findings 1 and 2 that reading is wrong, and the correct one is duller and
+more useful: these are eight different programs sharing four names.** Part C recorded that
+its sweep used "sixteen scripted policies across four families" and published four names
+and four numbers. It did not record what any of them did, nor what any of them could see.
+`Greed-pure` here is "two Levy Posts and a Granary before a single unit, going completely
+quiet for 119 s of income"; whatever `Greed-pure` was in Python is unknown and unknowable
+from the document.
+
+The informative part is which comparison survives that. **`Rush-horse` agrees to 0.1pp
+because "mass the fast unit into the least-defended lane" is a strategy the name fully
+specifies** - and it agrees *better* under fog than under full information, which is a small
+independent sign that A.3 vision is the regime C.6 was measured under. The three that
+disagree are the three whose names leave every important parameter open. That is a statement
+about the document, not about either sim.
+
+**This is the entry that should change Part C's process, not its numbers: a balance figure
+that cannot be re-derived is not a cross-check, it is a memory.** The sixteen policies
+belong in the document, together with their information regime, or at minimum the seed and
+the config of the four named ones.
+
+### Finding 6 - a real C.6 disagreement nobody had written down: concurrent units
+
+The sweep has always printed this and no finding or open item mentioned it. Peak concurrent
+units per side, 2,880 match-sides:
+
+| | median peak | p90 | max |
+|---|---|---|---|
+| this sim, A.3 fog | **24** | 41 | **60** |
+| this sim, full info | **24** | 42 | **60** |
+| C.6 (Python) | 17 | 47 | 57 |
+| delta | **+41%** | -13% | +5% |
+
+The median is 41% above C.6's, which is the **largest proportional disagreement anywhere in
+the cross-check table** - and it was the one row printed with no significance marker,
+because the marker rule was in percentage POINTS and these are counts. `sweep/sweep.lua`
+now gives the three peak rows a proportional marker rule of their own (25% out earns "!",
+50% out earns "!!"), so the marker column is complete.
+
+Two things follow. **The max is 60, which is the structural ceiling** - three lanes at 200
+Levy each, all Spears at 10 Levy - so this sim reaches the bound the geometry allows and
+C.6's 57 did not. And **M7's render budget should be sized against 60 per side and a median
+of 25, not 57 and 17.** That is a 47% error in the thing that decides whether the renderer
+keeps 60 fps in a raid, which is a cheap thing to get right now and an expensive one later.
+
+It is roster-sensitive (a pool of Spear-heavy lines peaks higher than a Horse-heavy one) and
+the two models have different rosters, so it is not a claim that Part C's arithmetic is
+wrong. It is a claim that **the number M7 needs is 60, and the document currently says 57.**
+Note also that the p90 goes the other way (-13%), so this is a difference in the *shape* of
+the distribution and not a uniform scaling: this roster spends longer in the many-cheap-body
+regime and less time at the very top. Both regimes give the same three numbers to within one
+unit, so it is not a fog effect either.
+
+**What is NOT a finding, and should be said explicitly:**
+
+- **The shape of the match reproduces, and that is the substantive cross-validation.**
+  Under full information: median 414 s against C.6's 406, p25 300 against 310, p90 600
+  against 600, mean 409 against 412, band 76.8% against 77%, decisiveness 80.9% against 85%.
+  Two independent implementations written from one document, in two languages with two
+  numeric models, on two different policy rosters, agree on every roster-insensitive
+  aggregate. **Part C's clock, economy, unit table, keep HP and Spoils arithmetic are
+  cross-validated.** Under A.3 fog the length aggregates still hold (median 428, mean 419)
+  and it is decisiveness that moves, which is Finding 1's point rather than an arithmetic
+  disagreement.
+- **C.2's bank-cap clause went UNTESTED by M2, and two of the sixteen lines were spent on
+  believing otherwise.** `Granary-bank` and `Counterpunch` both carried notes saying they
+  would produce a large wasted-Levy column and so test C.2's *"a hoard cannot be converted
+  fast enough to buy tempo, so the cap stops being a strategic dial and becomes a cap on
+  waste"*. They do not. `bankHold` is a RESERVE subtracted from `spendable`, not a hoard
+  TARGET, so every Levy above the reserve is spent the tick it lands: over 1,440 matches
+  `Granary-bank` peaked at 220 banked against a 350 cap and `Counterpunch` at 20 against
+  200, and sweep-wide waste was a few tens of Levy in a handful of match-sides. **Neither
+  line ever approached a cap, so neither confirms nor refutes C.2.** Both notes have been
+  corrected to describe what the lines actually do, and `sweep/sweep.lua` now prints the raw
+  `wasted` total rather than a per-match mean that floored any total under 180 to zero. The
+  instrument C.2 actually needs is a controlled `BANK_CAP` sweep at 160 / 200 / 300 / 450 on
+  `sweep/probe.lua`'s one-control-one-variable method; **nothing in this tree sweeps
+  `BANK_CAP` today.** See open item 9.
+- **C.5's "keep HP is a pure length dial" reproduces.** Doubling KEEP_HP to 72,000 moved
+  the family win rates by 1-4pp (inside the noise at 240 matches) while lengthening the
+  median by 63 s and dropping decisiveness from 80% to 60%. That is a third independent
+  confirmation, in a third implementation.
+- **Q10's central claim survives, under both regimes AND under the recalibrated roster.**
+  `Turtle-pure` fills its slot cap with defence and barely attacks; on the recalibrated
+  roster it wins **48.8% under A.3 fog and 42.7% under full information** (before: 55.5% /
+  42.7%), and **67%** of its fogged wins are by RAZING A KEEP, not on the ladder. There is
+  no defensive victory here either. This is the claim most exposed to the recalibration -
+  `Turtle-pure` is one of the six lines whose attention threshold was unreachable - and it
+  came through it 6.7pp weaker, which strengthens rather than weakens Q10's conclusion.
+- **The order-delay window, the supply cap, the slot cap and affordability all held.** Over
+  1,440 matches per regime: 0 orders refused by `Sim:queueCommand`, 0 fizzled inside the
+  sim, 0 malformed, 0 count-clamped, and 0 over the per-poll rate cap. The only orders the
+  gate dropped were the 542 issued inside the last 2 seconds of the clock, which could not
+  have executed before it ran out. **The worst line in the pool sent 21 atoms/min of match
+  clock against A.11.4's 120 budget**, so the wire is not remotely stressed by scripted
+  play - which is now measured and asserted rather than inferred from two constants.
+- **The earlier "Spoils at 75% is twice the lever C.6 measured" entry is not repeated
+  here.** It was measured the same way as the withdrawn half of Finding 3 - by reading
+  family win rates off a 240-match sweep with no error bar - and Finding 2 shows that
+  family win rates at this roster size move by 4.8pp on seeds alone, by 27.6pp on one
+  line's presence, and by 8.7pp on the information regime. The Spoils *direction* (more
+  Spoils, shorter and more decisive
+  matches: median 484 s -> 398 s, razed keeps 66.7% -> 80.4%) is a length-and-decisiveness
+  effect measured on all 1,440 matches at once and is sound. **The aggression-per-family
+  half of it is not, and should be re-measured with `sweep/probe.lua`'s method - one
+  control, one variable, a standard error on every row - before it goes near the document.**
+
+### How M2 guarantees the policies cannot cheat
+
+A sweep run by policies that can see or do more than a person measures nothing, so this is
+structural rather than a matter of care:
+
+1. **A policy holds no reference to the sim.** It is handed a flat table of integers
+   rebuilt by the driver each poll. No sim table, no side table, no unit, no building. There
+   is no path from policy code to sim state, so nothing a policy does can move a number in
+   the match.
+2. **Every order goes through `Sim:queueCommand` with `issueTick` set**, so the SIM enforces
+   C.1's order-delay window; the driver asks for `issue + ORDER_DELAY` exactly, the fastest
+   a real client can be.
+3. **Legality is never evaluated in the policy layer.** Affordability, the slot cap, the
+   slot class, the lane supply cap, the count cap and card gating are all judged by the sim
+   at the exec tick, per A.4. An order that cannot be paid for is a fizzle, counted and
+   printed.
+4. **The gate only removes what a UI could not express** - an unknown kind letter, a target
+   off the board, a count outside 1..9, an order that would execute after the clock, and
+   anything past 2 orders per second. **Five of those six classes are fatal and
+   `sweep/verdict.lua` fails on a non-zero count of any of them, plus a sixth assertion on
+   the realized rate** (`refused / badKind / badTarget / declinedRate / clamped`, and
+   `atomsPerMinMax <= 120`). The sixth class, an order declined for landing after the clock,
+   is benign and is deliberately *outside* the clause and not summed into it. **Earlier this
+   README claimed the gate failed on every declined class; it failed on none of them**, and
+   `measure.lua` merged the one class that mattered (`declinedRate`, a line out-clicking the
+   wire) into the one that does not (`declinedLate`, ~400 per sweep). Both are now separate
+   numbers in every report.
+5. **The cadence is asserted at load, not argued in a comment.** `Policy.POLL = 10` and
+   `MAX_ORDERS_PER_POLL = 2` are the only things bounding what the layer asks of the wire,
+   and the sim cannot check them - `Sim:queueCommand` validates the delay *window* per atom,
+   never the atom *rate*, so raising the poll rate produces no refusal and the input-gate
+   clause goes on reporting all-zero while every line clicks five times faster than a
+   person. `policy/Policy.lua` now derives the ceiling from A.11.4's `C` bucket (120
+   atoms/min per side) and `error()`s at require time if either constant breaks it, or if
+   the poll is faster than once a second.
+6. **A policy cannot tell which side it is.** The view names its halves `me` and `foe` and
+   carries no side index. `sweep/determinism.lua` swaps the seats and requires the exact
+   mirror, which is A.2 at the policy layer.
+7. **A policy is deterministic.** Its only randomness is its own `sim/Rand.lua` stream,
+   seeded from the match seed and its slot; `tools/greps.sh`, `tools/greps.lua` and
+   `tools/comptest.sh` all run over `policy/` and `sweep/` with 0 hits and 0 failures.
+8. **A policy cannot see for free, and the one thing that buys sight is an ORDER.** The four
+   scouting lines get their vision the only way the fog doc allows: by putting a body in a
+   section, through `Sim:queueCommand`, at the same order delay, out of the same bank, after
+   the same reserve, and costing one of the two orders that poll. `Policy.darkLane` -- the
+   rule that decides where to look -- reads `lit`, `seen` and `maxPos` of the polled side's
+   OWN lanes and nothing else, so a scout is never aimed using the information it exists to
+   go and get. And it returns 0 when a lane is fully visible, which is why the
+   full-information regime issues **zero** scout orders in a whole sweep and stays a genuine
+   upper bound rather than the same roster paying for something it is being given.
+
+`sweep/determinism.lua` asserts these behaviourally over 40 random pairings plus all 16
+lines playing themselves - byte-identical atom streams on replay, immunity to other matches
+being played in between, and an exact mirror under a seat swap - **and the M2 gate runs it
+once per information regime**, because each regime is a different set of reads inside
+`Policy.fillView` and proving one deterministic proves nothing about the other.
+
+**And the thing this list did NOT cover until Finding 1 above.** The accurate pair of
+statements is:
+
+- **No policy ever got anything a real CLIENT could not have.** That is what points 1-7
+  establish and it remains true.
+- **Until Finding 1, every policy got things a real PLAYER could not see.** Ruling 1 is
+  about what the client holds; A.3's default-vision table is about what is rendered, and it
+  is a strictly smaller set. The earlier sentence here - *"the policy layer never once got
+  something a real client could not have"* - was true and was answering the wrong question.
+- **And until Finding 7, the fix to that had a mirror-image hole nobody had checked: a
+  policy asking for something it could not be given.** Filtering the view answered "can a
+  line SEE more than a player?"; it left "is a line ASKING for something the filtered view
+  never supplies?" untested, and eleven of sixteen were. A dead read is as corrupting as a
+  privileged one - it silently substitutes a different strategy and reports the result as
+  the strategy its source describes. **This is now structural rather than a matter of
+  care**: `policy/lines.lua`'s `line()` constructor refuses at load time to build a line
+  whose `reactAt` is below `Policy.REACT_MIN`, with a message naming the line, and
+  `sweep/fogaudit.lua` measures the residue - the lowest position each line ever sees an
+  enemy unit at, and the share of its threat detections A.3 deletes, which must be 0.0% for
+  all sixteen under `a3`. The tap `fogaudit` rides on (`driver.run`'s `onPoll`) has its
+  return value discarded by the driver, so a measurement of what the lines can see cannot
+  itself become a channel.
+
+The policy layer also clears M1's cross-implementation bar. A driven match
+(`Rush-horse` vs `Turtle-eco`, seed 777001, A.3 fog) produces `stateHash 624664748`,
+`logDigest 895669454` and 209 atoms under **both** Lua 5.5 (native 64-bit integers) and
+LuaJIT 2.1 (Lua 5.1 semantics, doubles) - the two numeric models that would disagree if any
+arithmetic in the policies or the driver were not integral. **These three numbers are a
+fingerprint of the ROSTER, not a ruleset golden: they moved when Finding 7 recalibrated the
+sixteen lines (from `1175083558` / `236876665` / 211), and they are supposed to. The
+`rulesHash`, `stateHash`, `logDigest` and `SUITE HASH` that `harness/selftest.lua` asserts
+did not move, because nothing under `sim/` was touched.**
+
+    lua    -e 'package.path="./?.lua;"..package.path' sweep/determinism.lua 40 a3
+    luajit -e 'package.path="./?.lua;"..package.path' sweep/determinism.lua 40 a3
+
+**The report, the gate and the statistics are also cross-implementation clean.** The exact
+invocation matters and is given here because the previous version of this paragraph quoted
+p-values without the sample size they came from and they did not reproduce. Under both
+interpreters, `lua sweep/famstat.lua 2 1 20000` (480 matches, A.3 fog, 20,000 shuffles,
+`STAT_SEED 20260812`) prints bit-identical values:
+
+| | Lua 5.5 | LuaJIT 2.1 |
+|---|---|---|
+| family spread | 13.3pp | 13.3pp |
+| `P(null >= measured)` | 86.3% | 86.3% |
+| `P(null < 10pp)` | 6.2% | 6.2% |
+| Kendall S (build spend vs win) | -37, p = 9.6% | -37, p = 9.6% |
+
+Every statistic in M2 is computed in integers with an integer PRNG and an integer Newton
+square root, for exactly this reason: a p-value that depends on the interpreter is not evidence.
+
+`tools/ci.sh 1000` is **GREEN (5/5 steps, 1000 logs, 19,644,042 ticks, 0 desyncs)** with the
+whole of M2 in the tree, under **both** Lua 5.5 and LuaJIT 2.1: nothing under `policy/` or
+`sweep/` touches `sim/`, and `rulesHash` is unchanged at 297242539. `tools/greps.sh` and
+`tools/greps.lua` both report 0 hits over the 2 files in `policy/` and the 7 in `sweep/`,
+and `tools/comptest.sh` 0 failures over both.
 
 ---
 
@@ -328,10 +2086,31 @@ An exception mechanism is how these greps die.
 - **M1** - *this directory*. The determinism harness. **The top risk**, because Ruling 1
   doubled the determinism surface: the full economy, 40 modifiers and the tiebreak
   accumulators now all run on both machines, and any line of it can desync.
-- **M2** - the sim playing itself. Scripted policies both sides, 1,000 matches, reproducing
-  C.6: median 380-430 s, >=75% inside the 5-10 minute band, >=80% decided by a razed keep,
-  family spread under 10pp. Cross-checked against the Python model; a disagreement between
-  the two is a finding, not a nuisance.
+- **M2** - *this directory too.* The sim playing itself. Scripted policies both sides, 1,000
+  matches, reproducing C.6: median 380-430 s, >=75% inside the 5-10 minute band, >=80%
+  decided by a razed keep, family spread under 10pp. Cross-checked against the Python model;
+  a disagreement between the two is a finding, not a nuisance. **Status: RED. Under
+  `../docs/IDLE_BATTLE_FOG.md` - the owner's binding fog model INCLUDING section 3a's
+  contact reveal, and the regime the gate runs on - six of seven clauses pass at 1,632
+  matches and seed base 500000, and FAMILY SPREAD fails; at the other three sampled bases
+  the razed-keep clause fails too and at one of them so does the median.** The instrument
+  has now been corrected three times: so that no line reacts to a position the fog never
+  renders (Finding 7), so that the lines whose stated intent needs sight BUY it (Finding 9),
+  and so that the fog renders what a unit is fighting (Finding 10). **The third correction
+  is the only one that rescued a clause** - the 5-10 minute band went from failing at all
+  four seed bases to passing at all four, because a defender could not previously see the
+  army grinding it 60 units past the midline - **and it is the strongest evidence in this
+  README for the general point, which is that a clause moving on a fix to what the policies
+  can PERCEIVE was never a statement about the ruleset.** What is left is a family-spread
+  clause that moves 2pp when one line of seventeen is added, and a razed-keep clause sitting
+  within 2pp of its threshold in both directions depending on the seed. Four rulings are
+  still needed before M3 starts: which information regime M2 is judged under (open item 3),
+  whether the family-spread clause survives at all (open item 4), whether sight bought one
+  section at a time by bodies that die is the intended mechanic (open item 17, which now has
+  a measurement: a line spending a quarter of its economy on tripwires cannot be told apart
+  from the same line spending it on bodies), and the three edges of the contact ruling
+  (open item 19). M3 adds forty modifiers on top and every one of them will be judged
+  against the same statistics.
 - **M3** - all 40 modifiers with the S1-S10 stacking machinery, still headless. **The second
   risk.** M1's bit-identical test must still pass for each card alone and for 200 random
   5-card loadouts per side. The hook points at the bottom of `Sim.lua` are where they land.
@@ -350,19 +2129,37 @@ An exception mechanism is how these greps die.
 
 ## Open items for the decisions-doc owner
 
-Two things need a ruling in `dev/docs/IDLE_BATTLE_DECISIONS.md`. Neither blocks M1 - the
-implementation has chosen and recorded a defensible answer for both, in `Rules.lua`'s
-INTERPRETATIONS block - but both are places where the code and the document currently
-disagree, and the document is the authority.
+Eighteen things need a ruling or an acknowledgement in `dev/docs/IDLE_BATTLE_DECISIONS.md`
+or in `dev/docs/IDLE_BATTLE_FOG.md`. Items 1 and 8 are closed. Item 2 came out of M1 and
+does not block it - the implementation has chosen and recorded a defensible answer, in
+`Rules.lua`'s INTERPRETATIONS block. **Items 3 to 12 came out of M2. Item 3 is the one that
+blocks the milestone, and it asks Part E to say something it never said rather than to
+change a number. Items 13 to 17 came out of implementing `IDLE_BATTLE_FOG.md` and three of
+them are about that document rather than about the decisions doc.** They are stated here
+rather than edited into either document because the documents are the authority and this
+directory is not.
 
-1. **C.5's "3-Horse opening affordable t = 24.5 s" is stale v1 arithmetic.** With the 30
-   Levy opening stipend and 10 per Levy tick, `bank(t) = 30 + 10 * floor(t / 35)`, so the
-   chain is 1 Horse at **0.0 s**, 2 at **10.5 s**, 3 at **21.0 s** - not 24.5 s. The
-   implementation is right and the doc is wrong; the 24.5 figure was computed against a
-   20-Levy stipend. `tools/smoke.lua` now pins all three ticks plus the Trap Pit (70) and
-   Levy Post (315) landmarks, so the doc and the sim stay pinned to each other once the doc
-   is corrected. **The rest of Part C should be swept for other figures derived against the
-   old 20-Levy stipend.**
+> **Items 3, 4, 5 and 6 have all been rewritten at least once, always downward.** The
+> pattern is the same every time: a claim was read off family win rates from a sweep with
+> no error bar, or off one seed base, or under an information regime nobody had named.
+> Family win rates at this roster size move 4.8pp on seeds alone, 27.6pp on one line's
+> presence and 8.7pp on the information regime, so a claim resting on them needs all three
+> controls before it is worth a doc owner's time. The earlier versions are named where they
+> were wrong rather than quietly replaced. **Nothing in `sim/Rules.lua` was changed at any
+> point in M2; `rulesHash` is still 297242539.**
+
+1. **CLOSED. C.5's "3-Horse opening affordable t = 24.5 s" was stale v1 arithmetic, and the
+   correction has landed.** C.5 now carries a dated correction block giving the chain as 1
+   Horse at **0.0 s**, 2 at **10.5 s**, 3 at **21.0 s**, and records that the rest of Part C
+   was swept for the same 20-Levy-stipend error and is clean. `tools/smoke.lua` pins all
+   three ticks plus the Trap Pit (70) and Levy Post (315) landmarks, so the doc and the sim
+   cannot drift apart again without failing the build. **No ruling is outstanding on this
+   item; it is kept here only so a reader of the earlier version does not go looking.**
+   Separately, and not something this directory can check: that correction was made to
+   `dev/docs/IDLE_BATTLE_DECISIONS.md` during the M2 build window, which the file boundary
+   for this work forbids. Somebody with repository access should run
+   `git log -1 -- dev/docs/IDLE_BATTLE_DECISIONS.md` to establish who made it and confirm
+   the boundary held. Nothing under `dev/idlebattle/` wrote it.
 
 2. **Building wire letters deviate from A.11.2.** A.11.2 assigns `a`-`l` to the
    12-building catalogue *and* `i` to Investment and `l` to Ley Line. Those collide.
@@ -372,18 +2169,433 @@ disagree, and the document is the authority.
    freezes `proto`**, because the letter assignment is wire format and changing it
    afterwards is a compatibility break.
 
+3. **THE BLOCKING ONE, AND IT IS NOT THE ONE THIS README NAMED LAST TIME. Which
+   INFORMATION REGIME is M2 measured under?** Part E's milestone gives four numbers and
+   never says what the policies can see, and the answer moves two of those numbers by more
+   than the margin they were passing by. Under A.3's default-vision table the band clause
+   falls 76.8% -> 74.7% and razed-keep 80.9% -> 75.6%; under Ruling 1's unfiltered shared
+   state - which is what M2's first pass silently measured, because Ruling 1 puts the whole
+   enemy state on both clients - they pass. **Both are defensible readings of the document
+   and the document does not choose.** The recommendation is that **Part E should say
+   explicitly that M2 is judged under A.3 default vision**, because the milestone's four
+   numbers are a description of matches people play and A.3 is what a player is shown; the
+   full-information column is worth keeping as a published upper bound. Finding 1;
+   reproduce with `lua sweep/verdict.lua 6`, which prints both.
+
+   **UPDATE, AND IT SHARPENS THE ITEM RATHER THAN SETTLING IT.** The roster has since been
+   recalibrated so that no line reacts to anything A.3 fails to render (Finding 7), which
+   removes the obvious objection to gating on the fogged column - that the fogged numbers
+   were produced by lines written for a different board. On the recalibrated roster the
+   fogged column now fails `median keep spread` at **all four** sampled seed bases instead
+   of failing a different trio at each, so the ruling is now being asked about a stable
+   measurement rather than a shifting one. Two further reasons to name A.3 explicitly:
+   `Rush-horse`, the one line whose C.6 name fully specifies its strategy, now agrees with
+   C.6 to **0.1pp under fog and 2.3pp under full information**; and `full` has been fixed to
+   be an actual superset of `a3` (it was missing the muster bar), so the two columns now
+   differ only in what the board shows and are for the first time properly comparable.
+
+   **SECOND UPDATE, AND IT MAKES THE ITEM MORE URGENT RATHER THAN LESS.** The owner's
+   `IDLE_BATTLE_FOG.md` has since replaced the fog model both columns above were measured
+   under, and re-measuring moved three of the four clauses (Finding 8). **The regime is now
+   the largest single term in the milestone and it is still unstated in Part E**: under the
+   fog model the sim PASSES median and razed-keep and FAILS the 5-10 minute band; under full
+   information it passes all three and fails only family spread. Same ruleset, same roster,
+   same seeds, different answer to "is M2 green". A milestone whose verdict depends on an
+   unwritten parameter is not a milestone. The recommendation is unchanged and now applies
+   to a named document: **Part E should say explicitly that M2 is judged under
+   `IDLE_BATTLE_FOG.md`**, with the full-information column kept as a published upper bound.
+
+   **THIRD UPDATE, AND IT IS THE SAME ITEM WITH A SHARPER NUMBER.** The roster has since
+   been given the fog doc's own answer to the fog -- four lines that BUY sight (Finding 9) --
+   and the regime is still the largest term in the milestone: **fog 406 s / 72.5% / 80.0% /
+   11.6pp, full 420 s / 76.4% / 82.2% / 14.9pp.** Same ruleset, same roster, same seeds, and
+   the fogged column fails two clauses while the unfogged one fails a different single
+   clause. The recommendation is unchanged and now has no remaining objection to it: the
+   fogged roster can no longer be dismissed either as reacting to things the fog does not
+   render (Finding 7) or as ignoring the mechanic the fog exists to sell (Finding 9).
+
+   **AND THE CLAUSE TO LOOK AT IS NOW THE BAND, NOT DECISIVENESS.** Razed keeps were the
+   headline disagreement with C.6 (75.9% against a target of 80% and C.6's own 85%); under
+   the fog model they are **82.5%** and the clause passes. What fails instead is *"at least
+   75% of matches inside 5-10 minutes"*, at **71.0% and 72.2%** across two seed bases. The
+   two are the same mechanism seen twice: with no early warning, defences answer late,
+   attacks land, and matches end faster -- decisively, and some of them under five minutes.
+   Whether that is the game the design wants is a question for the owner and not for this
+   directory.
+
+4. **Part E's "family spread under 10pp" clause has no power at any realistic roster and
+   should be replaced.** A family win rate is the mean of four hand-written lines. Shuffle
+   the sixteen measured line win rates into four *arbitrary* groups and the spread has a
+   median of **22.8pp** and only a **6.5%** chance of landing under 10pp - so a roster with
+   this dispersion fails the clause about 93% of the time **with the families assigned at
+   random**. The measured 13.8pp sits at the 16th percentile of that null
+   (`P(null >= measured) = 84.1%`): there is no detectable family effect to fix. Seeds move
+   it 3.4pp; deleting one line of sixteen moves it across a 30pp range - and **one of those
+   sixteen deletions, `Greed-pure`, takes the clause from 13.8pp to 1.3pp and turns the
+   milestone green by itself.**
+   **AND THE RECALIBRATION IS THE STRONGEST EVIDENCE THIS ITEM HAS.** Finding 7 changed
+   only what the sixteen lines are allowed to perceive - no rule, no price, no threshold in
+   `Rules.lua` - and the clause moved 22.9pp -> 13.8pp, which is more than the whole
+   distance to the 10pp target. A clause a change of instrument moves by 9pp is not
+   measuring the ruleset. It also moved the proposed REPLACEMENT clause's deciding cell by
+   9pp in the other direction (defence's best line 74.4% -> 65.0%), which is why the
+   replacement now needs a tolerance attached to it.
+   **Two corrections to the earlier version of this item, both of which weaken it and are
+   stated anyway.** (a) It said the clause "cannot be passed on purpose"; that does not
+   follow from the evidence offered. Re-running the same null on the same rates shrunk
+   toward 50% gives `P(null < 10pp)` = 21.0% at C.6's own reported leverage, 38.2% at half
+   this dispersion and 96.9% at a quarter of it, so **the clause is passable by a roster
+   whose lines sit within about 20pp of each other** and what the null actually shows is
+   that the statistic has no power *at this roster's dispersion*. (b) It said **"do not
+   reprice anything to close the existing clause - the statistic cannot see the change"**;
+   that is withdrawn as unsupported. A repricing does move the statistic. The recommendation
+   itself stands, **with a caveat that is new and is not hidden: replace the clause with
+   "every family has a line above 70% and no line above 90%"**, which C.6's own prose
+   derives and which survives a change of roster - but **this sim now MISSES it for defence
+   under BOTH regimes**, by 5.0pp under fog (`Counterpunch` 65.0%) and 0.6pp under full
+   information (`Wall` 69.4%). One bug fix in a different line, and then one recalibration
+   of what the lines can see, moved that number across the threshold and then 9pp past it.
+   Adopt it with a stated tolerance or with more than four lines per family. Finding 2;
+   reproduce with `lua sweep/famstat.lua`. **The experiment that would settle the whole item
+   and has NOT been run is writing four comparable lines per family and re-measuring** - see
+   open item 10, whose stated blocker has now been removed.
+
+5. **C.4's catalogue has a real problem, and it is scope rather than price level.** Buying a
+   building costs a roaming control line up to 18.5pp of win rate (192 matches per variant,
+   the largest past 3.7 sigma), so the tempo cost is confirmed. The *proportionality* to
+   price is weaker than the claim needs: at **110 Levy exactly**, Arrow Tower is +4.4pp and
+   Redoubt -13.8pp against a defensive control, an 18.2pp gap at 4.0 sigma between two
+   buildings that lose identical tempo; and the cost-versus-win-rate correlation is p=1.2%
+   against one control and p=6.1% against a second. **The buildings that fail are the
+   lane-scoped ones** - Stables, Shrine, Smithy, Redoubt, Fletcher - and they recover by
+   4-13pp the moment the control has a reason to stay in one lane, with Trap Pit and Arrow
+   Tower going outright positive. **The ruling needed is whether a lane-scoped effect is
+   priced as if the buyer will fight in that lane**, not whether the band is 8-15 ticks of
+   income or 4-8. Finding 3; `lua sweep/probe.lua 6 Balanced` and
+   `lua sweep/probe.lua 6 Turtle-eco`. **Both probes were re-run under A.3 fog after the
+   `Counterpunch` fix; the earlier numbers in this item came from a different regime and a
+   misconfigured roster and should not be quoted.**
+
+6. **Q1's "each lever moves one thing" needs a caveat: Spoils is also a length dial.**
+   Moving `SPOILS_PCT` 0 -> 75 moves the median 484 s -> 398 s and the razed-keep share
+   66.7% -> 80.4%. Those are whole-sample aggregates over 1,440 matches and are sound. The
+   *aggression* half of the earlier claim (+12.5pp against Q1's ~+5pp) is withdrawn: it was
+   read off family win rates, which item 4 shows cannot resolve an effect that size at this
+   roster. Q1's tuning rule needs the length caveat; the magnitude disagreement should be
+   re-measured with `sweep/probe.lua`'s method - one control, one variable, an error bar on
+   every row - before it is treated as a disagreement with Python at all.
+
+7. **Q10's tier frequencies are wrong: T2, T3 and T4 never fire.** Of the 350 matches that
+   reached the clock under A.3 fog, tier 1 resolved 97.4% and the rest were draws at 0-0.
+   Q10 states T1 54 / T2 25 / T3 17 / draw 4 and concludes "nothing in Q10 is dead code".
+   Tier 2 needs an EXACT tie in cumulative keep damage against a 48,000 HP keep, which does
+   not happen. The ladder's ordering still does its job - no defensive victory was observed
+   under either information regime - but three of its five rungs will ship exercised only by
+   a unit test unless tier 1 is coarsened; bucketing `keepDamageDealt` to whole percent of
+   KEEP_HP would do it. Finding 4. **This is the one M2 finding that is not a sample-size
+   question**: 0 occurrences in 350 clock matches of an event requiring an exact integer tie
+   is structural.
+
+8. **CLOSED BY `IDLE_BATTLE_FOG.md`. A.3's muster bar has no thresholds, and M2 cannot be
+   judged under fog until it does.** The doc did not pick cut points; it **deleted the bar**
+   (section 8.1: *"This replaces the muster bar entirely... the derived 2,800/5,600 HP
+   thresholds are void"*), which is the better answer to the sharper version of this item
+   below - a widget whose top third never lights should not be drawn, and now it is not.
+   The machinery is gone from `policy/` and the fogged M2 numbers this item was about are
+   void. **No ruling is outstanding; it is kept so a reader of the earlier version does not
+   go looking.** The original text follows.
+
+   ~~A.3 specifies "one per-lane muster bar, 3 buckets (clear / pressure / heavy), driven by
+   total marching HP in that lane" and gives no cut points and no statement of what a
+   defender is supposed to read off it. That is fine for a renderer and fatal for a
+   measurement: it is now the only number in M2 that is neither in Part C nor forced by it,
+   and moving it inside its defensible range moves the fogged family spread by 7.5pp, the
+   razed-keep share by 4.0pp and the band by 2.3pp. `policy/Policy.lua` derives a default
+   rather than choosing one - three equal shares of the 8,400 HP a 200-Levy lane holds at
+   C.3's best HP-per-Levy body, read back at each bucket's lower edge - and the sensitivity
+   table is in Finding 1. **The ruling needed is the two HP cut points**, and it is cheap:
+   it is a rendering decision that has to be made before M7 anyway.
+   **AND THERE IS NOW A SECOND, SHARPER REASON TO MAKE IT.** `lua sweep/fogaudit.lua`
+   measures how often each bucket is actually lit across 480 matches: **`pressure` in 2-6%
+   of lane-polls and `heavy` in 0.0-0.1%.** At the derived cut points the top third of a
+   three-state widget never renders, so A.3 as implemented is a two-state bar. That is a
+   defect in the WIDGET before it is a question about balance - a player would never see the
+   heavy state - and it is the reason the recalibrated roster maps every pre-contact
+   intention onto `pressure` and no line declares `alarm = HEAVY`. **Whatever cut points the
+   ruling picks, they should be checked against this measurement**: a bucket that never
+   lights is a bucket that should not be drawn. Finding 7.~~
+
+9. **C.2's bank-cap clause is UNTESTED, and the tooling to test it does not exist.** C.2
+   states that at 2.857 Levy/s "a hoard cannot be converted quickly enough to buy tempo, so
+   the cap stops being a strategic dial and becomes what it should be - a cap on waste",
+   with a measured 1.8pp swing across a 160/200/300/450 sweep. **M2 neither confirms nor
+   refutes any of that.** Two of the sixteen lines carried notes claiming they tested it and
+   neither does: over 1,440 matches `Granary-bank` peaked at 220 banked against a 350 cap
+   and `Counterpunch` at 20 against 200, and sweep-wide waste under full information was 38
+   Levy across 2,880 match-sides. The notes are corrected. **What is needed is a controlled
+   `BANK_CAP` sweep on `sweep/probe.lua`'s one-control-one-variable method** - re-run the
+   round robin at 160 / 200 / 300 / 450 and report family win rate with a standard error
+   plus total waste per cap. Nothing in this tree sweeps `BANK_CAP` today, and building it
+   is M2 work that was not done rather than a question for the doc owner - it is listed here
+   so the gap is on the record beside the clause it leaves open.
+
+10. **The roster experiment that would settle item 4 has NOT been run, and the reason it was
+    deferred no longer applies.** `measure.roundRobin` already takes `opts.lines`, so writing
+    four *comparable* lines per family - same four archetypes, within-family leverage pulled
+    from this roster's 24.5-85.0pp down into C.6's 26.9-55.0pp band - and re-measuring is
+    inside M2's scope and needs no new code beyond the roster and a second `FAMILY_MEMBERS`
+    mapping. The previous version of this item deferred it because the roster first had to
+    be recalibrated for A.3, and tuning a tighter roster against the full-information board
+    would be calibrating the instrument to a board no player sees. **That recalibration is
+    done (Finding 7): every line now declares only thresholds A.3 renders, `line()` refuses
+    a roster that does otherwise, and `sweep/fogaudit.lua` reports 0.0% erased detections
+    for all sixteen under both regimes.** So this experiment is now unblocked and it is the
+    single highest-value piece of M2 work left.
+    **What it must NOT be, stated here because the temptation is obvious**: a search over
+    rosters for one that passes. The recalibration above moved three milestone clauses and
+    every one of its changes was made because the code was reading something A.3 does not
+    render - the effects on the clauses were measured afterwards and one of them (median,
+    428 -> 432 s) was a loss that has been left standing. A tighter roster must be justified
+    the same way: by a stated property of the lines, decided before the sweep runs.
+    **Deleting lines is not a substitute either** - it biases family means, and the
+    jackknife in Finding 2 now shows one deletion (`Greed-pure`) that would turn the clause
+    green on its own, which is precisely why deletion cannot be allowed to be the method.
+
+11. **Concurrent units disagree with C.6 by 41% at the median, and M7's render budget is
+    sized against the wrong number.** Peak concurrent units per side over 2,880 match-sides
+    is median 24 / p90 41 / **max 60** against C.6's 17 / 47 / 57, identically under both
+    information regimes. The max is the structural ceiling (three lanes x 200 Levy of 10-Levy
+    Spears), so it is not roster luck. It is roster-*sensitive* at the median, and the two
+    models have different rosters, so this is not a claim that Part C's arithmetic is wrong.
+    **It is a claim that M7 should budget for 60 per side and a median of 25, and C.6
+    currently says 57 and 17.** That is a 41% error in the input to the decision about
+    whether the renderer holds 60 fps in a raid, and it is cheap now. Finding 6.
+
+12. **Part C should record its sixteen policies AND their information regime, or M2 can
+    never cross-check it.** Part C published four policy names and four win rates out of
+    sixteen, and said nothing about what those policies could see. `Rush-horse` reproduces
+    to **1.2pp** (76.6% here under fog against C.6's 77.8%) because the name specifies the
+    strategy; `Greed-pure`, `Turtle-eco` and `Balanced` disagree by 21-71pp because their
+    names specify nothing. That is not a disagreement between two sims, it is two rosters
+    sharing four labels - and it makes every per-line and per-family figure in C.6
+    unfalsifiable. **A balance figure that cannot be re-derived is a memory, not a
+    cross-check.** Finding 5.
+
+13. **CLOSED BY THE OWNER, 2026-08-13, AND IMPLEMENTED.** `IDLE_BATTLE_FOG.md` section 3a
+    rules that *"a unit also reveals any enemy entity it is in combat with, whatever section
+    that entity is in"*, entity-scoped. `fog/Fog.lua` implements it, `tools/fogtest.lua`
+    section 15 pins it and its negation, and Finding 10 measures what it did to the sweep --
+    which was more than any roster change in this README has managed: the 5-10 minute band
+    clause went from failing at all four sampled seed bases to passing. **Two things the
+    ruling did not settle came out of implementing it and are open item 19.** The original
+    text follows so a reader of the earlier version does not go looking.
+
+    ~~**FOG: at C.3's 60-unit melee range, a unit attacking the enemy front building cannot
+    see it, and that is probably not intended.**~~ `IDLE_BATTLE_FOG.md` puts their front slot
+    at observer coordinate 1,300, which is section 6, and section 3 is emphatic that a unit
+    lights *"not the sections before it, not the sections after it"*. `BUILD_BLOCKS_ADVANCE`
+    stops an attacker at range of the thing it is hitting, so a Spear or a Horse grinding
+    that building stands at **1,240 - section 5** - and the building is never rendered. A
+    Bow (range 320) stops at 980, still inside its own half. So under a literal reading a
+    front building is only ever seen by a unit that walks PAST it, which happens after it
+    falls. Section 5's own sentence *"an intact front building shields the back building
+    from sight even from a unit standing right next to it"* reads as though the author
+    pictured the attacker inside section 6. **It is implemented literally and
+    `tools/fogtest.lua` pins it either way**; the ruling needed is whether engaging a
+    building reveals it, or whether the front slot should sit at a coordinate a melee unit
+    stops inside. Cheap now, and it changes what a player sees. Finding 8.
+
+14. **FOG vs A.3: enemy keep HP. The two documents contradict each other and the
+    implementation had to pick.** A.3's default-vision table gives the enemy keep
+    *"position and exact HP, always, from tick 0"*. `IDLE_BATTLE_FOG.md` section 4 gives it
+    *"Position always known; HP remembered from last sight"*. The fog doc is later and
+    binding, so keep HP is now remembered, and the policy view carries the remembered value.
+    **This is a real gameplay change** - you no longer have a live progress bar on the thing
+    you are trying to raze - and it should be acknowledged explicitly rather than left as
+    two documents disagreeing. If A.3 was right, it is a one-line change in `fog/Fog.lua`.
+
+15. **FOG: `Rules.BUILDINGS.watchtower.vision = 600` is now a ruleset value with no
+    consumer.** `IDLE_BATTLE_FOG.md` section 6 expresses the Watchtower's sight in SECTIONS
+    -- *"sections 5 and 6 are permanently visible while it stands"* -- and the two do not
+    agree: 600 units from the front slot at 700 reaches 1,300, which is the FIRST POSITION
+    of section 6, so a literal reading of the ruleset field grants section 5 and one unit of
+    section 6. `fog/Fog.lua` implements the doc and detects vision-granting buildings by
+    `vision > 0`, so the field still selects WHICH buildings scout but no longer says how
+    far. **It is inside `rulesHash`, so it cannot be removed here without a compatibility
+    break** (checklist item 5). The ruling needed is whether to keep it as a selector, give
+    it a section-denominated successor, or retire it at the next deliberate break.
+
+16. **FOG: the three M3 information sources are named but not specifiable yet.** Section 6
+    lists Shrine's reveal pulse (*"Periodically, briefly"* - no cadence, no duration),
+    Divination and Omen. Two of them fit the section model; **Omen does not fit it at all**
+    - *"enemy deploy orders surfaced as they are issued: lane and count only"* is TEMPORAL
+    rather than spatial, so it needs its own channel into both the renderer and the policy
+    view rather than a section predicate. `fog/Fog.lua` implements none of them and names
+    all four gaps in its MODIFIERS block, so the model is a strict UNDER-estimate of the
+    shipped one in exactly four places and never an over-estimate. **The pulse cadence is
+    the one number that must exist before M3 can be built.**
+
+17. **FOG: A LINE HAS NOW SPENT A QUARTER OF ITS ECONOMY ON EYES AND THE INSTRUMENTS CANNOT
+    TELL. This is the sharpest version of this item and it is the one to act on.**
+    `Pathfinder` exists to buy sight and nothing else: a fresh tripwire into its blindest
+    lane every 86 ticks -- the derived floor, one lane traversal split across the three lanes
+    there are to watch -- which comes out at **42.8 bodies and 428 Levy a match, about a
+    quarter of a side's base income** (measured, `sweep/fogaudit.lua` and the SC column).
+    Blinding that one line and changing nothing else moves its own sight by:
+
+    | statistic | Pathfinder, scouting | blinded | delta | the twelve blind lines moved by |
+    |---|---|---|---|---|
+    | `lit`, mean sections of 8 | 4.73 | 4.70 | **+0.03** | -0.01 to +0.07 |
+    | `EYE`, share of lane-polls with ANY live sight of the enemy half | 44.5% | 40.5% | **+4.1pp** | -0.1 to +3.3pp |
+    | median / band / razed keep, whole sweep | 433 s / 76.6% / 78.4% | 434 s / 76.4% / 78.6% | **nothing** | - |
+
+    **So a quarter of an economy buys four points of "can I see anything over there", and
+    the largest second-order move in the same table -- `Rush-spear`, which changed in no way
+    at all and merely played a Pathfinder that had 428 more Levy of pressure -- is +3.3pp.**
+    The sight a scout buys, MEASURED IN SECTIONS, is inside the noise of what the scout's
+    own COST does to the match. **And the same tripwires are worth +15.7pp of win rate to
+    the line that buys them** (`sweep/scoutprobe.lua`), so they are doing something large
+    that the section columns cannot see -- most likely the CONTACT reveals of section 3a
+    (which are entity-scoped and therefore invisible to `lit` by construction), or simply a
+    distributed raid into the lane the enemy is not defending. **Separating those two is the
+    cheapest high-value measurement left in M2 and it is not done.** Three things follow
+    from the section half, and none of them is a policy question:
+    - **The mechanic has a hard ceiling of one section per body.** A section is 250 units, a
+      lane is 8 of them, and a body lights the one it stands in. Watching a whole lane is
+      four simultaneous living bodies; watching the board is twelve. `lit` cannot go far
+      above its 4.00 floor no matter what anybody spends, which is why the audit now reports
+      `EYE` beside it.
+    - **A tripwire cannot get past a contested lane, so sight is cheapest exactly where
+      there is nothing to see.** Two Spears deployed on the same tick halt 60 apart at
+      own-frame 970 and 970 -- `tools/fogtest.lua` section 15 walks it -- so a body sent
+      into a lane the enemy is holding never reaches the enemy half at all; it joins the
+      grind. It buys a section only in a lane nobody is contesting.
+    - **The 250-unit warning window against a 20-tick order delay is unchanged**, and that
+      is still the arithmetic in the paragraph below.
+    **AND THE MEASUREMENT THAT CONTRADICTS ALL OF THAT, STATED HERE RATHER THAN LEFT IN THE
+    FINDING.** `lua sweep/scoutprobe.lua 2 500000` prices the same tripwires at **+12.5pp of
+    win rate for the body** and +3.2pp for the threshold (`Pathfinder` 63.2% -> 75.7% ->
+    78.9%, standard error ~6pp). So the tripwires are worth a lot and the sections they
+    light are worth nothing measurable. Either they are working through section 3a's CONTACT
+    reveals -- which are entity-scoped and therefore invisible to `lit` and `EYE` by
+    construction -- or "scouting" in this sim is a distributed raid into the lane the enemy
+    is not defending. **That is the cheapest high-value measurement left in M2 and it is not
+    done**; it needs a variant whose scouts are bought and then held at the midline.
+
+    **The ruling needed is whether the doc intends sight to be bought a section at a time by
+    bodies that die, or whether the buyable unit should be bigger** -- a wider section, a
+    unit that lights the section in front of it, or a scout that is not stopped by the first
+    thing it meets. All three are doc decisions. It is also the item most likely to be
+    answered by M3's Watchtower/Shrine/Divination, which buy sight in units of SECTIONS and
+    LANES rather than in bodies -- so a possible answer is "the M1 catalogue is not supposed
+    to be able to see much, and the modifiers are the mechanic". That answer is available
+    and it should be given explicitly rather than left to be inferred.
+
+    **The previous version of this item, which is still the record of how it got here:**
+    The earlier version of this item said nothing in the M2 roster bought sight, so
+    the fogged sweep measured a game with a mechanic nobody played. Four of the sixteen
+    lines now do (Finding 9), each because its own stated intent needs a perception the fog
+    grants only to a body in the enemy half, and `sweep/scoutprobe.lua` prices the change.
+    **What that measurement says is not flattering to the mechanic, and it is the thing to
+    take to the doc owner.** A tripwire costs 17-21 Spears and 174-204 Levy a match -- 12-14%
+    of the Levy that line earns -- and buys back only a small share of the warning the
+    fog deleted: `sweep/fogaudit.lua` measures the early-warning dividend at **2.2% of
+    Turtle-eco's threat detections, 0.5% of Adaptive's and 0.4% of Counterpunch's**, against
+    the **9.3% / 20.0% / 5.6%** those same lines lose to the fog under full information. So
+    on these numbers **buying sight recovers under a quarter of what the fog takes, at a
+    tenth of your economy.** Three things follow, and all three are questions for the
+    document rather than answers this directory can give:
+    - **Is that the intended price?** Section 3 sells scouting as the thing that makes the
+      fog fair. If a scout is this weak, the fog is not a trade-off, it is a tax.
+    - **The tripwire's window is 250 units wide.** A body immediately past the midline
+      renders enemy units from own-frame 751, which is 12 sim ticks of a Horse and 25 of a
+      Spear -- the ORDER DELAY alone is 20. A warning shorter than the order delay is not a
+      warning. Widening it means either wider sections or letting a unit light the section
+      in front of it, both of which are doc decisions.
+    - **It interacts with item 13.** A scout stopped at range by an intact front building
+      halts at 1,240, section 5, and under the literal rule never sees the building it is
+      standing next to -- so the commonest scouting outcome learns nothing about the thing
+      the scout was sent to look at.
+    Still open in the original form: **whether Part E's milestone is a claim about a roster
+    that scouts at all.** Findings 8 and 9; `lua sweep/scoutprobe.lua` and
+    `lua sweep/fogaudit.lua`.
+
+18. **FOG vs the ruleset: `keepDamageDealt` is a second, always-live route to the enemy
+    keep's HP, and the fog doc's memory rule does not survive it.** Section 4 says the enemy
+    keep's *"HP [is] remembered from last sight"*, and `fog/Fog.lua` implements exactly that.
+    But nothing heals a keep and nothing but units damages one, so `KEEP_HP -
+    me.keepDamageDealt` is that keep's EXACT current HP, continuously, with no sight
+    required -- and `keepDamageDealt` is this side's own accumulated statistic, which
+    `Rules.C.SCORE_SHOW_TICK` exists to display live from the 20 percent mark as a term of
+    the Q10 tiebreak score. **Two documents, two answers.** The implementation has NOT
+    picked: the field is left in the policy view because it is a fact about the observer's
+    own units, no line reads it (the engine in `policy/lines.lua` never touches it), and
+    `policy/Policy.lua` names the contradiction at the point it happens. The ruling needed
+    is whether the Q10 score display is exempt from the fog doc, or whether the score has to
+    be withheld or coarsened until the keep is seen. It is cheap now and it is a renderer
+    decision before M7 either way.
+
+19. **FOG 3a: implementing contact reveal needed THREE readings the ruling does not make,
+    and one of them is a straight contradiction between two sentences of the doc.** The
+    rule itself is settled and implemented (item 13 is closed); these are the edges it
+    leaves, each one implemented in the direction that keeps the model an UNDER-estimate,
+    each pinned by a test in `tools/fogtest.lua` section 15 so the answer cannot change by
+    accident, and each cheap to overturn.
+
+    - **(a) WHOSE RANGE DECIDES? The observer's, so you do not see what is shooting you if
+      you cannot shoot back.** "In combat with" is read as *inside my unit's weapon
+      envelope* -- the same comparison `Sim.unitAttacks` makes when it picks a target. For
+      every melee engagement in C.3 that is symmetric (Spear and Horse are both range 60),
+      so a defender does see its attacker. It is NOT symmetric when the shooter outranges
+      the target: their Bow (320) shooting my Spear (60) from 300 away is in contact with
+      my Spear from ITS seat and is invisible from mine. The alternative -- "either one can
+      hit the other" -- would put the enemy's whole damage model (unit ranges, building
+      `dmgRange`, trap radii, every M3 range hook) inside the fog module, and would make the
+      front-slot shield a property of which buildings happen to shoot rather than of the
+      geometry. **The ruling needed is one sentence: is being shot at, by something you
+      cannot reach, contact?**
+    - **(b) THE SHIELD AND 3a CONTRADICT EACH OTHER ON EXACTLY ONE BOARD, AND SECTION 5 WAS
+      GIVEN THE DECISION.** 3a says the shield is untouched because *"a unit cannot reach
+      the back building while the front one still stands"*. That is true of every board
+      reachable by walking in -- `BUILD_BLOCKS_ADVANCE` halts an attacker at the FRONT
+      building, 400 units short of the back one, and `fog/Fog.lua` refuses to load if a
+      ruleset edit ever breaks that. It is false for an INFILTRATOR: a unit already standing
+      beyond their front slot when they REBUILD it is within 60 of the back building with
+      the front one intact. Section 5 says the shield holds *"even from a unit standing
+      right next to it"*, which describes exactly that unit, so the shield wins and on that
+      one board a unit is hitting something it cannot see. **The ruling needed is which of
+      the two sentences is the rule.**
+    - **(c) BUILDINGS ARE NOT OBSERVERS.** The doc says *"a UNIT also reveals"*, so an Arrow
+      Tower firing at an enemy unit does not reveal it. That case is nearly always moot --
+      anything in a tower's range is usually in the observer's own half and free -- but not
+      always, and the renderer will have to answer it in M7 anyway.
+
 ## Cross-implementation verification (M1 verification pass)
 
 The suite has been run under **two Lua implementations with different numeric
-models**, and they produce **identical hashes**:
+models**, and they produce **identical hashes**. Every row below is keyed to the exact
+command that produces it, because the previous version of this table quoted a `SUITE HASH`
+and a `stateHash` that no command in this tree reproduces - a golden nobody can regenerate
+is not a golden.
 
-| | Lua 5.5 (native 64-bit integers) | LuaJIT 2.1 (Lua 5.1 semantics, doubles) |
+**All four values are the ones `harness/selftest.lua` and `harness/fuzz.lua` assert against
+their committed constants**, so a mismatch on a second machine goes red on its own rather
+than needing to be spotted in this table.
+
+| from `sh tools/ci.sh 1000` | Lua 5.5 (native 64-bit integers) | LuaJIT 2.1 (Lua 5.1 semantics, doubles) |
 |---|---|---|
-| `rulesHash`  | 297242539 | 297242539 |
-| `stateHash`  | 1247322841 | 1247322841 |
-| `logDigest`  | 511904510 | 511904510 |
-| `SUITE HASH` | 1032271223 | 1032271223 |
-| selftest     | 305 checks pass | 305 checks pass |
+| `rulesHash` (`Rules.rulesHash`) | 297242539 | 297242539 |
+| `stateHash` (`hand.iblog` at tick 260, `GOLDEN_STATE`) | 353655329 | 353655329 |
+| `logDigest` (same log, `GOLDEN_LOGDIGEST`) | 1455081792 | 1455081792 |
+| `SUITE HASH` (1,000 logs, `GOLDEN_SUITE`) | **1404498451** | **1404498451** |
+| selftest | 305 checks pass | 305 checks pass |
+
+**The `SUITE HASH` row is keyed to the 1,000-log milestone run and to nothing else.**
+`harness/fuzz.lua` only asserts `GOLDEN_SUITE` when the run is exactly the milestone
+configuration (1,000 logs, 6,000 ticks, base seed 700001, epoch 60, chaos 100, mirror on,
+fine 25); a 60-log run produces a different, un-asserted number, and quoting one of those
+beside the command `tools/ci.sh 60` is how the earlier version of this table stopped
+reproducing.
 
 This matters more than it looks. WoW's Lua 5.1 has **no integer type** - every
 number is a double - while Lua 5.5 has real integers. Those are precisely the
@@ -394,8 +2606,11 @@ WoW.
 
 Run it yourself:
 
-    sh tools/ci.sh 60 "$(which luajit)"     # 5.1 semantics
-    sh tools/ci.sh 60                       # 5.5
+    sh tools/ci.sh 1000 "$(which luajit)"   # 5.1 semantics
+    sh tools/ci.sh 1000                     # 5.5
+
+(`sh tools/ci.sh 60` is fine as a fast check and will still assert `rulesHash`,
+`GOLDEN_STATE` and `GOLDEN_LOGDIGEST`; it just does not produce the `SUITE HASH` above.)
 
 `tools/ci.sh` does not recognise LuaJIT as a 5.1 interpreter, so its closing
 banner still claims 5.1 was "static only" even on a LuaJIT run. Ignore that

@@ -5,9 +5,16 @@
 --   3. sim files contain no float literals and no "/" outside a math.floor(...)
 --   4. sim files contain no pairs()
 --
--- Plus two the decisions doc names elsewhere but does not number:
+-- Plus three the decisions doc names elsewhere but does not number:
 --   5. no clock of any kind (Q11, D.7): GetTime, os.time, os.clock, os.date
 --   6. no math.random or math.randomseed (determinism rule 3)
+--   8. NO DUPLICATE KEY IN ONE TABLE CONSTRUCTOR. Lua keeps the LAST of
+--      `{ minStack = 3, ..., minStack = 1 }` and says nothing; luac -p accepts
+--      it and the constructor function cannot see it, because the literal has
+--      already collapsed by the time any code runs. That shipped a defence line
+--      in policy/lines.lua running minStack 1 while its own source declared 3,
+--      worth 25pp on that line and 2.3pp on the statistic the M2 milestone gates
+--      on. The check has to be LEXICAL, which is why it lives here.
 -- And a Lua 5.1 compatibility scan, since the shipped sim runs on 5.1 while this
 -- harness runs on a modern interpreter: no goto, no integer-division operator,
 -- no bitwise operators, no table.unpack, no 5.2-plus string additions.
@@ -16,10 +23,26 @@
 -- A naive shell grep cannot do that, and would flag "Lua 5.1" in a comment as a
 -- float literal and "and/or" in prose as a division. Grep 3 is about code.
 --
--- Usage: lua tools/greps.lua [dir]   (default: the sibling sim directory)
+-- GREP 1 HAS A SCOPE, and tools/greps.sh's header argues it at length: "zero
+-- references to Fog." is a statement about the SIMULATION, while the renderer
+-- and policy/Policy.lua's view builder are CLIENTS -- the layer fog exists for.
+-- Mode "sim" (the default) is grep 1 in full. Mode "client" drops exactly one
+-- pattern and replaces it with a stricter one: a file may say Fog. only if it
+-- requires "fog.Fog", the single audited model. Every other grep-1 pattern
+-- still fires, so a client cannot invent its own visibility predicate or build
+-- a second fog model under a borrowed name. It is a per-directory scope chosen
+-- by the caller and printed in the output; it cannot silence one line.
+--
+-- Usage: lua tools/greps.lua [dir] [sim|client]
+--        (defaults: the sibling sim directory, mode sim)
 
 local here = (arg and arg[0] or ""):match("^(.*)[/\\][^/\\]*$") or "."
 local dir = (arg and arg[1]) or (here .. "/../sim")
+local mode = (arg and arg[2]) or "sim"
+if mode ~= "sim" and mode ~= "client" then
+  print("greps.lua: mode must be sim or client, not " .. tostring(mode))
+  os.exit(1)
+end
 
 -- The file list is DISCOVERED, never hardcoded. A hardcoded list turns this
 -- "independent second implementation of the four greps" into a checker that
@@ -131,9 +154,23 @@ for f = 1, #FILES do
     local code = strip(src)
 
     -- 1. no view accessors in the sim
-    for _, pat in ipairs({ "Fog%.", "IBFog", "Visible%s*%(", "View[A-Z]" }) do
+    for _, pat in ipairs({ "IBFog", "Visible%s*%(", "View[A-Z]" }) do
       local p = code:find(pat)
       if p then hit(1, FILES[f], src, p, "view accessor: " .. pat) end
+    end
+    do
+      local p = code:find("Fog%.")
+      if p then
+        if mode == "sim" then
+          hit(1, FILES[f], src, p, "view accessor: Fog%.")
+        elseif not src:find('require%s*%(%s*"fog%.Fog"') then
+          -- The require is matched against the ORIGINAL source: the module path
+          -- is a string literal and strip() has blanked it out of `code`.
+          hit(1, FILES[f], src, p,
+            "says Fog. but does not require \"fog.Fog\" -- a second fog model "
+            .. "wearing the audited name")
+        end
+      end
     end
 
     -- 2. no local player identity (A.2)
@@ -231,11 +268,61 @@ for f = 1, #FILES do
       local s = code:find("<<") or code:find(">>")
       if s then hit(7, FILES[f], src, s, "bitwise shift") end
     end
+
+    -- 8. no duplicate key in one table constructor.
+    --
+    -- Walk the stripped source keeping a stack of brace scopes; a key is a
+    -- `name =` whose nearest preceding non-space character is "{" or "," (the
+    -- only two places a constructor key can start), which excludes `local x = 1`
+    -- and every ordinary assignment. `==`, `~=`, `<=` and `>=` are excluded so a
+    -- comparison inside a constructor is never read as a key.
+    --
+    -- A single occurrence is never reported, so the residual false-positive risk
+    -- -- a multiple assignment like `local a, c = 1, 2` at brace depth >= 1 --
+    -- would have to name the SAME variable twice to fire, which is not a thing
+    -- anyone writes.
+    do
+      local seen = { [0] = {} }
+      local depth = 0
+      local i, n = 1, #code
+      while i <= n do
+        local c = code:sub(i, i)
+        if c == "{" then
+          depth = depth + 1
+          seen[depth] = {}
+        elseif c == "}" then
+          if depth > 0 then seen[depth] = nil; depth = depth - 1 end
+        elseif c == "=" and depth > 0 then
+          local nxt = code:sub(i + 1, i + 1)
+          local prv = code:sub(i - 1, i - 1)
+          if nxt ~= "=" and prv ~= "=" and prv ~= "~" and prv ~= "<" and prv ~= ">" then
+            local head = code:sub(1, i - 1)
+            local name = head:match("([%a_][%w_]*)%s*$")
+            if name then
+              local before = head:sub(1, #head - #(head:match("%s*[%a_][%w_]*%s*$")))
+              local lead = before:match("([^%s])%s*$")
+              if lead == "{" or lead == "," then
+                local t = seen[depth]
+                if t[name] then
+                  hit(8, FILES[f], src, i,
+                    string.format("duplicate key `%s` in one table constructor "
+                      .. "(first at line %d); Lua silently keeps the LAST",
+                      name, lineOf(src, t[name])))
+                else
+                  t[name] = i
+                end
+              end
+            end
+          end
+        end
+        i = i + 1
+      end
+    end
   end
 end
 
 if #hits == 0 then
-  print("all greps pass with zero hits over " .. #FILES .. " sim files")
+  print("all greps pass with zero hits over " .. #FILES .. " files [" .. mode .. "]")
 else
   print(#hits .. " hits:")
   for i = 1, #hits do print(hits[i]) end

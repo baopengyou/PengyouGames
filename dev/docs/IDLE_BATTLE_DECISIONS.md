@@ -984,7 +984,19 @@ build, and convert the card into a discount on it. That fallback is one table ed
 
 ## Match systems
 
-### Q9a — Fog of war: the disclosure model — **CHANGED** (message policy → render policy)
+### Q9a — Fog of war: the disclosure model — **SUPERSEDED 2026-08-13 by `IDLE_BATTLE_FOG.md`**
+
+> **Do not implement the table below.** Fog had never actually been specified when this section
+> was written, and its three-bucket "muster bar" was invented by the implementation to fill the
+> gap. The owner has since defined the real model: eight vision sections per lane, default sight
+> to the midline only, your own units lighting the section they stand in, frozen memory of what
+> you have seen, and the enemy back slot shielded by their front slot.
+> **`IDLE_BATTLE_FOG.md` is binding and this section is retained only as history.** The one part
+> that survives is Q9b below, re-expressed in that file's §6.
+
+<details>
+<summary>Superseded original (history only)</summary>
+
 
 **Decision: fog is a pure render filter. Nothing is withheld from the wire. Everything is
 withheld from the screen.**
@@ -1030,7 +1042,13 @@ one accessor.
 **Confidence: high.** The medium-confidence caveat v1 attached here — "deferred disclosure may
 not survive contact with the implementation" — is retired along with the mechanism.
 
+</details>
+
 ### Q9b — How the Mystic and defensive information modifiers layer on — **CHANGED** (ships in v1.0; justification amended)
+
+> Intent unchanged, but read it alongside `IDLE_BATTLE_FOG.md` §6, which restates every entry
+> against the section model so the two documents cannot drift apart.
+
 
 **Decision: two independent axes, so no modifier does two jobs.** *Unit vision* is **temporal**
 — how early you see a wave. *Structure vision* is **spatial** — what is in their slots. All of

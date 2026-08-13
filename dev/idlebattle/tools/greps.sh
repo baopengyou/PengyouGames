@@ -27,11 +27,42 @@
 # over-broad it says so in its own output. Nothing here is silenced by a
 # per-line pragma on purpose: an exception mechanism is how these greps die.
 #
-#   usage: tools/greps.sh [simdir]      (default: the sibling sim/ directory)
+# GREP 1 HAS A SCOPE, AND IT IS NOW STATED RATHER THAN ASSUMED.
+#
+# "Zero references to Fog." is a statement about the SIMULATION. The renderer
+# (M7) and policy/Policy.lua's view builder are CLIENTS -- they are the layer
+# fog of war exists FOR, and a client that could not name the fog module could
+# not apply fog at all. Before fog/Fog.lua existed, grep 1 over policy/ was
+# vacuously true, and vacuous truth is not a check.
+#
+# So the directory is now scanned in one of two MODES, and the mode is printed:
+#
+#   sim     (default) grep 1 in full. NOTHING in this directory may reference
+#           Fog., IBFog, a visibility predicate, a render-layer symbol or a WoW
+#           UI API. This is the mode sim/ runs in and it must never be relaxed.
+#   client  grep 1 minus ONE pattern, and made stricter in exchange: a file may
+#           say Fog. ONLY if it requires "fog.Fog", the single audited model.
+#           Every other grep-1 pattern still fires, so a client may not invent
+#           its own visibility predicate, may not build a second fog model under
+#           a borrowed name, and may not reach for a frame or a WoW API.
+#
+# THIS IS A SCOPE, NOT AN EXCEPTION MECHANISM. It is per directory, chosen by
+# the caller, printed in the output, and it cannot silence a single line. The
+# alternative on offer -- renaming the import so `Fog.` never appears -- would
+# make grep 1 pass over a directory that genuinely consults visibility, and this
+# checker prefers a false positive to a miss.
+#
+#   usage: tools/greps.sh [simdir] [sim|client]
+#            (defaults: the sibling sim/ directory, mode sim)
 #   exit:  0 = zero hits, 1 = at least one hit, 2 = the checker could not run
 
 DIR=$(cd "$(dirname "$0")" && pwd)
 SIM=${1:-$DIR/../sim}
+MODE=${2:-sim}
+if [ "$MODE" != "sim" ] && [ "$MODE" != "client" ]; then
+  echo "greps.sh: mode must be sim or client, not $MODE" >&2
+  exit 2
+fi
 STRIP="$DIR/strip_lua.awk"
 
 if [ ! -d "$SIM" ]; then
@@ -82,7 +113,18 @@ while IFS= read -r f; do
   # -- grep 1 -------------------------------------------------------------
   # Fog.Visible is the named accessor (A.3); the rest are the shapes a view
   # accessor takes if somebody renames it. Deliberately broad.
-  scan 1 "$code" "$f" '(^|[^A-Za-z0-9_])Fog[[:space:]]*\.' 'view accessor: Fog.'
+  if [ "$MODE" = "client" ]; then
+    # A client MAY consult the one audited fog model and nothing else. The
+    # require is matched against the RAW source, because the module path is a
+    # string literal and strip_lua.awk has blanked it out of "$code".
+    if grep -qE '(^|[^A-Za-z0-9_])Fog[[:space:]]*\.' "$code"; then
+      if ! grep -qE 'require[[:space:]]*\([[:space:]]*"fog\.Fog"' "$f"; then
+        record 1 "$f" 1 'says Fog. but does not require "fog.Fog" -- a second fog model wearing the audited name'
+      fi
+    fi
+  else
+    scan 1 "$code" "$f" '(^|[^A-Za-z0-9_])Fog[[:space:]]*\.' 'view accessor: Fog.'
+  fi
   scan 1 "$code" "$f" 'IBFog' 'view accessor: IBFog'
   scan 1 "$code" "$f" '(^|[^A-Za-z0-9_])(Visible|IsVisible|CanSee|Reveal)[[:space:]]*\(' 'view accessor: visibility predicate'
   scan 1 "$code" "$f" '(View|Render|Draw|Frame|Overlay|Tooltip)[A-Z]' 'view accessor: render-layer symbol'
@@ -154,11 +196,11 @@ done < "$LIST"
 N=$(grep '^  \[grep' "$HITS" 2>/dev/null | wc -l | tr -d ' ')
 [ -n "$N" ] || N=0
 if [ "$N" -eq 0 ]; then
-  echo "A.5 greps: 0 hits over $NFILES sim file(s) in $SIM"
+  echo "A.5 greps [$MODE]: 0 hits over $NFILES file(s) in $SIM"
   exit 0
 fi
 
-echo "A.5 greps: $N hit(s) over $NFILES sim file(s) in $SIM"
+echo "A.5 greps [$MODE]: $N hit(s) over $NFILES file(s) in $SIM"
 cat "$HITS"
 echo
 echo "Each hit is a determinism or leakage hazard, not a style note. Fix the code;"

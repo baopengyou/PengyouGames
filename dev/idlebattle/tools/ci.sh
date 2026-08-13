@@ -2,15 +2,27 @@
 # tools/ci.sh -- THE M1 GATE. Run this before claiming M1 still passes.
 #
 # It runs, in order:
-#   1  tools/greps.sh      the four A.5 greps over sim/
-#   2  tools/comptest.sh   Lua 5.1 / 5.4 compatibility and determinism hazards
-#   3  luac -p             every .lua file under sim/, tools/ and harness/ parses
+#   1  tools/greps.sh      the four A.5 greps over sim/ AND over fog/
+#   2  tools/comptest.sh   Lua 5.1 / 5.4 compatibility and determinism hazards,
+#                          over sim/ and fog/
+#   3  luac -p             every .lua file under sim/, fog/, tools/ and harness/
+#                          parses
 #   4  tools/run_all.sh    the tools harness: Rand selftest, greps.lua (an
 #                          independent second implementation of check 1), smoke,
 #                          mechanics, ruleset coverage, hash coverage, the A.2
 #                          mirror test, and the M1 milestone itself -- N
 #                          randomised command logs replayed to a bit-identical
 #                          stateHash at every epoch.
+#   4b tools/fogtest.lua   runs INSIDE step 4 (run_all.sh): every rule in
+#                          ../docs/IDLE_BATTLE_FOG.md, proved one at a time
+#                          against fog/Fog.lua, plus the assertions that keep
+#                          the model out of the state hash. It is in the M1 gate
+#                          rather than the M2 one because it is a CORRECTNESS
+#                          property with one acceptable answer -- the same
+#                          reason the M1/M2 split exists at all -- and because
+#                          fog/ is held to the sim's determinism rules and a
+#                          float or a pairs() in it is an M5 desync.
+#
 #   5  harness/run.sh      the harness/ tree. NOT redundant with step 4: it owns
 #                          the ONLY invariant checks on unhashed derived state
 #                          (runner.invariants -- cacheLevyFlat, cacheBankCap, the
@@ -87,8 +99,20 @@ echo "  rulesHash   ${RULESHASH:-UNKNOWN}"
 echo "  logs        $LOGS"
 echo
 
-step "A.5 greps" sh "$DIR/greps.sh"
-step "Lua 5.1 compatibility and determinism hazards" sh "$DIR/comptest.sh" "$ROOT/sim"
+# fog/ runs at the STRICTEST setting (mode "sim", the default) and passes with
+# zero hits: fog/Fog.lua defines the model through a plain module table and never
+# reaches for a render layer, a WoW API or a home-made visibility predicate, so
+# even grep 1's accessor patterns find nothing in it. policy/ and sweep/ are
+# CLIENTS of it and run in mode "client" from sweep/run.sh; tools/greps.sh's
+# header argues the scope.
+greps_all() {
+  rc=0
+  sh "$DIR/greps.sh" || rc=1
+  sh "$DIR/greps.sh" "$ROOT/fog" || rc=1
+  return $rc
+}
+step "A.5 greps over sim/ and fog/" greps_all
+step "Lua 5.1 compatibility and determinism hazards" sh "$DIR/comptest.sh" "$ROOT/sim" "$ROOT/fog"
 
 # luac -p over EVERY file, sim and tools alike. The tools are not held to the
 # sim's determinism rules, but they still have to parse.
@@ -99,7 +123,7 @@ luac_all() {
   fi
   rc=0
   bad=$(mktemp) || return 1
-  find "$ROOT/sim" "$DIR" "$ROOT/harness" -type f -name '*.lua' | sort | while IFS= read -r f; do
+  find "$ROOT/sim" "$ROOT/fog" "$DIR" "$ROOT/harness" -type f -name '*.lua' | sort | while IFS= read -r f; do
     short=$(echo "$f" | sed "s|$ROOT/||")
     if "$LUAC" -p "$f"; then
       echo "  ok   $short"
