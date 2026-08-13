@@ -1,19 +1,50 @@
 ## Interface: 120007, 120100
 ## Title: Pengyou Games
-## Notes: Raid-downtime minigames: Loot Goblins, The Pull Book, Rock Paper Scissors.
+## Notes: Six raid-downtime minigames with a shared virtual-gold ledger. /pg to start.
 ## Author: Pengyou
-## Version: 1.0.0
+## Version: 1.1.0
 ## SavedVariables: PengyouGamesDB
+
+# ORDERING RATIONALE
+#
+# The load order below is for GROUPING AND READABILITY, not for dependency
+# resolution. It cannot be for dependency resolution, because the language does
+# not give it a chance to be: every file's FILE SCOPE runs during load - and
+# file scope here only defines functions and tables on PG and registers init
+# callbacks (SPEC 2.9) - while all of the real wiring happens later, inside
+# those callbacks, at ADDON_LOADED. By the time any init callback runs, every
+# file in this list has already been loaded, so PG.Rolls, PG.QuizData and every
+# game module are non-nil in ALL of them regardless of the order they appear in
+# here. Reordering this list changes the order the init callbacks run in - and
+# therefore the order of PG.Comm.Register, PG.Session.OnChange and
+# PG.Safety.RegisterWindow calls - but it cannot make a module invisible to
+# another module's init.
+#
+# So the list reads top-down as layers: core plumbing, then the two data/input
+# feeds, then the ledger and the widget kit, then the shipped question bank,
+# then the games in launcher order, then the three shells that read all of them.
+# The three 1.0.0 game files keep their exact relative order and the three
+# 1.1.0 games are appended after them: that IS a behaviour statement (it fixes
+# init-callback order), so it is deliberate rather than alphabetical tidying.
+#
+# The one hard rule about this file is its FIRST LINE: it must be a `##`
+# directive, never a bare `#` comment, or 12.0.7 skips every directive in the
+# file (SPEC 2.13). That is why this block sits below the directives.
 
 Core.lua
 Util.lua
 Theme.lua
 Comm.lua
+Rolls.lua
 Ledger.lua
 Widgets.lua
+Data\QuizData.lua
 Games\LootGoblins.lua
 Games\PullBook.lua
 Games\RockPaperScissors.lua
+Games\DeathRoll.lua
+Games\Gambler.lua
+Games\Quiz.lua
 Settings.lua
 Rules.lua
 Launcher.lua

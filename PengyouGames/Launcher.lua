@@ -24,12 +24,43 @@ local win, dndBtn
 local MAX_OPEN_ROWS = 5     -- SCOPE.md 6.3
 local OPEN_ROW_H = 22
 local OPEN_TTL = 60         -- seconds a row is offered, however long its record lives
-local BASE_HEIGHT = 358     -- the window without the section (6 buttons + DND sign)
 local LIST_TICK = 2         -- reconcile cadence while the window is open
 
+-- The window without the open-games section. UNCHANGED at 1.1.0 even though the
+-- suite doubled from three games to six, and the derivation is written out here
+-- so the next game does not have to re-measure it:
+--    62  title + tagline block, down to the top of the first button
+--   +78  game grid: THREE rows of 26 - six games in two columns
+--   +20  two inter-row gutters of 10
+--   +10  gutter into the utility column
+--   +78  utility column: Ledger, Rules, Settings - three rows of 26
+--   +20  two inter-row gutters of 10
+--   +16  gutter into the DND sign
+--   +26  the DND sign
+--   +48  bottom padding (12 of which becomes the gap above open-games row 1)
+--  = 358
+-- Six games in two columns occupy exactly the three rows the three games of
+-- 1.0.0 occupied in one, so only the WIDTH changed (240 -> 360). Only the point
+-- and the per-window scale are persisted, never a size, so existing users keep
+-- their launcher position and simply see a wider window.
+local BASE_HEIGHT = 358
+local WIN_W = 360           -- 24 + 152 + 8 + 152 + 24; see build()
+local COL_W = 152           -- one grid button
+local FULL_W = 312          -- WIN_W - 48: utility buttons, the DND sign, open rows
+
 -- ASCII only, per the source rule: SCOPE.md 6.3's separator is U+00B7.
-local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors", PB = "Pull Book" }
-local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book" }
+--
+-- These two tables are the launcher's own copy of the module-code -> display
+-- name mapping, deliberately kept local rather than promoted to Core: this file
+-- is the only place a code is rendered for a game the local client may not even
+-- have loaded, and entryOf's GAME_NAME lookup below is the gate on whether an
+-- open-games row can exist AT ALL. A missing entry here does not error, it
+-- silently drops every invitation for that game - so when a seventh game lands,
+-- these are the first two lines to edit.
+local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors", PB = "Pull Book",
+                    DR = "Death Roll", GB = "The Gambler", QZ = "Quiz" }
+local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book",
+                     DR = "Death Roll", GB = "Gambler", QZ = "Quiz" }
 -- CONCURRENCY.md 5.10 rule 1 lists opens "at every scope including group", so
 -- the label set is wider than SCOPE.md 6.3's Guild|Public table.
 local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
@@ -98,6 +129,9 @@ end
 local PROJECTIONS = {
   LG = function() return PG.LG and PG.LG.OpenGames and PG.LG.OpenGames() end,
   RPS = function() return PG.RPS and PG.RPS.OpenGames and PG.RPS.OpenGames() end,
+  DR = function() return PG.DR and PG.DR.OpenGames and PG.DR.OpenGames() end,
+  GB = function() return PG.GB and PG.GB.OpenGames and PG.GB.OpenGames() end,
+  QZ = function() return PG.QZ and PG.QZ.OpenGames and PG.QZ.OpenGames() end,
   -- note the name: the Pull Book projects OpenBooks, not OpenGames
   PB = function() return PG.PB and PG.PB.OpenBooks and PG.PB.OpenBooks() end,
 }
@@ -148,12 +182,26 @@ local function visibleRows()
   return list
 end
 
--- The seat blocks a join only for the seat-consuming games. Being in a Pull
--- Book is not busy and the Pull Book claims no seat (I10, CONCURRENCY.md 6.1),
--- so a PB row stays live while you play Loot Goblins - PG.PB.JoinBook applies
--- its own first-book-wins refusal. Returns the seat view when blocked.
+-- The seat blocks a Join only for the games that take one. Being in a Pull Book
+-- is not busy and the Pull Book claims no seat (I10, CONCURRENCY.md 6.1), so a
+-- PB row stays live while you play Loot Goblins - PG.PB.JoinBook applies its
+-- own first-book-wins refusal.
+--
+-- Since 1.1.0 the test is a DECLARED FLAG on the module rather than a module
+-- code written down in this file (BRIEF 1.1). With six games and one exemption,
+-- a hardcoded list is a list somebody eventually forgets to extend, and the two
+-- ways of forgetting are not equally bad: an exemption list that lost PB would
+-- grey out a Book the player is entitled to join, with no explanation anywhere,
+-- whereas a game that forgets to declare SEAT degrades to "Join enabled" and
+-- its own PG.Session.Claim then refuses with the proper worded reason. So the
+-- flag is read defensively and its absence means "does not take the seat".
+local function takesSeat(entry)
+  local m = entry and PG[entry.game]
+  return (type(m) == "table" and m.SEAT == true) or false
+end
+
 local function blockedBy(entry)
-  if not entry or entry.game == "PB" then return nil end
+  if not takesSeat(entry) then return nil end
   if not (PG.Session and PG.Session.IsSeated and PG.Session.IsSeated()) then return nil end
   return PG.Session.Seat()
 end
@@ -161,15 +209,27 @@ end
 -- Join runs the module's existing accept path unchanged: it claims the seat
 -- first, whispers JOIN and requests a resync, which is exactly SCOPE.md 6.3's
 -- "public sessions construct S only on an explicit Join click".
+--
+-- A table rather than an if/elseif chain, because six branches of the same
+-- shape is where the chain stops being readable - and because the Pull Book's
+-- entry point genuinely has a different NAME and a different SIGNATURE, which
+-- is much easier to see when the six sit side by side.
+local JOINERS = {
+  LG = function(e) if PG.LG and PG.LG.JoinOpen then PG.LG.JoinOpen(e.key) end end,
+  RPS = function(e) if PG.RPS and PG.RPS.JoinOpen then PG.RPS.JoinOpen(e.key) end end,
+  DR = function(e) if PG.DR and PG.DR.JoinOpen then PG.DR.JoinOpen(e.key) end end,
+  GB = function(e) if PG.GB and PG.GB.JoinOpen then PG.GB.JoinOpen(e.key) end end,
+  QZ = function(e) if PG.QZ and PG.QZ.JoinOpen then PG.QZ.JoinOpen(e.key) end end,
+  PB = function(e) if PG.PB and PG.PB.JoinBook then PG.PB.JoinBook(e.host, e.token) end end,
+}
+
 local function joinEntry(entry)
   if not entry then return end
-  if entry.game == "LG" then
-    if PG.LG and PG.LG.JoinOpen then pcall(PG.LG.JoinOpen, entry.key) end
-  elseif entry.game == "RPS" then
-    if PG.RPS and PG.RPS.JoinOpen then pcall(PG.RPS.JoinOpen, entry.key) end
-  elseif entry.game == "PB" then
-    if PG.PB and PG.PB.JoinBook then pcall(PG.PB.JoinBook, entry.host, entry.token) end
-  end
+  local fn = JOINERS[entry.game]
+  -- pcall as before: a module that errors inside its own accept path must not
+  -- take the launcher's repaint down with it, or the row stays on screen
+  -- claiming to be joinable forever.
+  if fn then pcall(fn, entry) end
   reconcile()
   refreshList()
 end
@@ -193,7 +253,7 @@ local function buildOpenRows()
     -- built ONCE, with the window, and shown/hidden from here on: no frame is
     -- ever created per refresh, so nothing churns during combat
     local row = CreateFrame("Frame", nil, win)
-    row:SetSize(190, OPEN_ROW_H)
+    row:SetSize(FULL_W, OPEN_ROW_H)
     if i == 1 then
       row:SetPoint("TOP", dndBtn, "BOTTOM", 0, -12)
     else
@@ -201,7 +261,9 @@ local function buildOpenRows()
     end
     row.label = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     row.label:SetPoint("LEFT", 0, 0)
-    row.label:SetWidth(126)
+    -- 240 + the 58px Join button = 298, leaving 14px of slack inside FULL_W.
+    -- The longest realistic row text is "Grizzlebottom - Death Roll - Party".
+    row.label:SetWidth(240)
     row.label:SetJustifyH("LEFT")
     row.label:SetWordWrap(false)
     row.joinBtn = PG.UI.Button(row, "Join", 58, 20, function()
@@ -299,39 +361,62 @@ local function refreshDnd()
   end
 end
 
+-- The game grid, column-major: the three 1.0.0 games keep their order down the
+-- LEFT column and the three 1.1.0 games fill the right, which is the same
+-- grouping the Rules tab strip uses, so the two windows teach the same map.
+-- Each row is { module code, theme mark key, button label }. The label is
+-- written out verbatim rather than derived from GAME_NAME because these strings
+-- shipped in 1.0.0 and users read them as the names of the buttons.
+local GRID = {
+  { "LG", "coin", "Loot Goblins..." },
+  { "PB", "ticket", "Pull Book..." },
+  { "RPS", "dice", "Rock Paper Scissors..." },
+  { "DR", "skull", "Death Roll..." },
+  { "GB", "greedcoin", "The Gambler..." },
+  { "QZ", "quiz", "Quiz..." },
+}
+
 local function build()
-  win = PG.UI.Window("launcher", "Pengyou Games", 240, 322, "neutral")
+  win = PG.UI.Window("launcher", "Pengyou Games", WIN_W, BASE_HEIGHT, "neutral")
   -- carnival-sign tagline under the title (decor only)
   local tagline = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   tagline:SetPoint("TOP", 0, -40)
   tagline:SetText("Step right up - games, wagers, glory")
   tagline:SetTextColor(0.80, 0.68, 0.42) -- BRASS
-  -- Game dialogs live in their game files; guard in case a module failed to load.
-  local lgBtn = PG.UI.Button(win, markLabel("coin", "Loot Goblins..."), 190, 26, function()
-    if PG.LG and PG.LG.OpenDialog then PG.LG.OpenDialog() end
-  end)
-  lgBtn:SetPoint("TOP", 0, -62)
-  local pbBtn = PG.UI.Button(win, markLabel("ticket", "Pull Book..."), 190, 26, function()
-    if PG.PB and PG.PB.OpenDialog then PG.PB.OpenDialog() end
-  end)
-  pbBtn:SetPoint("TOP", lgBtn, "BOTTOM", 0, -10)
-  local rpsBtn = PG.UI.Button(win, markLabel("dice", "Rock Paper Scissors..."), 190, 26, function()
-    if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
-  end)
-  rpsBtn:SetPoint("TOP", pbBtn, "BOTTOM", 0, -10)
-  local ledgerBtn = PG.UI.Button(win, markLabel("sack", "Ledger"), 190, 26, function()
+  -- Game dialogs live in their game files; guard in case a module failed to
+  -- load. The closure captures `code` per iteration, so the button keeps
+  -- working even if the module arrives later than the launcher.
+  for i = 1, #GRID do
+    local code, iconKey, label = GRID[i][1], GRID[i][2], GRID[i][3]
+    local row = ((i - 1) % 3) + 1
+    local b = PG.UI.Button(win, markLabel(iconKey, label), COL_W, 26, function()
+      local m = PG[code]
+      if type(m) == "table" and m.OpenDialog then m.OpenDialog() end
+    end)
+    -- 36 = 26 button + 10 gutter, so the rows land at -62, -98 and -134 -
+    -- exactly where the first three buttons of 1.0.0 sat.
+    if i <= 3 then
+      b:SetPoint("TOPLEFT", 24, -62 - (row - 1) * 36)
+    else
+      b:SetPoint("TOPRIGHT", -24, -62 - (row - 1) * 36)
+    end
+  end
+  -- The utility column is one centred stack of full-width buttons, so it reads
+  -- as a different KIND of thing from the grid above it. -170 is where the old
+  -- `rpsBtn BOTTOM, 0, -10` anchor put it: grid row 3 top (-134) + 26 + 10.
+  local ledgerBtn = PG.UI.Button(win, markLabel("sack", "Ledger"), FULL_W, 26, function()
     if PG.Ledger and PG.Ledger.Show then PG.Ledger.Show() end
   end)
-  ledgerBtn:SetPoint("TOP", rpsBtn, "BOTTOM", 0, -10)
-  local rulesBtn = PG.UI.Button(win, "Rules", 190, 26, function()
+  ledgerBtn:SetPoint("TOP", 0, -170)
+  local rulesBtn = PG.UI.Button(win, "Rules", FULL_W, 26, function()
     if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
   end)
   rulesBtn:SetPoint("TOP", ledgerBtn, "BOTTOM", 0, -10)
-  local settingsBtn = PG.UI.Button(win, "Settings", 190, 26, function()
+  local settingsBtn = PG.UI.Button(win, "Settings", FULL_W, 26, function()
     if PG.Settings and PG.Settings.Show then PG.Settings.Show() end
   end)
   settingsBtn:SetPoint("TOP", rulesBtn, "BOTTOM", 0, -10)
-  dndBtn = PG.UI.Button(win, "", 190, 26, function()
+  dndBtn = PG.UI.Button(win, "", FULL_W, 26, function()
     PG.ToggleDND()
     refreshDnd()
   end)

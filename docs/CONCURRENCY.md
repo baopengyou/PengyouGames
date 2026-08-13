@@ -79,6 +79,25 @@ disjoint, internally-consistent sets of rows, which is exactly correct.
 15-60 second window. `PB` is not round-based: it is passive pre-pull betting, designed from day
 one to run alongside a round-based game, and it is exempt from every seat rule below.
 
+> **1.1.0 delta (2026-08-12).** The definition is unchanged; the membership grew. Round-based
+> modules are now **`LG`, `RPS`, `DR`, `GB` and `QZ`** - five, not two. Each of the three new
+> games meets the test as written: Death Roll demands a typed `/roll` inside a turn timer *and*
+> blocks every other player at the table until it arrives, The Gambler demands a roll inside a
+> single timed window, and Quiz demands a typed answer in 10-60 seconds. Quiz claims the seat
+> despite being points-only, because the seat is a rule about human ATTENTION and not about
+> gold - `RPS`, also points-only, is the precedent.
+>
+> **`PB` remains the ONLY exemption, permanently.** Wherever this document says "LG and RPS",
+> read "every round-based module"; wherever it says "the Pull Book is the exception", it is
+> still exactly and only the Pull Book.
+>
+> Since 1.1.0 the membership is also **declared in the code** rather than only here: every game
+> file sets `PG.<code>.SEAT` next to its `SCOPES` table (`true` for the five, `false` for `PB`),
+> and `Launcher.lua`'s Join gate reads that flag instead of naming module codes in its own
+> source. A future game that forgets to declare it degrades to "Join enabled" and its own
+> `PG.Session.Claim` produces the real refusal - which is the safe direction, unlike a hardcoded
+> exemption list that forgets `PB` and greys out a Book the player is entitled to join.
+
 **Seated.** The local player occupies a seat in a session when *either*:
 - they accepted its invitation (the click at `LootGoblins.lua:807` / `RockPaperScissors.lua:755`), **or**
 - they are its host and took the seat at `hostOpen` (§1.3).
@@ -98,7 +117,8 @@ that plays after the fact. A queued podium can wait out an encounter for minutes
 
 Each is stated so a reviewer can verify it by reading one place.
 
-> **I1 - One seat, globally.** Across `LG` and `RPS` combined, at most one seat is held at any
+> **I1 - One seat, globally.** Across every round-based module combined - `LG` and `RPS` at
+> 1.0.0, plus `DR`, `GB` and `QZ` since 1.1.0 - at most one seat is held at any
 > instant. `PG.Session.Seat()` (§2.3) is single-valued or nil.
 > *Check:* the only writers are `PG.Session.Claim` / `PG.Session.Release` in `Core.lua`. Grep
 > that no module writes the holder directly.
@@ -150,8 +170,16 @@ Each is stated so a reviewer can verify it by reading one place.
 > `C_Timer` handles are ever created. One ticker per module, as today.
 > *Check:* `CreateFrame` and `PG.Ticker` call sites in the game files stay at their current count.
 
-> **I10 - The Pull Book neither claims nor consults the seat.** It runs alongside anything.
-> *Check:* grep `PullBook.lua` for `PG.Session` - zero hits, permanently.
+> **I10 - The Pull Book neither claims nor consults the seat.** It runs alongside anything, and
+> it is the only module that does. Every other game file declares `PG.<code>.SEAT = true`;
+> `PullBook.lua` declares `PG.PB.SEAT = false`, which is a declaration and not a use of the
+> session layer.
+> *Check (corrected at 1.1.0):* zero **calls**, not zero mentions -
+> `grep -n 'PG\.Session\.' PengyouGames/Games/PullBook.lua` returns nothing. The original
+> "grep for `PG.Session`" wording had already been false since the file shipped, because the
+> comment that documents this invariant necessarily contains the invariant's own name; a check
+> that matches its own documentation is not a check. The escaped-dot pattern above is the one
+> form that does not.
 
 ### 1.3 Consequences worth stating explicitly
 

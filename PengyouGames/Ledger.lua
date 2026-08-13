@@ -21,7 +21,26 @@ PG.Ledger = {}
 -------------------------------------------------------------------------------
 
 local LEDGER_VER = 2
-local MAX_ROW_GOLD = 100000 * 40 -- buy-in cap * roster cap: 4,000,000
+
+-- THE SUITE-WIDE absolute ceiling on one player's net from one session. It is
+-- not any single game's arithmetic: every gold game's own clamps must satisfy
+--     stakeMax * (rosterCap - 1) * roundsMax <= MAX_ROW_GOLD
+-- and every game must pass its OWN exact bound as meta.cap, because meta.cap is
+-- the tight check and this constant is only the backstop. Worked out against
+-- what the three gold games can actually produce at 1.1.0:
+--   LG  buy-in 100000 * roster 40                     = 4,000,000  (at the ceiling)
+--   DR  wager 100000 * (roster 40 - 1), one survivor   = 3,900,000
+--   GB  |delta| <= wager - 1, wager <= 100000          =    99,999
+-- (DR pays the survivor one wager from each of the other n-1 players and takes
+-- one wager from each of them, so n=40 at the maximum wager is the largest row
+-- it can write. The Gambler is one round in which the lowest roll pays the
+-- highest the DIFFERENCE between two rolls of 1..wager, so its largest possible
+-- row is wager-1 - by far the tightest of the three.) The constant therefore
+-- holds unchanged and MUST NOT be raised here: an older client would refuse a
+-- row a newer one writes for a game both versions can play, which is exactly
+-- the cross-version ledger divergence the v2->v3 wire bump was spent on. Raise
+-- it only in a release that also bumps WIRE_VERSION.
+local MAX_ROW_GOLD = 100000 * 40 -- 4,000,000
 local MAX_ROWS_PER_SESSION = 40  -- roster cap
 local MAX_SESSIONS_PER_DAY = 250
 local DAYS_KEPT = 30             -- older day buckets are dropped (lifetime kept)
@@ -31,7 +50,18 @@ local MAX_LABEL = 48
 
 local SCOPES = { group = true, guild = true, public = true }
 local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
-local GAME_LABEL = { LG = "Loot Goblins", PB = "Pull Book", RPS = "Rock Paper Scissors" }
+
+-- Deliberately this file's OWN copy of the code -> name mapping, never a read
+-- of a game module's: these labels render PERSISTED rows, which outlive the
+-- module that wrote them. A row from a game removed in a future release must
+-- still say what it was, and a SavedVariables file hand-edited or carried over
+-- from an install that lacked a module must still render a name rather than a
+-- bare code. RPS and QZ never write a row - they are listed for exactly that
+-- second reason. DR and GB must match the `label` those two modules pass, or
+-- every row they write carries a redundant per-entry label string.
+local GAME_LABEL = { LG = "Loot Goblins", PB = "Pull Book",
+                     RPS = "Rock Paper Scissors", DR = "Death Roll",
+                     GB = "The Gambler", QZ = "Quiz" }
 
 -- forward declaration: the core refreshes an open window after a write
 local Refresh
@@ -269,6 +299,17 @@ end
 
 local prunedThisSession = false
 
+-- The day we have already told the player their ledger is full, NOT a boolean.
+-- MAX_SESSIONS_PER_DAY used to refuse silently, which was tolerable when three
+-- games shared the cap; six games - and a Death Roll duel can finish inside a
+-- minute - make 250 recorded sessions in one night imaginable, and a silent
+-- stop means gold quietly stops being recorded with nothing on screen to say
+-- so. A plain `fullWarned = true` would fire once per LOGIN, so a raid that
+-- hits the cap before midnight and keeps playing past it would be dropped
+-- silently for the whole of the next day - the precise failure the warning
+-- exists to end. Keyed by date(), it warns once per day instead.
+local fullWarnedDay = nil
+
 local function ensureDB()
   local led = PG.db and PG.db.ledger
   if type(led) ~= "table" then return nil end
@@ -371,12 +412,27 @@ function PG.Ledger.Commit(meta, rows)
   local me = PG.FullName("player")
   if not me or not finite(rows[me]) then return false, "notplayed" end
 
-  local list = dayList(led, today())
+  local day = today()
+  local list = dayList(led, day)
   for i = 1, #list do
     local e = list[i]
     if type(e) == "table" and e.id == id then return false, "dup" end
   end
-  if #list >= MAX_SESSIONS_PER_DAY then return false, "full" end
+  if #list >= MAX_SESSIONS_PER_DAY then
+    -- Deliberately NOT routed through refuse(): "full" is not a claim that the
+    -- numbers or the names are wrong, it is a capacity limit, and it needs to
+    -- be said once per day rather than once per refused session - a raid that
+    -- keeps playing would otherwise get one toast per game for the rest of the
+    -- night. The cap NUMBER stays at 250 for the compatibility reason written
+    -- above MAX_ROW_GOLD: raising it would make a 1.0.0 client refuse a row a
+    -- 1.1.0 client writes for the same Loot Goblins game.
+    if fullWarnedDay ~= day then
+      fullWarnedDay = day
+      toast("Pengyou Games: " .. MAX_SESSIONS_PER_DAY .. " games already recorded "
+        .. "today - nothing more is being written to the ledger.")
+    end
+    return false, "full"
+  end
 
   -- G2 VOUCHING sources. meta.vouch is the roster this client itself watched
   -- fill up (frozen at BEGIN); the live group and the guild cache are the

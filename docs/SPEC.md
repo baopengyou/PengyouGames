@@ -58,6 +58,15 @@ and are summarized in §2.
     event registration (wrap RegisterEvent in pcall — unknown events hard-error).
 11. No deprecated APIs: no `getglobal`/`setglobal`, no `UIParentLoadAddOn`, no `BNSendGameData`.
 12. Never attempt any in-encounter signaling fallback of any kind (policy line).
+    Restated for 1.1.0, because the two `/roll` games make the rule reachable by accident
+    rather than by intent: `CHAT_MSG_SYSTEM` keeps firing during a comms lockdown, so a
+    game that "keeps advancing on rolls while the wire is down" would be exactly the banned
+    thing. `Rolls.lua` therefore DISCARDS every observation - it does not queue them, it
+    does not deliver them late - whenever `PG.Comm.Locked()` is true or any raid-critical
+    safety flag is up (encounter, ready check, countdown, restriction). The gate lives in
+    `Rolls.lua` and not in the games so that no game can opt into the violation, and it is
+    what makes the freeze/resume path safe: every client discards identically, so a roll
+    made during an interruption counts for nobody.
 13. TOC: `## Interface: 120007, 120100`. First line of the .toc must be a `##` directive,
     never a bare `#` comment (12.0.7 bug skips all directives otherwise).
 
@@ -367,6 +376,65 @@ Never touches PG.Ledger. Best-of rounds host-configurable (default 3). Theme "fa
 button, a global window-scale slider (0.6–1.6; applying clears per-window grip scales
 via `PG.UI.ApplyGlobalScale`), and a "Reset window layout" button
 (`PG.UI.ResetLayout`). Launcher button + `/pg settings`.
+
+## 10d. The 1.1.0 additions (three games and two support files)
+
+Added after section 4 was written; that section's file tree and TOC block are the 0.1.0
+left as written. The shipped 1.1.0 load order is:
+
+```
+Core.lua  Util.lua  Theme.lua  Comm.lua  Rolls.lua  Ledger.lua  Widgets.lua
+Data\QuizData.lua
+Games\LootGoblins.lua  Games\PullBook.lua  Games\RockPaperScissors.lua
+Games\DeathRoll.lua    Games\Gambler.lua   Games\Quiz.lua
+Settings.lua  Rules.lua  Launcher.lua
+```
+
+**That order is for grouping and readability, not dependency resolution**, and the .toc says
+so in its own header. It cannot be for dependency resolution: every file's file scope runs
+during load and only defines things on `PG`, while all the wiring happens in the init
+callbacks that run later at `ADDON_LOADED` - so `PG.Rolls`, `PG.QuizData` and every game
+module are non-nil in *every* init callback regardless of order. What the order does decide
+is the order the init callbacks run in, and therefore the order of `PG.Comm.Register`,
+`PG.Session.OnChange` and `PG.Safety.RegisterWindow` calls; that is why the three 1.0.0 game
+files keep their exact relative positions and the new ones are appended.
+
+- **`Rolls.lua`** - the addon's ONE reader of `CHAT_MSG_SYSTEM`, and the only place a `/roll`
+  is ever parsed. Five functions: `OnRoll(module, fn)`, `Since(t)`, `Request(low, high)`,
+  `Available()`, `Ready()`. It builds its match pattern from the client's own
+  `RANDOM_ROLL_RESULT` (handling ordinal `%1$s` specifiers) and **self-tests it at init**;
+  on failure it falls back to an English literal, re-tests, and if that also fails reports
+  `Ready() == false` so the two `/roll` games refuse to start rather than opening a table
+  they could never score. It never fabricates a value, never guesses a name (it normalizes
+  and reports; the GAME matches against its own frozen roster and drops on ambiguity), and
+  it enforces the 2.12 gate above. `/pg rolls` prints its state.
+- **`Data\QuizData.lua`** - the shipped question bank (Trivia, Two Truths & a Lie,
+  Unscramble, Type Race). It is a **protocol artefact, not content**: question text never
+  travels, only pool indices do, so any edit to it must bump `PG.QuizData.VERSION`, which
+  rides on `QZ OPEN` and is how a client with a divergent bank refuses to join instead of
+  scoring against different text.
+- **`Games\DeathRoll.lua` (`DR`)** - sequential-turn elimination on a real `/roll`, group
+  scope only, writes gold. Degrades exactly to the classic 1v1 duel at two players.
+- **`Games\Gambler.lua` (`GB`)** - one roll each, lowest pays highest the difference, group
+  scope only, writes gold, one round per session.
+- **`Games\Quiz.lua` (`QZ`)** - four question kinds, all three audiences, **points only**:
+  zero calls into the ledger, permanently.
+
+`WIRE_VERSION` stays `"3"`. Adding a module code is purely additive - a 1.0.0 client parses
+the envelope, finds no handler for `"DR"`, and drops the message with no state, no ledger row
+and no error. That is materially unlike the v2 -> v3 bump, where an old client MIRRORED a
+session it understood and persisted rows every new client refused to write. Bump to `"4"`
+the moment a `CO`/`LG`/`PB`/`RPS` message layout changes, a `Ledger.Commit` gate or bound
+changes such that one version would refuse a row the other writes for a game both can play,
+`PG.NextToken`'s validation loosens, or the derived-scope table changes.
+
+**`DR` and `GB` verify before they commit.** Because the evidence is public, every client
+re-derives the outcome from the rolls IT observed and compares that with the host's terminal
+message: agree -> commit; disagree -> commit nothing and say so; own observation had gaps ->
+commit nothing and say so. A host-authored result with no client-side check would let a
+modified host name any roster member the winner and every client would write zero-sum, fully
+vouched, gate-passing rows crediting the wrong person - the four ledger gates are arithmetic,
+not evidence, and cannot see that.
 
 ## 11. Launcher.lua
 

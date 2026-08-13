@@ -71,6 +71,13 @@ local HB_GIVEUP_WIDE = 300  -- wide scope: now they are dead
 -- played - not by forbidding the audience.
 PG.LG.SCOPES = { group = true, guild = true, public = true }
 
+-- Loot Goblins CLAIMS the single round-based seat (CONCURRENCY.md I1). Declared
+-- here since 1.1.0 so the launcher's Join gate can read a flag off the module
+-- instead of carrying a list of module codes that somebody has to remember to
+-- extend (BRIEF 1.1). This is a declaration, not a new behaviour: the claim
+-- itself has always happened in the accept path and in hostOpen.
+PG.LG.SEAT = true
+
 -- The advisory that rides along on the Public segment: honest about what the
 -- ledger is (a claim, not a transfer) instead of refusing the audience.
 local PUBLIC_NOTE = "Public - anyone on your realm. Gold here is virtual and "
@@ -2688,7 +2695,12 @@ local function fieldValue(eb, lo, hi)
   return n
 end
 
-local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors" }
+-- Every module that can hold the seat, so the "you'll run this game without
+-- playing in it" line below names the game the player is actually in. A missing
+-- entry does not error, it degrades to "another game" - true but useless.
+local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors",
+                    PB = "The Pull Book", DR = "Death Roll",
+                    GB = "The Gambler", QZ = "Quiz" }
 
 -- The dialog always opens and Start explains itself (CONCURRENCY.md 6.4). It
 -- never refuses to appear: "why can't I?" is information the user wants, and

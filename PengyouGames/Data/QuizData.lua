@@ -21,6 +21,26 @@ local ADDON, PG = ...
 
 PG.QuizData = {}
 
+-- PROTOCOL ARTEFACT, NOT CONTENT. Because the wire carries pool INDICES rather
+-- than question text, an index only means anything against a byte-identical
+-- bank. This number rides on every Quiz OPEN and a client whose VERSION differs
+-- refuses to construct any state at all - which is correct behaviour, and is
+-- also why this file cannot be patched casually:
+--
+--   BUMP THIS WHENEVER ANY POOL CHANGES - added, removed, reordered or reworded.
+--
+-- Forgetting to bump does not produce a visible error. It produces two players
+-- scoring against different questions, which is the one failure mode indices
+-- buy and the only one this file has to defend against.
+--
+-- The corollary of shipping the bank to everyone is stated once, plainly:
+-- Two Truths sends its three statements as pool-qualified indices (T12/L47/T88),
+-- so anyone reading raw addon traffic - or simply opening this file - can see
+-- which of the three is the lie. No wire encoding can hide an answer that has to
+-- ship in order to be rendered. What is guaranteed instead is that the SHIPPED
+-- client never displays an answer before the reveal.
+PG.QuizData.VERSION = 1
+
 --------------------------------------------------------------------------------
 -- TYPE RACE MODULE (125 Phrases)
 -- Format: { word = "the phrase to type" }

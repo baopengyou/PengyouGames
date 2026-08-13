@@ -12,6 +12,22 @@ restated here), `SKIN.md` (presentation), `REVEAL.md` (reveal stage).
 
 ---
 
+## 0a. 1.1.0 delta (2026-08-12)
+
+Three games were added after this document was written. The body below is **not** rewritten;
+apply these deltas when reading it, in the style of `CONCURRENCY.md` section 0.3.
+
+| Section | Delta |
+|---|---|
+| Sections 0 and 1.2, "not every game gets every scope" | **Extended, not changed.** Six games now: `LG` party+guild+public, `RPS` party+guild+public, `QZ` party+guild+public, `PB` party only, `DR` party only, `GB` party only. Each still declares `PG.<code>.SCOPES` in its own file and the picker still reads it. |
+| Section 1.2's reasoning for `PB` being party-only | **Applies verbatim, and harder, to `DR` and `GB`.** Those two are settled by a real in-game `/roll`, whose system message reaches only the party or raid you are standing in. A guild-scope roll game would have *no witnesses at all* - the host would be dictating gold outcomes from evidence nobody else can see, which is strictly worse than the Pull Book's situation. Guild and public are not "unsupported" for them, they are impossible. Treat as closed. |
+| Section 4.4's blanket `if meta.scope == "public" then return false end` | **Already superseded before 1.1.0** by the owner decision of 2026-08-12 recorded in 1.2 and implemented in `Ledger.lua`'s header: the blanket stop was replaced by gate **G1** (a client writes rows only for a session it joined and played). The four gates are what make public safe. 1.1.0 changes nothing here; the note exists because the code block above is still printed as a "hard rule" that the shipped persistence layer deliberately does not contain. |
+| Section 4.4's premise that only `RPS` reaches the public channel without gold | **`QZ` is the second.** It is points-only and contains **zero calls** into the ledger, permanently - checkable with `grep -n 'PG\.Ledger\.' PengyouGames/Games/Quiz.lua`, the escaped form, so the check does not match its own documentation. Its persistence is a medal tally and a name-free counter in `db.qz`, and at non-group scope only the local player's own record is persisted (the `RPS` rule). |
+| Section 2.3, all 1:1 traffic goes by whisper at every scope | **Unchanged and newly load-bearing.** `QZ` answers are typed into the addon window and whispered; nothing in it ever calls `SendChatMessage`. |
+| The "nothing is visible to non-users" property | **Amended for `DR` and `GB` only.** The addon still prints nothing anywhere. Those two games ask the PLAYER to type `/roll` (or press a button that asks their own client to), and the resulting system line is visible to the whole group, addon or not. That is deliberate: it is the evidence every client re-derives the outcome from before committing a row. |
+
+---
+
 ## 0. What is being built, in one paragraph
 
 Each game's start dialog gains an **Audience** control with three segments — *Party*, *Guild*,

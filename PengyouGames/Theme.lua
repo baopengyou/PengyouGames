@@ -100,6 +100,22 @@ local ASSETS = {
                 color = { 1, 0.82, 0, 1 } },
   pass      = { { file = "Interface\\Buttons\\UI-GroupLoot-Pass-Up" },
                 color = { 0.66, 0.66, 0.61, 1 } },
+  -- 1.1.0. Three glyphs, added for the launcher's new grid buttons and for the
+  -- Rules window title. `book` is not new usage: Rules.lua has asked for it
+  -- since it shipped and there was no key, so that glyph has simply never
+  -- rendered - adding the key fixes a silent shipped gap. Every step here is a
+  -- long-standing Interface path rather than an atlas guess, and Theme.Mark
+  -- degrades a total miss to "" (no glyph, plain label), so a wrong path costs
+  -- an icon and never a layout.
+  skull     = { { file = "Interface\\Icons\\INV_Misc_Bone_HumanSkull_01" },
+                { file = "Interface\\TargetingFrame\\UI-RaidTargetingIcon_8" },
+                color = { 0.56, 0.09, 0.00, 1 } },   -- LOSS
+  quiz      = { { file = "Interface\\GossipFrame\\ActiveQuestIcon" },
+                { file = "Interface\\Icons\\INV_Misc_QuestionMark" },
+                color = { 1.00, 0.85, 0.46, 1 } },   -- CHGOLD
+  book      = { { file = "Interface\\Icons\\INV_Misc_Book_09" },
+                { file = "Interface\\Spellbook\\Spellbook-Icon" },
+                color = { 0.82, 0.72, 0.55, 1 } },   -- PARCH
 }
 
 -- SKIN.md section 4. Every play goes through Theme.Sound's gates.

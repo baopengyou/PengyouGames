@@ -102,7 +102,11 @@ local function build()
           PG.Comm.PublicLeave()
         end
       end
-      -- an open Loot Goblins / RPS dialog repaints its Public segment at once
+      -- Every open start dialog repaints its Public segment at once. This is a
+      -- broadcast to the picker registry rather than a list of dialogs on
+      -- purpose: at 1.1.0 there are six start dialogs, three of which never
+      -- offer Public at all, and a picker self-registers when it is built - so
+      -- nothing here has to know which games exist.
       if PG.UI and PG.UI.RefreshScopePickers then PG.UI.RefreshScopePickers() end
     end)
 

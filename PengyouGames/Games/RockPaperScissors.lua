@@ -55,8 +55,15 @@ local BUSY_THROTTLE = 60
 -- from this table, so a game can never be dragged onto an audience it refuses.
 PG.RPS.SCOPES = { group = true, guild = true, public = true }
 
+-- Rock Paper Scissors CLAIMS the single round-based seat (CONCURRENCY.md I1)
+-- despite being points-only: the seat is a rule about human attention, not
+-- about gold. Declared here since 1.1.0 so the launcher's Join gate reads a
+-- flag off the module rather than a list of module codes (BRIEF 1.1).
+PG.RPS.SEAT = true
+
 local MODULE_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors",
-                      PB = "The Pull Book" }
+                      PB = "The Pull Book", DR = "Death Roll",
+                      GB = "The Gambler", QZ = "Quiz" }
 
 local THROW_WORD = { R = "ROCK", P = "PAPER", S = "SCISSORS" }
 local VALID_THROW = { R = true, P = true, S = true }

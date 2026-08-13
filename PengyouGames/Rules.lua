@@ -12,6 +12,12 @@ local current
 
 -- Rendering helpers -----------------------------------------------------------
 
+-- Each page wears its own game's skin, so the Rules page for a game looks like
+-- the game. Re-checked at 1.1.0 against what the six game files actually build:
+-- Loot Goblins is the only goblin-skinned window in the suite; The Pull Book,
+-- Rock Paper Scissors, Death Roll, The Gambler and Quiz all build faire ones.
+-- So this one-liner is still exactly right for six pages and does not need to
+-- become a table - but if a future game picks goblin, this is the line.
 local function themeOf(key)
   return (key == "LG") and "goblin" or "faire"
 end
@@ -133,6 +139,174 @@ local PAGES = {
         .. "other games, it cannot be played guild-wide or publicly." },
     },
   },
+  DR = {
+    title = "Death Roll",
+    tagline = "Roll under the last one. Roll a 1 and you are out.",
+    blocks = {
+      { "h", "The idea" },
+      { "p", "Everyone puts up the same wager - 100g by default, and the "
+        .. "starting roll matches it unless the host changes it. Play goes one "
+        .. "player at a time around the table, and whatever you roll becomes "
+        .. "the ceiling for the player after you. The numbers fall fast." },
+      { "h", "Your turn" },
+      { "p", "When it is your turn the window tells you exactly what to type - "
+        .. "for example /roll 743 - and a timer runs. You can type it yourself "
+        .. "or press the ROLL button, which asks your own client to make that "
+        .. "same roll. Either way it is a real, ordinary roll that lands in "
+        .. "everyone's chat." },
+      { "b", "Roll a 1 and you are out. Everyone else plays on, starting again "
+        .. "from the opening number." },
+      { "b", "Roll anything else and it becomes the next player's ceiling." },
+      { "b", "Roll the wrong range and it does not count - you are told so and "
+        .. "the timer keeps running." },
+      { "b", "Run out of time and you are out exactly as if you had rolled a 1. "
+        .. "The table does not wait." },
+      { "h", "Winning and losing" },
+      { "p", "The last player standing takes the pot: everyone who went out "
+        .. "pays one wager and the survivor collects all of them. With two "
+        .. "players that is simply the loser paying the winner - the old duel, "
+        .. "unchanged." },
+      { "h", "If you drop out" },
+      { "p", "Say it plainly: a disconnect costs you the wager. If you vanish "
+        .. "the table gives you a few seconds and then times your turn out, "
+        .. "which puts you out of the game like any other missed turn. Nobody "
+        .. "can tell a dropped connection from a slow decision, and a game that "
+        .. "waited for one would stall for everybody." },
+      { "h", "About the gold" },
+      { "p", "All gold here is virtual and the addon never moves a single "
+        .. "copper. Settling up is manual and on the honour system - trade or "
+        .. "mail it afterwards, or agree to ignore the whole thing. If a game "
+        .. "is abandoned or the host disconnects, nobody owes anybody." },
+      { "h", "Everyone can see the rolls" },
+      { "p", "The rolls are ordinary rolls, so they appear in the chat of "
+        .. "everyone in your group, including people without the addon. That is "
+        .. "the point rather than a side effect. Nothing else about the game is "
+        .. "ever printed anywhere." },
+      { "p", "It also means nobody has to trust anybody's screen. Your own copy "
+        .. "of the game works out who won from the rolls it watched land, and "
+        .. "compares that with what the host announces. If the two disagree, or "
+        .. "if you missed part of the game, your copy records nothing at all "
+        .. "and tells you why." },
+      { "h", "Why it is party only" },
+      { "p", "A roll only reaches the group you are standing in, so only your "
+        .. "own party or raid can see the same rolls you do. A guildmate in a "
+        .. "city would be asked to bet gold on evidence they cannot see, so "
+        .. "guild and public are not offered here at all." },
+      { "h", "Interruptions" },
+      { "p", "A boss pull, ready check or pull timer hides everything instantly "
+        .. "and your turn picks up afterwards with a fresh timer. Rolls made "
+        .. "while the game is hidden do not count, for anyone. Ordinary combat "
+        .. "does not interrupt the game at all." },
+    },
+  },
+  GB = {
+    title = "The Gambler",
+    tagline = "Everyone rolls once. The lowest pays the highest.",
+    blocks = {
+      { "h", "The idea" },
+      { "p", "One roll each, and the whole game is over in half a minute. The "
+        .. "host sets the biggest number anyone can roll - 1000 by default - "
+        .. "everyone rolls it once inside a single timed window, and the lowest "
+        .. "roll pays the highest roll the difference between the two." },
+      { "p", "So if the low roll is 12 and the high roll is 964, that is 952g "
+        .. "from one player to the other, and everybody in between pays and "
+        .. "receives nothing at all. The stake is never fixed in advance, which "
+        .. "is what makes the window worth watching." },
+      { "h", "Rolling" },
+      { "b", "The window tells you exactly what to type. You can type it "
+        .. "yourself or press ROLL, which asks your own client to make the same "
+        .. "roll." },
+      { "b", "Your first roll of the right size is the one that counts. Rolling "
+        .. "again changes nothing." },
+      { "b", "Roll the wrong size and it does not count - you are told, and you "
+        .. "can still roll properly before the timer ends." },
+      { "b", "Do not roll at all and you are simply not in it. You pay nothing "
+        .. "and win nothing." },
+      { "h", "Ties" },
+      { "p", "If two or more players tie for lowest they split the bill between "
+        .. "them; if they tie for highest they split the winnings. If everybody "
+        .. "rolls the same number, or only one person rolls, there is no "
+        .. "difference to pay and nothing changes hands." },
+      { "h", "A word about 100" },
+      { "p", "100 is the number a bare roll produces, so a game set to 100 will "
+        .. "quietly count somebody's loot roll as their entry. The host is "
+        .. "warned when they pick it. Any other number is safer." },
+      { "h", "About the gold" },
+      { "p", "All gold here is virtual and the addon never moves a single "
+        .. "copper. Settling up is manual and on the honour system. If the game "
+        .. "is abandoned or the host disconnects, nothing at all is recorded." },
+      { "h", "Everyone can see the rolls" },
+      { "p", "The rolls are ordinary rolls, so your whole group sees them in "
+        .. "chat whether or not they have the addon. That is what makes the "
+        .. "result impossible to argue with." },
+      { "p", "It is not just a nice idea either: your own copy of the game "
+        .. "works out the result from the rolls it watched land, and refuses to "
+        .. "record anything if that disagrees with what the host announces - or "
+        .. "if you were away and missed one of the two rolls that decided it." },
+      { "h", "Why it is party only" },
+      { "p", "A roll only reaches the group you are standing in, so only your "
+        .. "own party or raid can see the same rolls you do." },
+      { "h", "Interruptions" },
+      { "p", "A boss pull, ready check or pull timer hides everything instantly "
+        .. "and the roll window re-opens afterwards, with time put back on the "
+        .. "clock. Rolls made while the game is hidden do not count, for "
+        .. "anyone. Ordinary combat does not interrupt the game at all." },
+      { "h", "Playing again" },
+      { "p", "Each game is a single round. Play again and it is a brand new "
+        .. "game, with a fresh join window, so nobody is ever committed to more "
+        .. "than the round in front of them." },
+    },
+  },
+  QZ = {
+    title = "Quiz",
+    tagline = "No gold. Just how fast you know things.",
+    blocks = {
+      { "h", "The idea" },
+      { "p", "The host ticks which kinds of question to use and how many to "
+        .. "ask. Everyone gets the same question at the same moment, types an "
+        .. "answer into the quiz window, and the answers stay private until the "
+        .. "timer ends. Nothing is ever posted to chat - your answer goes "
+        .. "straight to the host and nowhere else." },
+      { "h", "The four kinds" },
+      { "b", "Trivia - a question, and you type the answer. Near misses and "
+        .. "the usual alternative spellings are accepted." },
+      { "b", "Two Truths and a Lie - three statements, and you name the one "
+        .. "that is false." },
+      { "b", "Unscramble - the letters of a word, jumbled. Type the word." },
+      { "b", "Type Race - a phrase on screen. Type it exactly, fastest wins." },
+      { "h", "Scoring" },
+      { "p", "Everyone who gets it right scores. The first correct answer is "
+        .. "worth 3 points, the second 2, and every other correct answer 1. "
+        .. "That way being quick is worth something without leaving a player on "
+        .. "a bad connection unable to score at all." },
+      { "b", "A wrong answer costs nothing. Not answering costs nothing." },
+      { "b", "The host can turn on a hint that appears halfway through the "
+        .. "timer, if the group would rather have a gentler game." },
+      { "h", "Finishing" },
+      { "p", "Points add up across the questions. At the end you get a podium - "
+        .. "first, second and third by total points, with ties sharing a place "
+        .. "- and gold medals are remembered between raid nights." },
+      { "p", "There is no buy-in and nothing is ever added to the ledger. This "
+        .. "game cannot cost anybody a copper, which is why it is the one game "
+        .. "besides Rock Paper Scissors that strangers can safely be invited "
+        .. "to." },
+      { "h", "Everyone needs the same questions" },
+      { "p", "The questions live inside the addon rather than being sent "
+        .. "around, so everyone playing needs the same version of Pengyou "
+        .. "Games. If yours does not match the host's you are told so and left "
+        .. "out, instead of being quietly shown a different question from "
+        .. "everybody else." },
+      { "p", "Since the questions ship with the addon, so do the answers: "
+        .. "anyone determined to look them up can. This is a game for people "
+        .. "who would rather not." },
+      { "h", "Interruptions" },
+      { "p", "Same as every game here: encounters, ready checks and pull timers "
+        .. "hide it instantly and it picks up afterwards, with time put back on "
+        .. "the clock. A question interrupted by a boss pull is thrown away and "
+        .. "replaced rather than asked to a room that has already seen it. "
+        .. "Ordinary combat is fine." },
+    },
+  },
 }
 
 -- Who can play with whom -----------------------------------------------------
@@ -158,10 +332,21 @@ local function scopeBlocks(key)
       out[#out + 1] = { "b", SCOPE_WORDS[s] }
     end
   end
-  out[#out + 1] = { "p", "You choose the audience when you start the game. You "
-    .. "can only play one game at a time, but any number of games can be "
-    .. "running around you - you will see an invite for each and pick the one "
-    .. "you want." }
+  -- Appended to EVERY page, so it has to be true of all six games. At 1.1.0 the
+  -- old one-liner ("you can only play one game at a time") stopped being true
+  -- in two directions at once: five games now share the one seat rather than
+  -- two, and hosting a game you do not play in has always been allowed. Both
+  -- halves are stated here rather than left to the README, because far more
+  -- people read this window than read the README.
+  out[#out + 1] = { "p", "You choose the audience when you start the game." }
+  out[#out + 1] = { "p", "You play one game at a time. Loot Goblins, Rock Paper "
+    .. "Scissors, Death Roll, The Gambler and Quiz all want your full "
+    .. "attention, so while you are in one of them the invites for the others "
+    .. "wait. The Pull Book is the exception: it is passive betting on your own "
+    .. "pulls and runs alongside anything." }
+  out[#out + 1] = { "p", "Any number of games can be running around you, and "
+    .. "you can always start one for other people even while you are playing "
+    .. "something else - you simply run it without playing in it yourself." }
   return out
 end
 
@@ -231,24 +416,45 @@ local function render(key)
   end
 end
 
-local function build()
-  win = PG.UI.Window("rules", "Rules", 420, 480, "neutral")
+-- The tab strip, in launcher order. Six tabs no longer fit one row: at the
+-- shipped 126px width plus a 4px gap that is 6 * 130 = 780px inside a 420px
+-- window. The three options were narrower tabs, abbreviated labels, or a second
+-- row - and the first two both break "Rock Paper Scissors", which is the whole
+-- reason the tab is 126px wide in the first place. So: TWO ROWS OF THREE, tabs
+-- unchanged at 126x22, row 1 the 1.0.0 games and row 2 the 1.1.0 games, which
+-- is the same grouping the launcher grid uses.
+--
+-- The arithmetic, so nobody has to re-measure it: x = 14 + col * 130 puts the
+-- three columns at 14, 144 and 274, and the rightmost tab ends at 400, leaving
+-- a 20px right margin in the 420px window. y = -38 - row * 26 (22 button + 4
+-- gap) puts row 1 at -38..-60 and row 2 at -64..-86, which clears the scroll
+-- frame's new top edge at -96.
+local TAB_ORDER = {
+  { "LG", "Loot Goblins" }, { "PB", "Pull Book" }, { "RPS", "Rock Paper Scissors" },
+  { "DR", "Death Roll" }, { "GB", "The Gambler" }, { "QZ", "Quiz" },
+}
 
-  -- tab row: one per game, in launcher order
+local function build()
+  -- 480 -> 506: the second tab row costs exactly 26px and the scroll top drops
+  -- by exactly 26, so the viewport is unchanged at 394px and no body content is
+  -- lost. Only the point and the per-window scale are persisted, never a size,
+  -- so this is safe for a user who already has a Rules window position saved.
+  win = PG.UI.Window("rules", "Rules", 420, 506, "neutral")
+
   tabs = {}
-  local order = { { "LG", "Loot Goblins" }, { "PB", "Pull Book" }, { "RPS", "Rock Paper Scissors" } }
-  local x = 14
-  for i = 1, #order do
-    local key, label = order[i][1], order[i][2]
+  for i = 1, #TAB_ORDER do
+    local key, label = TAB_ORDER[i][1], TAB_ORDER[i][2]
+    local col = (i - 1) % 3
+    -- math.floor, not an integer-division operator: WoW Lua is 5.1 and has none
+    local row = math.floor((i - 1) / 3)
     local b = PG.UI.Button(win, label, 126, 22, function() render(key) end)
-    b:SetPoint("TOPLEFT", x, -38)
+    b:SetPoint("TOPLEFT", 14 + col * 130, -38 - row * 26)
     tabs[key] = b
-    x = x + 130
   end
 
   -- scroll area
   scroll = CreateFrame("ScrollFrame", nil, win, "UIPanelScrollFrameTemplate")
-  scroll:SetPoint("TOPLEFT", 16, -70)
+  scroll:SetPoint("TOPLEFT", 16, -96)
   scroll:SetPoint("BOTTOMRIGHT", -32, 16)
 
   body = CreateFrame("Frame", nil, scroll)
@@ -262,8 +468,10 @@ local function build()
   body.tagline:SetJustifyH("LEFT")
 end
 
--- key (optional): "LG" | "PB" | "RPS". Defaults to the last page viewed, then
--- to Loot Goblins.
+-- key (optional): "LG" | "PB" | "RPS" | "DR" | "GB" | "QZ". Anything else -
+-- including a game whose file failed to load - falls back to the last page
+-- viewed and then to Loot Goblins, so every game's Rules button is safe to
+-- press unconditionally.
 function PG.Rules.Show(key)
   if not win then build() end
   render(PAGES[key] and key or current or "LG")

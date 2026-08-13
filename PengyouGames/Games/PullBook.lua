@@ -25,6 +25,22 @@ PG.PB = {}
 -- Read by PG.UI.ScopePicker (SCOPE.md 1.2 / 5.2).
 PG.PB.SCOPES = { group = true, guild = false, public = false }
 
+-- The Pull Book NEVER takes the single round-based seat (CONCURRENCY.md I10):
+-- it is passive pre-pull betting and runs alongside anything else in the suite.
+-- Since 1.1.0 the launcher's Join gate reads this flag instead of naming "PB"
+-- in its own source, so the exemption is declared where the exemption lives.
+--
+-- This line is a DECLARATION, not a use of the session layer, so I10's check
+-- still holds - but state that check the way it has to be stated to survive
+-- being written down (BRIEF 5.4 C12). The invariant is ZERO CALLS, verified
+-- with the escaped-dot pattern
+--     grep -n 'PG\.Session\.' PengyouGames/Games/PullBook.lua
+-- and never with a search for the bare word: the comment that documents an
+-- invariant inevitably contains the invariant's own name, so a bare-name grep
+-- can never come back empty and stops being a check at all. The pattern above
+-- is deliberately the one form that does not match its own documentation.
+PG.PB.SEAT = false
+
 local STAKE_MIN, STAKE_MAX = 1, 100000
 local LINE_MIN, LINE_MAX = 1, 99
 local FD_VOID_SECS = 20  -- no FD within 20s of encounter end -> D market void
