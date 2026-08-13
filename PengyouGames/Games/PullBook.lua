@@ -173,6 +173,8 @@ local pullAt = 0      -- GetTime() of the last pull-timer expiry (see PULL_GRACE
 local regTicker, tickN = nil, 0
 
 local refreshDialog   -- forward: defined in the dialog section
+local freezeDialog    -- forward: the closing report (PLAN 5), dialog section
+local thawDialog      -- forward: the dismissal, dialog section
 local ensureTicker    -- forward: defined in the lifecycle section
 local bookieSendFD    -- forward: defined after the wire section
 
@@ -930,8 +932,17 @@ end
 local function closeBook(rec, text)
   if not rec then return end
   local staged = false
-  if rec.key == mine then staged = closePodium(rec, text) end
+  local wasMine = (rec.key == mine)
+  if wasMine then staged = closePodium(rec, text) end
   evict(rec)
+  -- The Pull Book is the one game with no results WINDOW to freeze: its
+  -- settlements have only ever existed as a ~5s reveal payload and a toast
+  -- (PLAN 5.1 M7). Rather than invent a seventh window for it, the closing
+  -- tally is written into the panel this dialog already has - the same headline
+  -- plus bounded body that carries "your book is open" - and left there, marked
+  -- and inert, until the player X's it. Same rule as the other five: only a
+  -- surface that was actually on screen becomes a record.
+  if wasMine and freezeDialog then freezeDialog(rec, text) end
   if text and not staged then toast(text, rec) end
   if refreshDialog then refreshDialog() end
 end
@@ -1253,6 +1264,19 @@ end
 -- to overlap by 1px, with 9px of Rules unclickable under the resize grip.
 local function buildDialog()
   dlg = PG.UI.Window("pullbook", "The Pull Book", 340, 380, "PB")
+  -- Declared here so it always EXISTS: the panel is showing a closed book's
+  -- tally and refreshDialog must not repaint over it (PLAN 5). False rather
+  -- than nil, so no reader has to distinguish "not yet" from "not any more".
+  dlg.__pgFrozen = false
+  -- The X is the one dismiss gesture in the addon, and on a closed book's
+  -- report it is also what ENDS it. Hooked on the button rather than on OnHide,
+  -- because OnHide also fires for a Safety hide - the opposite of a dismissal.
+  if PG.UI.OnClose then
+    PG.UI.OnClose(dlg, function()
+      thawDialog()
+      refreshDialog()
+    end)
+  end
   local stakeLabel, lineLabel, hint, openBtn, poster, posterOK
   -- notice-board poster (SKIN.md 2.6). The poster slot is positioned whether
   -- or not the atlas renders, so the layout never depends on the art: the
@@ -1393,6 +1417,14 @@ end
 refreshDialog = function()
   if not dlg then return end
   local book = myBook()
+  -- A closed book's tally owns this panel until the player dismisses it, and a
+  -- LIVE book always takes it back - the same rule the five game windows apply
+  -- to a frozen result, for the same reason: a dead surface that looks live is
+  -- worse than no surface at all (CONCURRENCY.md 5.9).
+  if dlg.__pgFrozen then
+    if not book then return end
+    thawDialog()
+  end
   local isOpen = book ~= nil
   for i = 1, #configWidgets do
     configWidgets[i]:SetShown(not isOpen)
@@ -1413,6 +1445,112 @@ refreshDialog = function()
       .. "|n|nThe bet strip appears at every ready check or pull timer."
       .. otherBookLine())
   end
+end
+
+-------------------------------------------------------------------------------
+-- THE CLOSING REPORT (PLAN 5, the Pull Book's own answer)
+--
+-- Every other game freezes the window the player was already reading. The Pull
+-- Book has no such window: its settlements have only ever existed as a ~5s
+-- reveal payload and a 3s toast, so "persist until dismissed" needed a durable
+-- surface here or nothing (5.1 M7).
+--
+-- It does NOT get a seventh window. The dialog already owns a headline plus a
+-- bounded 10-line body - the panel that says "your book is open" - and a closed
+-- book's tally is the same shape. So the panel is re-used, the configuration
+-- side stays hidden, "Close book" goes (there is nothing left to close), and
+-- the X is the only affordance. refreshDialog will not touch it until either
+-- the player dismisses it or a new book claims the panel back.
+--
+-- The record behind it is evicted by closeBook exactly as before. What is kept
+-- is the rendered text: at most ten short lines in a fontstring that already
+-- existed, replaced and never accumulated.
+-------------------------------------------------------------------------------
+
+-- statusFS is capped at 10 lines (it is the panel that used to grow without
+-- one). The worst case has to fit: 2 lines of closing line, a blank, 4 ranked
+-- rows, an "and N more", a blank and the dismiss hint = 10 exactly.
+local REPORT_ROWS = 4
+
+-- The book's lifetime tally, ranked, with the local player's row protected: at
+-- more than REPORT_ROWS bettors your own line is lifted into the last slot
+-- rather than cut, which is the rule the standings and the reveal stage use.
+local function reportBody(rec)
+  if not (rec and rec.nets) then return nil end
+  local list, any = {}, false
+  for name, net in pairs(rec.nets) do
+    list[#list + 1] = { name = name, net = net }
+    if net ~= 0 then any = true end
+  end
+  if not any then return nil end
+  table.sort(list, function(x, y)
+    if x.net ~= y.net then return x.net > y.net end
+    return x.name < y.name
+  end)
+  -- the rank is fixed BEFORE the lift and printed from the row, exactly as the
+  -- closing podium does it: a lifted row that renumbered itself would claim a
+  -- place it did not finish in
+  for i = 1, #list do list[i].rank = i end
+  local me = PG.FullName("player")
+  local shown = math.min(#list, REPORT_ROWS)
+  if me and #list > REPORT_ROWS then
+    for i = REPORT_ROWS, #list do
+      if list[i].name == me then
+        table.insert(list, REPORT_ROWS, table.remove(list, i))
+        break
+      end
+    end
+  end
+  local out = {}
+  for i = 1, shown do
+    local e = list[i]
+    local amount = (e.net >= 0 and "+" or "-") .. PG.Money(math.abs(e.net))
+    local colour = (e.net > 0 and P.chgreen) or (e.net < 0 and P.chred) or P.chgray
+    out[#out + 1] = e.rank .. ". " .. shortOf(e.name)
+      .. (e.name == me and (P.chgold .. " (you)|r") or "")
+      .. "  " .. colour .. amount .. "|r"
+  end
+  if #list > shown then
+    out[#out + 1] = P.chgray .. "... and " .. (#list - shown) .. " more|r"
+  end
+  return table.concat(out, "|n")
+end
+
+freezeDialog = function(rec, text)
+  -- Only a panel that was actually on screen, or one Safety has hidden - the
+  -- same predicate the five game windows use, and for the same reason: a boss
+  -- pull is exactly when a book closes and exactly when the surface reporting
+  -- it is not visible. A player who never opened this dialog gets the podium,
+  -- the toast and the Ledger, and no window appears unbidden.
+  if not dlg then return end
+  local hidden = PG.Safety.HidBy and PG.Safety.HidBy(dlg)
+  if not (dlg:IsShown() or hidden) then return end
+  local body = reportBody(rec)
+  if not body then return end -- a book that never paid anyone has no result
+  dlg.__pgFrozen = true
+  for i = 1, #configWidgets do configWidgets[i]:Hide() end
+  -- the "Close book" button, not the window's X (dlg.closeBtn): there is no
+  -- book left to close, and the X is the only thing that dismisses this
+  closeBtn:Hide()
+  statusHead:SetShown(true)
+  statusFS:SetShown(true)
+  statusHead:SetText("The book is closed")
+  local head = text and (P.chgray .. text .. "|r|n|n") or ""
+  statusFS:SetText(head .. body .. "|n|n" .. P.chgray .. "Close to dismiss.|r")
+  local clock = PG.UI.ClockAgo and PG.UI.ClockAgo(0)
+  if PG.UI.SetTitle then
+    PG.UI.SetTitle(dlg, "The Pull Book - final" .. (clock and (" (" .. clock .. ")") or ""))
+  end
+  if PG.Theme and PG.Theme.Stamp then PG.Theme.Stamp(dlg, "BOOK CLOSED") end
+end
+
+-- Dismissal, or a new book taking the panel back. State only: the caller
+-- repaints, because refreshDialog is one of the two callers and calling it
+-- from here would recurse.
+thawDialog = function()
+  if not (dlg and dlg.__pgFrozen) then return end
+  dlg.__pgFrozen = false
+  if PG.UI.SetTitle then PG.UI.SetTitle(dlg, "The Pull Book") end
 end
 
 function PG.PB.OpenDialog()

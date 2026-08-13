@@ -1,9 +1,23 @@
--- Launcher.lua - the launcher window: entry points into games, ledger, DND.
+-- Launcher.lua - the shell's owner: the Games page, the footer and the minimap.
+--
+-- THERE IS NO LAUNCHER WINDOW ANY MORE. The launcher, the Ledger, the Rules and
+-- the Settings are four pages of ONE window (PG.UI.Shell, Widgets.lua); this
+-- file owns the shell in the sense that it builds the page you land on and the
+-- footer strip that is visible from every other page. The six PLAY windows are
+-- untouched and stay their own windows.
+--
+-- What lives here:
+--   * the Games page: the 2x3 art-tile picker, the Open games list, the
+--     tonight one-liner
+--   * the footer: the DND sign (global state, so it belongs with the wordmark)
+--     and the live/open status line, which is click-to-focus
+--   * the minimap button, unchanged except that it toggles the shell
 local ADDON, PG = ...
 
 PG.Launcher = {}
 
-local win, dndBtn
+local dndBtn, statusBtn, tonightFS
+local tiles = {}
 
 -------------------------------------------------------------------------------
 -- The Open games list (SCOPE.md 6.3, CONCURRENCY.md 5.10).
@@ -22,31 +36,44 @@ local win, dndBtn
 -------------------------------------------------------------------------------
 
 local MAX_OPEN_ROWS = 5     -- SCOPE.md 6.3
-local OPEN_ROW_H = 22
+local OPEN_ROW_H = 20
 local OPEN_TTL = 60         -- seconds a row is offered, however long its record lives
-local LIST_TICK = 2         -- reconcile cadence while the window is open
+local LIST_TICK = 2         -- reconcile cadence while the shell is open
 
--- The window without the open-games section. UNCHANGED at 1.1.0 even though the
--- suite doubled from three games to six, and the derivation is written out here
--- so the next game does not have to re-measure it:
---    62  title + tagline block, down to the top of the first button
---   +78  game grid: THREE rows of 26 - six games in two columns
---   +20  two inter-row gutters of 10
---   +10  gutter into the utility column
---   +78  utility column: Ledger, Rules, Settings - three rows of 26
---   +20  two inter-row gutters of 10
---   +16  gutter into the DND sign
---   +26  the DND sign
---   +48  bottom padding (12 of which becomes the gap above open-games row 1)
---  = 358
--- Six games in two columns occupy exactly the three rows the three games of
--- 1.0.0 occupied in one, so only the WIDTH changed (240 -> 360). Only the point
--- and the per-window scale are persisted, never a size, so existing users keep
--- their launcher position and simply see a wider window.
-local BASE_HEIGHT = 358
-local WIN_W = 360           -- 24 + 152 + 8 + 152 + 24; see build()
-local COL_W = 152           -- one grid button
-local FULL_W = 312          -- WIN_W - 48: utility buttons, the DND sign, open rows
+-- THE GAMES PAGE, 420 x 548, spent to the pixel. Nothing here resizes: the old
+-- launcher grew and shrank itself as open games came and went (and re-ran the
+-- overlap solver each time, which moved the user's window). The list band is
+-- reserved instead, exactly like the footer.
+--
+--    6  top pad
+--   16  tagline            S, BRASS, centred
+--   10  gap
+--  336  tile grid          3 rows of 104 with two 12px gutters
+--   12  gap
+--    1  divider
+--   12  gap
+--   16  OPEN GAMES         T, BRASS, centred
+--    8  gap
+--  100  five rows of 20    SCOPE.md 6.3 caps the list at five senders, and all
+--                          five stay REACHABLE: a row nobody can see is an
+--                          invitation nobody can accept (CONCURRENCY.md 5.10)
+--    8  gap
+--   16  tonight one-liner  S, centred
+--    7  bottom pad
+--  = 548
+local PAGE_W     = 420      -- the shell's content slot; the page never resizes
+local TAG_Y      = -6
+local GRID_Y     = -32
+local TILE_W, TILE_H = 190, 104
+local TILE_GAP_X, TILE_GAP_Y = 12, 12
+local TILE_X1    = 14       -- 14 + 190 + 12 + 190 + 14 = 420
+local TILE_X2    = TILE_X1 + TILE_W + TILE_GAP_X
+local DIV_Y      = -380
+local HEAD_Y     = -393
+local ROWS_Y     = -417
+local TONIGHT_Y  = -525
+local INSET      = 24       -- METRIC.INSET; the list's own side inset
+local ROW_LABEL_W = 280     -- 24 + 280 + gutter + 76 + 24 = 420 with room over
 
 -- ASCII only, per the source rule: SCOPE.md 6.3's separator is U+00B7.
 --
@@ -248,27 +275,36 @@ local function rowTooltip(self)
   GameTooltip:Show()
 end
 
-local function buildOpenRows()
+local emptyFS
+
+local function buildOpenRows(parent)
+  local M = (PG.Theme and PG.Theme.METRIC) or nil
+  local rowW = PAGE_W - INSET * 2
+  local joinW = (M and M.BTN_INLINE_W) or 76
+  local joinH = (M and M.BTN_INLINE_H) or 20
   for i = 1, MAX_OPEN_ROWS do
-    -- built ONCE, with the window, and shown/hidden from here on: no frame is
+    -- built ONCE, with the page, and shown/hidden from here on: no frame is
     -- ever created per refresh, so nothing churns during combat
-    local row = CreateFrame("Frame", nil, win)
-    row:SetSize(FULL_W, OPEN_ROW_H)
-    if i == 1 then
-      row:SetPoint("TOP", dndBtn, "BOTTOM", 0, -12)
-    else
-      row:SetPoint("TOP", rowFrames[i - 1], "BOTTOM", 0, 0)
-    end
-    -- S role. GameFontNormalSmall defaults to GOLD and nothing here recoloured it,
-    -- so these rows rendered gold while every other list in the addon is chalk.
-    row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    local row = CreateFrame("Frame", nil, parent)
+    row:SetSize(rowW, OPEN_ROW_H)
+    row:SetPoint("TOPLEFT", INSET, ROWS_Y - (i - 1) * OPEN_ROW_H)
+    -- S role. GameFontNormalSmall defaults to GOLD and nothing here recoloured
+    -- it, so these rows rendered gold while every other list is chalk.
+    row.label = row:CreateFontString(nil, "OVERLAY",
+      (PG.Theme and PG.Theme.FontTemplate) and PG.Theme.FontTemplate("S")
+      or "GameFontHighlightSmall")
     row.label:SetPoint("LEFT", 0, 0)
-    -- 240 + the 58px Join button = 298, leaving 14px of slack inside FULL_W.
-    -- The longest realistic row text is "Grizzlebottom - Death Roll - Party".
-    row.label:SetWidth(240)
+    -- 280 + a 16px gutter + the 76px Join = 372, the full row width. The
+    -- longest realistic text is "Grizzlebottom - Death Roll - Party".
+    row.label:SetWidth(ROW_LABEL_W)
     row.label:SetJustifyH("LEFT")
     row.label:SetWordWrap(false)
-    row.joinBtn = PG.UI.Button(row, "Join", 58, 20, function()
+    row.label:SetMaxLines(1)
+    if PG.Theme and PG.Theme.C then
+      local c = PG.Theme.C()
+      row.label:SetTextColor(c.CHALK[1], c.CHALK[2], c.CHALK[3])
+    end
+    row.joinBtn = PG.UI.Button(row, "Join", joinW, joinH, function()
       joinEntry(row.__pgEntry)
     end)
     row.joinBtn:SetPoint("RIGHT", 0, 0)
@@ -278,14 +314,29 @@ local function buildOpenRows()
     row:Hide()
     rowFrames[i] = row
   end
+  -- The launcher had no empty state at all: the toasts that say "check the
+  -- Pengyou Games window" pointed at an unlabelled blank row.
+  emptyFS = parent:CreateFontString(nil, "OVERLAY",
+    (PG.Theme and PG.Theme.FontTemplate) and PG.Theme.FontTemplate("S")
+    or "GameFontHighlightSmall")
+  emptyFS:SetPoint("TOPLEFT", INSET, ROWS_Y - 24)
+  emptyFS:SetPoint("TOPRIGHT", -INSET, ROWS_Y - 24)
+  emptyFS:SetJustifyH("CENTER")
+  emptyFS:SetWordWrap(false)
+  emptyFS:SetMaxLines(1)
+  emptyFS:SetText("Nobody nearby has a game open.")
+  if PG.Theme and PG.Theme.C then
+    local c = PG.Theme.C()
+    emptyFS:SetTextColor(c.CHGRAY[1], c.CHGRAY[2], c.CHGRAY[3])
+  end
 end
 
--- Paint the rows and resize the window around them. Tolerates a list that
--- exists before the window does: an OPEN can arrive long before the user first
--- opens the launcher, and build() is lazy.
+-- Paint the rows. Tolerates a list that exists before the page does: an OPEN
+-- can arrive long before the user first opens the shell, and the page is lazy.
 refreshList = function()
-  if not win then return end
   local list = visibleRows()
+  if PG.UI and PG.UI.Shell then PG.UI.Shell.SetBadge("games", #list > 0) end
+  if not rowFrames[1] then return end
   for i = 1, MAX_OPEN_ROWS do
     local row = rowFrames[i]
     local e = list[i]
@@ -299,25 +350,26 @@ refreshList = function()
       row:Hide()
     end
   end
-  local h = BASE_HEIGHT + OPEN_ROW_H * #list
-  if math.abs(win:GetHeight() - h) > 0.5 then
-    win:SetHeight(h)
-    if win:IsShown() and PG.UI.ResolveOverlaps then PG.UI.ResolveOverlaps(win) end
-  end
+  if emptyFS then emptyFS:SetShown(#list == 0) end
 end
 
--- The ticker runs only while the window is open: the list is a convenience, not
--- a background service, and nothing about it needs to be true off screen.
+-- The ticker runs only while the shell is open: the list is a convenience, not
+-- a background service, and nothing about it needs to be true off screen. It
+-- follows the SHELL and not the Games page, because the footer carries the open
+-- count from every page.
+local refreshFooter   -- forward: the ticker repaints it too
+
 local function syncListTicker()
-  local want = (win and win:IsShown()) and true or false
+  local want = (PG.UI and PG.UI.Shell and PG.UI.Shell.IsShown()) and true or false
   if want and not listTicker then
     listTicker = PG.Ticker(LIST_TICK, function()
-      if not (win and win:IsShown()) then
+      if not (PG.UI and PG.UI.Shell and PG.UI.Shell.IsShown()) then
         syncListTicker()
         return
       end
       reconcile()
       refreshList()
+      refreshFooter()
     end)
   elseif not want and listTicker then
     listTicker:Cancel()
@@ -332,6 +384,7 @@ function PG.Launcher.AddOpenGame(t)
   if not e then return false end
   storeEntry(e)
   refreshList()
+  refreshFooter()
   return true
 end
 
@@ -342,103 +395,295 @@ function PG.Launcher.RemoveOpenGame(game, host, token)
   if not openRows[k] then return false end
   openRows[k] = nil
   refreshList()
+  refreshFooter()
   return true
 end
 
--- icon markup prefix for a button label; plain label when the theme layer is
--- absent (presentation only, SKIN.md 2.1)
-local function markLabel(key, label)
-  local m = (PG.Theme and PG.Theme.Mark) and PG.Theme.Mark(key) or ""
-  if m ~= "" then return m .. " " .. label end
-  return label
-end
-
--- DND toggle styled as the carnival stall's hung sign: OPEN / CLOSED.
--- Bright faire hexes (the button face is dark); the DND wording stays so the
--- function reads plainly. Text only - the sign itself never animates.
+-- DND toggle styled as the carnival stall's hung sign: OPEN / CLOSED. It is
+-- GLOBAL state, so it lives in the footer beside the wordmark rather than on
+-- one page. Text only - the sign itself never animates. The DND wording moved
+-- into the tooltip: the sign is two words wide and the sentence is longer than
+-- the sign.
 local function refreshDnd()
-  if dndBtn then
-    dndBtn:SetText(PG.IsDND() and "|cffff8a70CLOSED|r (DND on)"
-      or "|cff7deda4OPEN|r (DND off)")
-  end
+  if not dndBtn then return end
+  dndBtn:SetText(PG.IsDND() and "|cffff8a70CLOSED|r" or "|cff7deda4OPEN|r")
+  PG.UI.FitLabel(dndBtn)   -- the label changed length class
 end
 
--- The game grid, column-major: the three 1.0.0 games keep their order down the
--- LEFT column and the three 1.1.0 games fill the right, which is the same
--- grouping the Rules tab strip uses, so the two windows teach the same map.
--- Each row is { module code, theme mark key, button label }. The label is
--- written out verbatim rather than derived from GAME_NAME because these strings
--- shipped in 1.0.0 and users read them as the names of the buttons. The trailing
--- ellipsis is gone: PG.UI.Button now binds every label to w-8 and truncates, so the
--- three dots were spending ~12px to say nothing and pushed the longest label over.
-local GRID = {
-  { "LG", "coin", "Loot Goblins" },
-  { "PB", "ticket", "Pull Book" },
-  { "RPS", "dice", "Rock Paper Scissors" },
-  { "DR", "skull", "Death Roll" },
-  { "GB", "greedcoin", "The Gambler" },
-  { "QZ", "quiz", "Quiz" },
-}
+local function dndTip(self)
+  GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+  if PG.IsDND() then
+    GameTooltip:AddLine("The stall is CLOSED")
+    GameTooltip:AddLine("Do Not Disturb is on: no invitations, no toasts.",
+      1, 1, 1, true)
+  else
+    GameTooltip:AddLine("The stall is OPEN")
+    GameTooltip:AddLine("Invitations and toasts can reach you.", 1, 1, 1, true)
+  end
+  GameTooltip:AddLine("Click to flip the sign.", 0.66, 0.66, 0.61, true)
+  GameTooltip:Show()
+end
 
-local function build()
-  win = PG.UI.Window("launcher", "Pengyou Games", WIN_W, BASE_HEIGHT, "neutral")
-  -- carnival-sign tagline under the title (decor only)
-  local tagline = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  tagline:SetPoint("TOP", 0, -40)
-  tagline:SetText("Step right up - games, wagers, glory")
-  tagline:SetTextColor(0.80, 0.68, 0.42) -- BRASS
-  -- Game dialogs live in their game files; guard in case a module failed to
-  -- load. The closure captures `code` per iteration, so the button keeps
-  -- working even if the module arrives later than the launcher.
-  for i = 1, #GRID do
-    local code, iconKey, label = GRID[i][1], GRID[i][2], GRID[i][3]
-    local row = ((i - 1) % 3) + 1
-    local b = PG.UI.Button(win, markLabel(iconKey, label), COL_W, 26, function()
-      local m = PG[code]
-      if type(m) == "table" and m.OpenDialog then m.OpenDialog() end
-    end)
-    -- 36 = 26 button + 10 gutter, so the rows land at -62, -98 and -134 -
-    -- exactly where the first three buttons of 1.0.0 sat.
-    if i <= 3 then
-      b:SetPoint("TOPLEFT", 24, -62 - (row - 1) * 36)
-    else
-      b:SetPoint("TOPRIGHT", -24, -62 - (row - 1) * 36)
+-- The six games, column-major: the three 1.0.0 games keep their order down the
+-- LEFT column and the three 1.1.0 games fill the right, which is the same
+-- grouping the Rules tab strip uses, so the two surfaces teach the same map.
+-- Each row is { module code, display name, play-window key }. The window key is
+-- what the footer and the "yours" tile raise; it is the key each game passes to
+-- PG.UI.Window, and the Pull Book's is "pullbook" because its window IS its
+-- dialog.
+local GAMES = {
+  { "LG",  "Loot Goblins",        "lg" },
+  { "PB",  "Pull Book",           "pullbook" },
+  { "RPS", "Rock Paper Scissors", "rps" },
+  { "DR",  "Death Roll",          "dr" },
+  { "GB",  "The Gambler",         "gb" },
+  { "QZ",  "Quiz",                "qz" },
+}
+local WIN_KEY = {}
+for i = 1, #GAMES do WIN_KEY[GAMES[i][1]] = GAMES[i][3] end
+
+local function loaded(code)
+  local m = PG[code]
+  return type(m) == "table" and type(m.OpenDialog) == "function"
+end
+
+-- THE S5 BRIDGE, and the only thing about the tiles that changes next stage.
+--
+-- A tile pushes to that game's setup PAGE as soon as one is registered under
+-- "setup:<CODE>"; until then it opens the game's existing dialog window, whose
+-- signature never changes. When S5 folds a dialog in, that game's tile starts
+-- pushing with no edit here.
+local function openSetup(code)
+  local id = "setup:" .. code
+  if PG.UI.Shell.HasPage(id) then return PG.UI.Shell.Push(id) end
+  local m = PG[code]
+  if type(m) == "table" and type(m.OpenDialog) == "function" then
+    m.OpenDialog()
+    return true
+  end
+  return false
+end
+
+-- Three states, and no silent dead button (PLAN 1.4). "Yours" is read from the
+-- SESSION REGISTRY, never from whether a window happens to be shown, so a
+-- frozen results window never reports itself as running.
+--
+-- The Pull Book is deliberately never "yours": it claims no seat (I10) and this
+-- file must not learn its private state. When PullBook.lua publishes a
+-- read-only "my book" view, this is the one function that reads it.
+local function tileState(code)
+  if not loaded(code) then
+    return "off", "", "This game did not load. Reload your interface."
+  end
+  local seat = (PG.Session and PG.Session.Seat) and PG.Session.Seat() or nil
+  if seat then
+    local mine = (seat.host == PG.FullName())
+    if seat.module == code then
+      return "yours", mine and "your game, in progress" or
+        ("in " .. shortOf(seat.host) .. "'s game")
+    end
+    local m = PG[code]
+    if m.SEAT == true then
+      return "off", "", "You're playing " .. (mine and "your own "
+        or (shortOf(seat.host) .. "'s ")) .. (GAME_NAME[seat.module] or "game")
+        .. " right now."
     end
   end
-  -- The utility column is one centred stack of full-width buttons, so it reads
-  -- as a different KIND of thing from the grid above it. -170 is where the old
-  -- `rpsBtn BOTTOM, 0, -10` anchor put it: grid row 3 top (-134) + 26 + 10.
-  local ledgerBtn = PG.UI.Button(win, markLabel("sack", "Ledger"), FULL_W, 26, function()
-    if PG.Ledger and PG.Ledger.Show then PG.Ledger.Show() end
-  end)
-  ledgerBtn:SetPoint("TOP", 0, -170)
-  local rulesBtn = PG.UI.Button(win, "Rules", FULL_W, 26, function()
-    if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
-  end)
-  rulesBtn:SetPoint("TOP", ledgerBtn, "BOTTOM", 0, -10)
-  local settingsBtn = PG.UI.Button(win, "Settings", FULL_W, 26, function()
-    if PG.Settings and PG.Settings.Show then PG.Settings.Show() end
-  end)
-  settingsBtn:SetPoint("TOP", rulesBtn, "BOTTOM", 0, -10)
-  dndBtn = PG.UI.Button(win, "", FULL_W, 26, function()
+  return "ready", ""
+end
+
+local function refreshTiles()
+  for i = 1, #tiles do
+    local t = tiles[i]
+    t:SetState(tileState(t.__pgCode))
+  end
+end
+
+local function tileClick(tile)
+  local code = tile.__pgCode
+  if tile.state == "yours" then
+    -- raise the game you are IN, not the form that starts a new one. Falls
+    -- through when there is nothing raisable (Safety owns the screen, or the
+    -- window's own resume predicate says the record is gone).
+    if PG.UI.RaiseWindow(WIN_KEY[code]) then return end
+  end
+  openSetup(code)
+end
+
+-- "Tonight: +340g across 4 games." - the one line of ledger on the home page.
+local function refreshTonight()
+  if not tonightFS then return end
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local sessions = (PG.Ledger and PG.Ledger.Sessions) and PG.Ledger.Sessions() or {}
+  local n = #sessions
+  if n == 0 then
+    tonightFS:SetText("No games settled tonight.")
+    return
+  end
+  local me, net = PG.FullName(), 0
+  local rows = (PG.Ledger and PG.Ledger.Tonight) and PG.Ledger.Tonight() or {}
+  for i = 1, #rows do
+    if rows[i].name == me then net = rows[i].net end
+  end
+  local amount = (net >= 0 and "+" or "") .. PG.Money(net)
+  if C then
+    amount = ((net > 0 and C.chgreen) or (net < 0 and C.chred) or C.chgray)
+      .. amount .. "|r"
+  end
+  tonightFS:SetText("Tonight: " .. amount .. " across " .. n
+    .. (n == 1 and " game." or " games."))
+end
+
+-------------------------------------------------------------------------------
+-- The footer: the DND sign, and the status line that indexes the six separate
+-- play windows (PLAN 1.3). It reads the registry, never a window's visibility.
+-------------------------------------------------------------------------------
+
+refreshFooter = function()
+  if not statusBtn then return end
+  refreshDnd()
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local seat = (PG.Session and PG.Session.Seat) and PG.Session.Seat() or nil
+  local opens = #visibleRows()
+  if seat then
+    local who = (seat.host == PG.FullName()) and "your game"
+      or (shortOf(seat.host) .. "'s game")
+    statusBtn.label:SetText((GAME_NAME[seat.module] or "A game")
+      .. " running - " .. who)
+    if C then statusBtn.label:SetTextColor(C.CHALK[1], C.CHALK[2], C.CHALK[3]) end
+    statusBtn:SetAlpha(1)
+    statusBtn.__pgAction = "raise"
+    statusBtn.__pgSeat = seat
+  elseif opens > 0 then
+    statusBtn.label:SetText(opens .. (opens == 1 and " game open" or " games open")
+      .. " - click to see")
+    if C then statusBtn.label:SetTextColor(C.CHGOLD[1], C.CHGOLD[2], C.CHGOLD[3]) end
+    statusBtn:SetAlpha(1)
+    statusBtn.__pgAction = "games"
+    statusBtn.__pgSeat = nil
+  else
+    statusBtn.label:SetText("/pg for commands   -   right-click: back")
+    if C then statusBtn.label:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
+    statusBtn:SetAlpha(0.4)
+    statusBtn.__pgAction = nil
+    statusBtn.__pgSeat = nil
+  end
+end
+
+local function buildFooter(shell)
+  local footer = PG.UI.Shell.Footer()
+  dndBtn = PG.UI.Button(footer, "", 96, 20, function()
     PG.ToggleDND()
-    refreshDnd()
+    refreshFooter()
+    dndTip(dndBtn)          -- the sign you just flipped explains itself
   end)
-  dndBtn:SetPoint("TOP", settingsBtn, "BOTTOM", 0, -16)
-  buildOpenRows()
-  -- HookScript, not SetScript: the theme's Skin already hooked OnShow (pop-in)
-  win:HookScript("OnShow", function()
-    refreshDnd()
-    -- the list is rebuilt from the records on every show, so it can never
-    -- present a game that ended while the window was closed
+  dndBtn:SetPoint("LEFT", 0, 0)
+  dndBtn:HookScript("OnEnter", dndTip)
+  dndBtn:HookScript("OnLeave", function() GameTooltip:Hide() end)
+
+  statusBtn = CreateFrame("Button", nil, footer)
+  statusBtn:SetPoint("LEFT", dndBtn, "RIGHT", 8, 0)
+  statusBtn:SetPoint("RIGHT", 0, 0)
+  statusBtn:SetHeight(20)
+  statusBtn.label = statusBtn:CreateFontString(nil, "OVERLAY",
+    (PG.Theme and PG.Theme.FontTemplate) and PG.Theme.FontTemplate("S")
+    or "GameFontHighlightSmall")
+  statusBtn.label:SetPoint("LEFT")
+  statusBtn.label:SetPoint("RIGHT")
+  statusBtn.label:SetJustifyH("RIGHT")
+  statusBtn.label:SetWordWrap(false)
+  statusBtn.label:SetMaxLines(1)
+  if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(statusBtn.label) end
+  statusBtn:SetScript("OnClick", function(self)
+    if self.__pgAction == "raise" then
+      local s = self.__pgSeat
+      if s and WIN_KEY[s.module] then PG.UI.RaiseWindow(WIN_KEY[s.module]) end
+    elseif self.__pgAction == "games" then
+      PG.UI.Shell.Focus("games")
+    end
+  end)
+
+  -- The shell's own show/hide drives the ticker and one honest repaint: the
+  -- list is rebuilt from the modules' records on every show, so it can never
+  -- present a game that ended while the window was closed.
+  shell:HookScript("OnShow", function()
     reconcile()
     refreshList()
+    refreshFooter()
     syncListTicker()
   end)
-  win:HookScript("OnHide", syncListTicker)
-  refreshDnd()
+  shell:HookScript("OnHide", syncListTicker)
+  refreshFooter()
+end
+
+-------------------------------------------------------------------------------
+-- The Games page
+-------------------------------------------------------------------------------
+
+local function buildGamesPage(p)
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local Font = (PG.Theme and PG.Theme.FontTemplate) or nil
+
+  local tagline = p:CreateFontString(nil, "OVERLAY", Font and Font("S")
+    or "GameFontHighlightSmall")
+  tagline:SetPoint("TOPLEFT", INSET, TAG_Y)
+  tagline:SetPoint("TOPRIGHT", -INSET, TAG_Y)
+  tagline:SetJustifyH("CENTER")
+  tagline:SetWordWrap(false)
+  tagline:SetMaxLines(1)
+  tagline:SetText("Step right up - games, wagers, glory")
+  if C then tagline:SetTextColor(C.BRASS[1], C.BRASS[2], C.BRASS[3]) end
+
+  -- The picker. Six anchored buttons, 2 columns x 3 rows: at 190x104 a tile is
+  -- 109% of Blizzard's own dungeon button and the art crops with 0.8% stretch.
+  for i = 1, #GAMES do
+    local code, label = GAMES[i][1], GAMES[i][2]
+    local col = (i <= 3) and 1 or 2
+    local row = ((i - 1) % 3) + 1
+    local t = PG.UI.GameTile(p, {
+      code = code, label = label, width = TILE_W, height = TILE_H,
+      onClick = tileClick,
+    })
+    t:SetPoint("TOPLEFT", (col == 1) and TILE_X1 or TILE_X2,
+      GRID_Y - (row - 1) * (TILE_H + TILE_GAP_Y))
+    tiles[#tiles + 1] = t
+  end
+
+  local div = p:CreateTexture(nil, "ARTWORK")
+  div:SetPoint("TOPLEFT", INSET, DIV_Y)
+  div:SetPoint("TOPRIGHT", -INSET, DIV_Y)
+  div:SetHeight(1)
+  div:SetColorTexture(0.12, 0.12, 0.13, 1)
+
+  local head = p:CreateFontString(nil, "OVERLAY", Font and Font("T") or "GameFontNormal")
+  head:SetPoint("TOPLEFT", INSET, HEAD_Y)
+  head:SetPoint("TOPRIGHT", -INSET, HEAD_Y)
+  head:SetJustifyH("CENTER")
+  head:SetWordWrap(false)
+  head:SetMaxLines(1)
+  head:SetText("OPEN GAMES")
+  if C then head:SetTextColor(C.BRASS[1], C.BRASS[2], C.BRASS[3]) end
+  if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(head) end
+
+  buildOpenRows(p)
+
+  tonightFS = p:CreateFontString(nil, "OVERLAY", Font and Font("S")
+    or "GameFontHighlightSmall")
+  tonightFS:SetPoint("TOPLEFT", INSET, TONIGHT_Y)
+  tonightFS:SetPoint("TOPRIGHT", -INSET, TONIGHT_Y)
+  tonightFS:SetJustifyH("CENTER")
+  tonightFS:SetWordWrap(false)
+  tonightFS:SetMaxLines(1)
+  if C then tonightFS:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
+end
+
+local function showGamesPage()
   reconcile()
   refreshList()
+  refreshTiles()
+  refreshTonight()
+  refreshFooter()
+  syncListTicker()
 end
 
 local function openSound()
@@ -447,21 +692,21 @@ local function openSound()
   end
 end
 
+-- Unchanged signatures. They mean "open the shell on the Games page" now.
 function PG.Launcher.Show()
-  if not win then build() end
-  local wasShown = win:IsShown()
-  win:Show()
+  local S = PG.UI and PG.UI.Shell
+  if not S then return end
+  local wasShown = S.IsShown()
+  S.Focus("games")
   if not wasShown then openSound() end
 end
 
 function PG.Launcher.Toggle()
-  if not win then build() end
-  if win:IsShown() then
-    win:Hide()
-  else
-    win:Show()
-    openSound()
-  end
+  local S = PG.UI and PG.UI.Shell
+  if not S then return end
+  local opening = not (S.IsShown() and S.Current() == "games")
+  S.Toggle("games")
+  if opening then openSound() end
 end
 
 -------------------------------------------------------------------------------
@@ -541,7 +786,7 @@ local function buildMinimapButton()
   mmBtn:SetScript("OnEnter", function(self)
     GameTooltip:SetOwner(self, "ANCHOR_LEFT")
     GameTooltip:AddLine("Pengyou Games")
-    GameTooltip:AddLine("Left-click: launcher", 1, 1, 1)
+    GameTooltip:AddLine("Left-click: games, ledger, rules, settings", 1, 1, 1)
     GameTooltip:AddLine("Right-click: toggle DND", 1, 1, 1)
     GameTooltip:AddLine("Drag to move around the minimap", 0.7, 0.7, 0.7)
     GameTooltip:Show()
@@ -572,11 +817,37 @@ function PG.Launcher.ToggleMinimap()
 end
 
 PG.RegisterInit(function()
+  -- The four hub windows became pages inside the shell, so these keys are now
+  -- written by nothing and read by nothing. Purged here for the same reason each
+  -- game purges its old *dialog key: PG.UI.ResetLayout and the global scale pass
+  -- both walk this table, and dead entries make them do work for windows that
+  -- cannot exist. "launcher" is NOT migrated to "main" - the shell is a different
+  -- size and shape, so an inherited point would place it somewhere the old
+  -- window happened to sit rather than somewhere sensible.
+  if PG.db and PG.db.profile and type(PG.db.profile.positions) == "table" then
+    local pos = PG.db.profile.positions
+    pos.launcher, pos.ledger, pos.rules, pos.settings = nil, nil, nil, nil
+  end
+
+  -- The Games page is the shell's home. Registered at init, built lazily on
+  -- the first open, so the shell costs less at load than the nine windows it
+  -- replaces.
+  if PG.UI and PG.UI.Shell then
+    PG.UI.Shell.RegisterPage("games", {
+      build = buildGamesPage,
+      onShow = showGamesPage,
+    })
+    PG.UI.Shell.OnBuild(buildFooter)
+  end
   if not mmDB().hide then buildMinimapButton() end
-  -- The seat is what disables a Join (5.10 rule 3), so the rows unlock the
-  -- instant a game ends and lock the instant one is accepted - without waiting
-  -- for the next ticker pass.
+  -- The seat is what disables a Join (5.10 rule 3) and what decides a tile's
+  -- state, so both unlock the instant a game ends and lock the instant one is
+  -- accepted - without waiting for the next ticker pass.
   if PG.Session and PG.Session.OnChange then
-    PG.Session.OnChange(function() refreshList() end)
+    PG.Session.OnChange(function()
+      refreshList()
+      refreshTiles()
+      refreshFooter()
+    end)
   end
 end)

@@ -192,7 +192,10 @@ local liteCount = 0
 local sweepTicks = 0
 
 local ticker
-local win, dialog, dlgInputs, dlgScope, dlgNote, dlgStart
+-- `win` is the play window and stays its own window. `page` is the setup panel,
+-- which is no longer a window at all: it is a level-2 page inside the one shell
+-- (PLAN 1.1), handed to us by PG.UI.Shell.
+local win, page, dlgInputs, dlgScope, dlgNote, dlgStart
 local ui = {}
 local rows = {}
 local Theme           -- PG.Theme (nil if the theme layer is absent)
@@ -202,6 +205,7 @@ local overflowToastAt = 0
 
 -- assigned below; declared here so earlier closures capture them as upvalues
 local RefreshUI, ShowWindow, onTick, rowAt, hostOpen, clientRequestSync
+local freezeWindow, thawWindow
 local evict, endSession, refreshDialog, maybeEarlyFinish
 local fxJoined, fxBegin, fxRoll, fxMyRoll, fxResult
 
@@ -451,7 +455,14 @@ evict = function(key, keepWindow)
   if mine == key then
     mine = nil
     PG.Session.Release("GB", rec.token)
-    if win and not keepWindow then win:Hide() end
+    -- guarded on the record the window is actually showing. Unguarded, this hid
+    -- whatever window happened to be up, including one belonging to a different
+    -- record (PLAN 5.3). A frozen result has already cleared __pgRec, so it is
+    -- never hidden here either.
+    if win and win.__pgRec == rec and not keepWindow then
+      win.__pgRec = false
+      win:Hide()
+    end
   end
   poison(key)
   syncTicker()
@@ -1364,7 +1375,9 @@ hostOpen = function(wager, joinSecs, rollSecs, scope)
   local okScope, why = PG.Comm.ScopeAvailable(scope)
   if not okScope then
     toast(why or "that audience isn't available.")
-    if dlgScope and dialog and dialog:IsShown() then pcall(dlgScope.Refresh, dlgScope) end
+    -- IsVisible, not IsShown: a page frame is "shown" whenever it is the
+    -- selected page, including while the whole shell is hidden.
+    if dlgScope and page and page:IsVisible() then pcall(dlgScope.Refresh, dlgScope) end
     return
   end
   local code = PG.Comm.ScopeCode(scope)
@@ -1685,6 +1698,9 @@ local function supersede(host, newToken)
           host, { priority = "result" })
         endSession("The host started a new game. No gold was recorded.")
       end
+      -- and DECLARE the kept window: this path used to leave a fully drawn,
+      -- live-looking frame behind a record that no longer existed (5.9)
+      if keepWindow then freezeWindow(rec) end
       evict(k, keepWindow)
     end
   end
@@ -2025,7 +2041,11 @@ local function sweepRegistry()
     if rec.kind == "lite" then
       if now >= rec.expires then evict(key) end
     elseif rec.phase == "done" and rec.doneAt and (now - rec.doneAt) > DONE_TTL then
-      -- 7.3: a done record goes at DONE_TTL, and the window goes with it
+      -- 7.3: the RECORD goes at DONE_TTL, on schedule, exactly as before - an
+      -- IsShown() exemption here is the bug this suite already paid to remove.
+      -- The WINDOW is what stops going with it (PLAN 5): it freezes into a
+      -- detached, marked, inert result and waits for the player's X.
+      freezeWindow(rec)
       evict(key)
     end
   end
@@ -2311,6 +2331,7 @@ local FONT_FALLBACK = {
 }
 local METRIC_FALLBACK = {
   INSET = 24, ROW_PITCH = 20, AUD_Y = -34, FOOTER = 16, BTN_W = 105, BTN_H = 22,
+  BTN_PRI_W = 150, BTN_PRI_H = 26,
 }
 local function ft(role)
   if Theme and Theme.FontTemplate then return Theme.FontTemplate(role) end
@@ -2347,7 +2368,31 @@ end
 local function ensureWindow()
   if win then return end
   win = PG.UI.Window("gb", "The Gambler", WIN_W, WIN_H, "GB")
-  win.__pgResume = function() return mySession() ~= nil end
+  -- The window's two pieces of state, declared here so they always EXIST:
+  -- __pgRec is the record it is showing (5.9), __pgFrozen says it has stopped
+  -- being a game and become a dismissible record (PLAN 5). Both are set false
+  -- rather than left nil so no reader ever has to distinguish "not yet" from
+  -- "not any more", and so neither is ever resolved through a metatable.
+  win.__pgRec = false
+  win.__pgFrozen = false
+  -- Core re-shows Safety-hidden windows whose __pgResume() returns true. Two
+  -- clauses, and the second is the fix for the way a raid used to eat your
+  -- result (PLAN 5, M4): the pull hides the window, the fight outlasts
+  -- DONE_TTL, the sweep evicts mid-fight, and there was no session left to
+  -- vouch for the frame. A frozen result has no session by definition and is
+  -- exactly the thing that has to come back. The live clause is now LG/DR's
+  -- stricter one (F19) - the window is bound to ONE record, so it never
+  -- resurrects for a session it is not showing.
+  win.__pgResume = function()
+    local S = mySession()
+    if S then return win.__pgRec == S end
+    return win.__pgFrozen and true or false
+  end
+
+  -- The X is the one dismiss gesture in the addon, and on a frozen result it
+  -- is also what ENDS it. Hooked on the button rather than on OnHide, because
+  -- OnHide also fires for a Safety hide - the opposite of a dismissal.
+  if PG.UI.OnClose then PG.UI.OnClose(win, function() thawWindow() end) end
 
   local inset = mt("INSET")
 
@@ -2524,6 +2569,70 @@ local function ensureWindow()
   end
 end
 
+-------------------------------------------------------------------------------
+-- THE FROZEN RESULT (PLAN 5)
+--
+-- A finished record is evicted on schedule and the memory contract does not
+-- move. What stops being swept away is the WINDOW: it stays until the player
+-- closes it. The hazard is not persistence, it is a dead window that LOOKS
+-- live (CONCURRENCY.md 5.9), so the frame stops being a game and becomes a
+-- record: every affordance that could send anything goes, the timer is stopped
+-- AND hidden (a bar sitting at 0 reads as about to start), and the state is
+-- said out loud in the title and in the status line.
+--
+-- It holds NO reference to the record it describes. RefreshUI has already
+-- written every final string into the fontstrings, so the pixels are the
+-- storage; even the timestamp is derived from doneAt at freeze time rather
+-- than stashed on the record. One boolean per module, addon-wide.
+-------------------------------------------------------------------------------
+
+freezeWindow = function(rec)
+  -- Only the window that is CURRENTLY showing this finished record - and only
+  -- while it is on screen, OR while Safety has it hidden. That second case is
+  -- the whole point: a game that ends during a boss pull has its window hidden
+  -- by Core and its record swept mid-fight, which is the commonest way a
+  -- player loses a result they never saw. IsShown() alone gets it wrong there.
+  if not (win and rec and rec.phase == "done" and win.__pgRec == rec) then return end
+  local hidden = PG.Safety.HidBy and PG.Safety.HidBy(win)
+  if not (win:IsShown() or hidden) then return end
+  win.__pgRec = false        -- the record dies here; the window outlives it
+  win.__pgFrozen = true
+  ui.bar:Stop()
+  ui.bar:Hide()
+  -- everything that touches the wire, or that a player could read as "this is
+  -- still going". "Play again" goes with them: that button would start a wire
+  -- transaction from a dead record's window (PLAN 5.3). Rules goes too - a
+  -- frozen result keeps Open Ledger and the X, and nothing else, in all six.
+  ui.rollBtn:Hide()
+  ui.startBtn:Hide()
+  ui.cancelBtn:Hide()
+  ui.againBtn:Hide()
+  ui.withdrawBtn:Hide()
+  ui.rulesBtn:Hide()
+  -- Open Ledger is left exactly as RefreshUI last set it: a game that committed
+  -- to the ledger keeps its button, an abandoned one never had one to keep.
+  local clock = PG.UI.ClockAgo and PG.UI.ClockAgo(GetTime() - (rec.doneAt or GetTime()))
+  if PG.UI.SetTitle then
+    PG.UI.SetTitle(win, "The Gambler - final" .. (clock and (" (" .. clock .. ")") or ""))
+  end
+  ui.status:SetText("Final result - "
+    .. (rec.isHost and "your game" or (shortOf(rec.host) .. "'s game"))
+    .. ". " .. P.chgray .. "Close to dismiss.|r")
+  if Theme and Theme.Stamp then Theme.Stamp(win, "FINAL") end
+end
+
+-- A live session always reclaims the frame (RefreshUI's first act), and so does
+-- the X. Whatever freezeWindow hid that RefreshUI does not drive itself comes
+-- back here - the bar, the title, and Rules, which is the one button in the
+-- suite that is window furniture rather than game state.
+thawWindow = function()
+  if not (win and win.__pgFrozen) then return end
+  win.__pgFrozen = false
+  if PG.UI.SetTitle then PG.UI.SetTitle(win, "The Gambler") end
+  ui.bar:Show()
+  ui.rulesBtn:Show()
+end
+
 -- The rule, and under it the line the loot-roll collision needs (edge case 5).
 -- One region: the rule is trimmed to a single line at the content width so the
 -- warning always has the second one.
@@ -2585,7 +2694,12 @@ local SCOPE_HEADER = {
 
 RefreshUI = function()
   local S = mySession()
+  -- No session, no repaint: this is also what leaves a frozen result's pixels
+  -- alone, because a frozen window's record has been evicted by definition.
   if not win or not S then return end
+  -- ...and a LIVE session always reclaims the frame, so a frozen result can
+  -- never be left labelled "final" over a game that is actually running.
+  if win.__pgFrozen then thawWindow() end
   win.__pgRec = S            -- 5.9: the window is bound to the involved record
   local now = GetTime()
   local me = myName()
@@ -2788,21 +2902,26 @@ ShowWindow = function()
 end
 
 -------------------------------------------------------------------------------
--- Host config dialog
+-- Host setup panel (a shell page, not a window)
 -------------------------------------------------------------------------------
 
--- The host dialog's own geometry. A left label column against a right-anchored
--- input column, both at the shared inset, so the two edges finally agree (they
--- were 20 and 24).
-local DLG_W = 320
+-- The setup panel's own geometry. 420x548 is the shell's content slot
+-- (PG.UI.Shell.CONTENT_W / CONTENT_H), which the shell clamps anything larger
+-- to; the page is created at exactly that size so its action row lands on the
+-- slot's floor like every other page's bottom element. A left label column
+-- against a right-anchored input column, both at the shared inset, so the two
+-- edges agree.
+local PAGE_ID = "setup:GB"
+local PAGE_W, PAGE_H = 420, 548
 local FIELD_W = 70
+local FIELD_PITCH = 32   -- the shipped row pitch: a 20px input plus 12
 local function makeField(parent, label, y, default, maxLetters)
   local inset = mt("INSET")
   local fs = parent:CreateFontString(nil, "OVERLAY", ft("T"))
   fs:SetPoint("TOPLEFT", inset, y)
   -- bounded: the label column is what the input column leaves, and no
   -- FontString in this file is allowed to be unbounded
-  fs:SetWidth(DLG_W - 2 * inset - FIELD_W - 8)
+  fs:SetWidth(PAGE_W - 2 * inset - FIELD_W - 8)
   fs:SetJustifyH("LEFT")
   fs:SetWordWrap(false)
   fs:SetMaxLines(1)
@@ -2846,7 +2965,7 @@ local function scopeNote(scope)
 end
 
 refreshDialog = function()
-  if not (dialog and dlgNote and dlgStart) then return end
+  if not (page and dlgNote and dlgStart) then return end
   local note, canStart = involvement()
   local scope = dlgScope and dlgScope:Get() or nil
   local why
@@ -2874,17 +2993,42 @@ refreshDialog = function()
   dlgStart.__pgWhy = why
 end
 
-local function ensureDialog()
-  if dialog then return end
-  -- 344, not 330, and the same height as the Death Roll dialog:
-  -- PG.UI.ScopePicker is 58 tall now (its fallback hint used to render 13px
-  -- OUTSIDE the rect it declared) and the note under it has to clear Start with
-  -- all three of its lines showing.
-  dialog = PG.UI.Window("gbdialog", "Start The Gambler", DLG_W, 344, "GB")
+-- The play window is opening, so the shell steps back to the games grid - which
+-- is what the old dialog did by closing over a still-open launcher. Guarded on
+-- being the page actually on screen, so a Start fired from anywhere else can
+-- never navigate the shell out from under the player. With no shell at all (a
+-- headless harness) the panel just hides, as before.
+local function closeSetup()
+  local S = PG.UI and PG.UI.Shell
+  if S then
+    if S.Current() == PAGE_ID then S.Back() end
+  elseif page then
+    page:Hide()
+  end
+end
+
+-- THE SETUP PANEL IS A PAGE NOW, not a window. `f` is the frame the shell hands
+-- in, and every control below is the shipped dialog with its geometry moved by
+-- exactly two things:
+--   * `top` - the page's own first-element offset (page.__pgTop, -8). It
+--     replaces the -56 that used to clear a title bar this panel no longer has,
+--     and every offset below is stated relative to it, so the 48px dead-band
+--     reclaim is one constant per file (PLAN 1.5);
+--   * the action row hangs off the page's BOTTOM at the shared FOOTER offset,
+--     because the page is the full height of the slot rather than 344 of it.
+-- Nothing a control DOES changed, including Start's availability re-check
+-- (SCOPE.md 1.3).
+local function buildSetup(f)
+  if page then return end
+  page = f
+  -- tonumber, not a bare `or`: the page contract says __pgTop is a number, and
+  -- a frame that answers with anything else must not silently poison every
+  -- offset below it.
+  local top = tonumber(f.__pgTop) or -8
   local inset = mt("INSET")
-  local hint = dialog:CreateFontString(nil, "OVERLAY", ft("S"))
-  hint:SetPoint("TOPLEFT", inset, -56)
-  hint:SetPoint("TOPRIGHT", -inset, -56)
+  local hint = page:CreateFontString(nil, "OVERLAY", ft("S"))
+  hint:SetPoint("TOPLEFT", inset, top)
+  hint:SetPoint("TOPRIGHT", -inset, top)
   hint:SetHeight(24)
   hint:SetJustifyH("LEFT")
   hint:SetJustifyV("TOP")
@@ -2897,9 +3041,9 @@ local function ensureDialog()
     -- 1000, not 100, and that is not a taste call: 100 is exactly the ceiling of
     -- a bare /roll, so a 100g default would enroll loot rolls by accident on
     -- day one.
-    wager = makeField(dialog, "Max wager (gold)", -88, 1000, 6),
-    joinSecs = makeField(dialog, "Join window (sec)", -120, 30, 3),
-    rollSecs = makeField(dialog, "Roll window (sec)", -152, 30, 3),
+    wager = makeField(page, "Max wager (gold)", top - FIELD_PITCH, 1000, 6),
+    joinSecs = makeField(page, "Join window (sec)", top - FIELD_PITCH * 2, 30, 3),
+    rollSecs = makeField(page, "Roll window (sec)", top - FIELD_PITCH * 3, 30, 3),
   }
   -- HookScript, never SetScript: InputBoxTemplate binds its own OnTextChanged
   -- and clobbering it breaks the edit box's own behaviour.
@@ -2907,18 +3051,20 @@ local function ensureDialog()
   -- The audience picker: a segmented control, never a dropdown (SCOPE.md 5.1).
   -- Guild and Public stay VISIBLE and greyed with their reason, because "why
   -- can't I?" is information the user wants.
-  dlgScope = PG.UI.ScopePicker(dialog, {
+  dlgScope = PG.UI.ScopePicker(page, {
     key = "GB",
     allowed = PG.GB.SCOPES,
     reasons = scopeNote,
     onChange = function() refreshDialog() end,
   })
-  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -180)
-  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -180)
+  -- 124 below the first element, which is where the shipped -180 sat against a
+  -- -56 hint: the three field rows plus the picker's own top gap.
+  dlgScope:SetPoint("TOPLEFT", page, "TOPLEFT", 0, top - 124)
+  dlgScope:SetPoint("TOPRIGHT", page, "TOPRIGHT", 0, top - 124)
 
   -- Anchored to the picker's own bottom, not to an absolute offset that has to
   -- be re-guessed every time the control changes height.
-  dlgNote = dialog:CreateFontString(nil, "OVERLAY", ft("S"))
+  dlgNote = page:CreateFontString(nil, "OVERLAY", ft("S"))
   dlgNote:SetPoint("TOPLEFT", dlgScope, "BOTTOMLEFT", inset, -8)
   dlgNote:SetPoint("TOPRIGHT", dlgScope, "BOTTOMRIGHT", -inset, -8)
   dlgNote:SetJustifyH("LEFT")
@@ -2934,7 +3080,7 @@ local function ensureDialog()
     local m = Theme.Mark("dice")
     if m ~= "" then startLabel = m .. " Start game" end
   end
-  dlgStart = PG.UI.Button(dialog, startLabel, 150, 26, function()
+  dlgStart = PG.UI.Button(page, startLabel, mt("BTN_PRI_W"), mt("BTN_PRI_H"), function()
     local scope = dlgScope and dlgScope:Get() or nil
     if not scope then
       toast("nowhere to start a game - you're not in a group or a guild.")
@@ -2944,14 +3090,14 @@ local function ensureDialog()
     local joinSecs = fieldValue(dlgInputs.joinSecs, 15, 120)
     local rollSecs = fieldValue(dlgInputs.rollSecs, 10, 120)
     if Theme then Theme.Sound("stamp") end
-    dialog:Hide()
+    closeSetup()
     hostOpen(wager, joinSecs, rollSecs, scope)
   end)
-  dlgStart:SetPoint("BOTTOM", 0, 18)
-  local dlgRules = PG.UI.Button(dialog, "Rules", 60, 22, function()
+  dlgStart:SetPoint("BOTTOM", 0, mt("FOOTER"))
+  local dlgRules = PG.UI.Button(page, "Rules", mt("BTN_W"), mt("BTN_H"), function()
     if PG.Rules and PG.Rules.Show then PG.Rules.Show("GB") end
   end)
-  dlgRules:SetPoint("BOTTOMLEFT", 16, 18)
+  dlgRules:SetPoint("BOTTOMLEFT", inset, mt("FOOTER"))
   dlgStart:SetScript("OnEnter", function(self)
     if not self.__pgWhy then return end
     GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
@@ -2959,17 +3105,25 @@ local function ensureDialog()
     GameTooltip:Show()
   end)
   dlgStart:SetScript("OnLeave", function() GameTooltip:Hide() end)
-  -- HookScript, never SetScript: the skin and the picker already hooked OnShow
-  dialog:HookScript("OnShow", refreshDialog)
+  -- No OnShow hook here any more: the shell's page contract promises def.onShow
+  -- on every appearance, including a shell re-open onto a page that never hid,
+  -- which a frame's own OnShow does not.
 end
 
--- Launcher / slash entry point. The dialog ALWAYS opens (CONCURRENCY.md 0.2):
--- Start is what explains itself.
+-- Launcher / slash entry point, signature unchanged: it now focuses the shell
+-- on this game's setup page. The page ALWAYS opens (CONCURRENCY.md 0.2): Start
+-- is what explains itself.
 function PG.GB.OpenDialog()
-  ensureDialog()
+  local S = PG.UI and PG.UI.Shell
+  if S then return S.Push(PAGE_ID) end
+  -- No shell at all. Widgets.lua defines PG.UI.Shell at file scope, so the
+  -- addon never takes this branch; the headless harnesses stub PG.UI without
+  -- one and the panel still has to build and still has to work.
+  if not page then buildSetup(CreateFrame("Frame", nil, UIParent)) end
   if dlgScope then dlgScope:Refresh() end
   refreshDialog()
-  dialog:Show()
+  page:Show()
+  return true
 end
 
 -------------------------------------------------------------------------------
@@ -2985,6 +3139,33 @@ PG.RegisterInit(function()
     end
   end
   PG.Comm.Register("GB", onComm, onDrop)
+
+  -- The setup panel is a page in the one shell window. Registered here, built
+  -- lazily on its first focus; the launcher's tile bridges to it by id, so
+  -- registering is the whole of the hand-off (PLAN 1.1 / 1.2).
+  if PG.UI and PG.UI.Shell then
+    PG.UI.Shell.RegisterPage(PAGE_ID, {
+      build = buildSetup,
+      -- Availability is re-read on every appearance (SCOPE.md 1.3). The
+      -- picker's own parent-OnShow hook covers a page switch; this covers
+      -- re-opening the shell onto a page that never hid.
+      onShow = function()
+        if dlgScope then dlgScope:Refresh() end
+        refreshDialog()
+      end,
+      title = "The Gambler",
+      level = 2,
+      nav = "games",
+      accent = "GB",
+      width = PAGE_W,
+      height = PAGE_H,
+    })
+  end
+  -- The gbdialog window is gone; its saved position is dead data.
+  if PG.db and PG.db.profile and type(PG.db.profile.positions) == "table" then
+    PG.db.profile.positions.gbdialog = nil
+  end
+
   -- Whisper trust (SCOPE.md 4.3, retargeted at the registry by CONCURRENCY.md
   -- 5.4). This was The Pull Book's blanket `false` while the game was group
   -- only, and that was right: the predicate is consulted only for whispers that

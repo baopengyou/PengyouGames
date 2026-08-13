@@ -244,6 +244,19 @@ end
 
 local safetyHidden = {} -- frames WE hid while they were shown, for auto-resume
 
+-- Read-only: did WE hide this frame, and are therefore going to offer it its
+-- resume? Nothing here changes; it is a question the owner of a frame cannot
+-- answer for itself, because IsShown() is false either way.
+--
+-- The results-persistence path is the caller that needs it (PLAN 5). A game
+-- that finishes during a boss pull has its window hidden by the loop above and
+-- its record swept 60s later, mid-fight - so the moment the result has to be
+-- marked as final is a moment when the window is not on screen. Asking
+-- IsShown() there gets the answer wrong in exactly the case that matters most.
+function PG.Safety.HidBy(frame)
+  return (frame ~= nil and safetyHidden[frame] ~= nil) and true or false
+end
+
 local function hideInCombatOn()
   return (PG.db and PG.db.profile and PG.db.profile.hideInCombat) and true or false
 end

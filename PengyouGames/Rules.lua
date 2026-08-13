@@ -586,24 +586,29 @@ local TAB_ORDER = {
 -- -32 right inset left the bar's right edge under the window's border art.
 local SCROLLBAR_RESERVE = 38
 
-local function build()
-  -- 420x548: the Ledger's rect. The extra height over the shipped 506 is the
-  -- 20px title gap the tab strip now takes plus the section gap under it, so
-  -- the viewport is unchanged. Only the point and the per-window scale are
-  -- persisted, never a size, so this is safe for an existing user.
-  win = PG.UI.Window("rules", "Rules", WIN_W, WIN_H, "PG")
+-- THE RULES ARE A PAGE NOW, not a window. 420x548 was already the content
+-- slot's exact rect, so the tab strip, the scroll frame and every block below
+-- them re-anchor to nothing: the only number that moves is the first element's
+-- y, because a page has no title bar to clear.
+--
+-- This page is the reason the six play windows stay separate: the owner wants
+-- to read the rules while a game is live, and it is safe to open at any moment
+-- because this file reads nothing but the theme layer and writes nothing.
+local function build(pageFrame)
+  win = pageFrame
+  if not win then return end
 
   local M = metrics()
+  M.FIRST = win.__pgTop or M.FIRST
   local CONTENT_W = WIN_W - M.INSET * 2
   local TAB_GAP = 12
   local TAB_W = math.floor((CONTENT_W - TAB_GAP * 2) / 3)
   local TAB_PITCH = M.BTN_H + M.LINE
 
-  local bookMark = mark("book")
-  if win.title then
-    win.title:SetText(bookMark ~= "" and (bookMark .. " Rules") or "Rules")
-  end
-
+  -- No title write any more. The shell's title bar carries the wordmark on
+  -- every level-1 page and the nav says which page you are on; WHICH GAME you
+  -- are reading about is the page header inside the scroll child, which is the
+  -- one place that answer was missing before.
   tabs = {}
   for i = 1, #TAB_ORDER do
     local key, label = TAB_ORDER[i][1], TAB_ORDER[i][2]
@@ -665,17 +670,31 @@ end
 -- including a game whose file failed to load - falls back to the last page
 -- viewed and then to Loot Goblins, so every game's Rules button is safe to
 -- press unconditionally.
+-- Unchanged signature, unchanged meaning: the six in-game "Rules" buttons, the
+-- slash command and the shell's nav all still call these. They focus the
+-- shell's Rules page instead of opening a window.
 function PG.Rules.Show(key)
-  if not win then build() end
-  render(PAGES[key] and key or current or "LG")
-  win:Show()
+  local S = PG.UI and PG.UI.Shell
+  if S then S.Focus("rules", key) end
 end
 
 function PG.Rules.Toggle(key)
-  if not win then build() end
-  if win:IsShown() and (not key or key == current) then
-    win:Hide()
+  local S = PG.UI and PG.UI.Shell
+  if not S then return end
+  if S.IsShown() and S.Current() == "rules" and (not key or key == current) then
+    S.Hide()
   else
     PG.Rules.Show(key)
   end
 end
+
+PG.RegisterInit(function()
+  if not (PG.UI and PG.UI.Shell) then return end
+  PG.UI.Shell.RegisterPage("rules", {
+    build = build,
+    -- the arg is the game code a caller asked for; anything unknown - including
+    -- a game whose file failed to load - falls back to the last page viewed and
+    -- then to Loot Goblins, so every Rules button is safe to press
+    onShow = function(_, key) render(PAGES[key] and key or current or "LG") end,
+  })
+end)

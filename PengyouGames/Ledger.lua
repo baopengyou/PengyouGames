@@ -1022,9 +1022,16 @@ local function buildConfirm()
   confirm:Hide()
 end
 
-ensureWindow = function()
+-- THE LEDGER IS A PAGE NOW, not a window. Same widgets, same rhythm, one frame
+-- up: `win` is the page frame the shell hands in, sized 420x548 - which is
+-- exactly the rect this window already had, so nothing below re-anchors. The
+-- one number that changes is the first element's y: a page has no title bar to
+-- clear, so the 56px the title used to occupy become 8px of page padding, and
+-- everything here derives from that (including MAX_LINES, which gains rows).
+ensureWindow = function(pageFrame)
   if win then return end
-  win = PG.UI.Window("ledger", "Pengyou Ledger", WIN_W, WIN_H, "PG")
+  win = pageFrame
+  if not win then return end
 
   local M = (PG.Theme and PG.Theme.METRIC) or nil
   INSET = (M and M.INSET) or INSET
@@ -1033,8 +1040,7 @@ ensureWindow = function()
   local SECTION = (M and M.SECTION) or 16
   local BTN_H = (M and M.BTN_H) or 22
   local BTN_W = (M and M.BTN_W) or 105
-  local first = ((M and M.TITLE_TOP) or -12) - ((M and M.TITLE_H) or 24)
-                - ((M and M.TITLE_GAP) or 20)
+  local first = win.__pgTop or -8
   local TAB_GAP = 12
   local TAB_W = math.floor((WIN_W - INSET * 2 - TAB_GAP * 2) / 3) -- Rules' tab
 
@@ -1095,18 +1101,30 @@ ensureWindow = function()
   clearBtn:SetPoint("BOTTOMLEFT", INSET, FOOTER)
 end
 
--- Opens (and refreshes) the ledger window.
+-- Opens (and refreshes) the ledger. SAME SIGNATURE, same meaning to every
+-- caller - the slash command, the launcher, the four in-game "Open Ledger"
+-- buttons - except that it now focuses the shell's Ledger page instead of
+-- opening a tenth window. The page builds itself on first focus and its onShow
+-- runs Refresh, so there is nothing to do here but ask for it.
 function PG.Ledger.Show()
-  ensureWindow()
-  Refresh()
-  local wasShown = win:IsShown()
-  win:Show()
-  if not wasShown and PG.Theme and PG.Theme.Sound then
+  local S = PG.UI and PG.UI.Shell
+  if not S then return end
+  local fresh = not (S.IsShown() and S.Current() == "ledger")
+  S.Focus("ledger")
+  if fresh and PG.Theme and PG.Theme.Sound then
     PG.Theme.Sound("parchment") -- manual open only; gated inside Theme.Sound
   end
 end
 
 PG.RegisterInit(function()
+  -- Guarded like every other cross-file reach in this addon: without the widget
+  -- layer there is no shell to be a page of, and this file still has to load.
+  if PG.UI and PG.UI.Shell then
+    PG.UI.Shell.RegisterPage("ledger", {
+      build = ensureWindow,
+      onShow = function() Refresh() end,
+    })
+  end
   -- Swap to the dark-on-parchment palette when the theme layer is present;
   -- without it the bright defaults above remain. THESE STAY PARCHMENT COLOURS:
   -- the rows sit on the parchment sheet, which is the one sanctioned

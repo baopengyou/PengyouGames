@@ -19,10 +19,15 @@ local ADDON, PG = ...
 
 PG.Settings = {}
 
-local WIN_W, WIN_H = 320, 520
+-- 420x548 is the shell's content slot. The page WAS 320 wide, and every
+-- element on it already derives from this pair (CONTENT_W, the bound label
+-- widths, the slider) plus an anchor chain, so widening it is one constant and
+-- no re-layout - which is exactly what the left-column pass bought.
+local WIN_W, WIN_H = 420, 548
 
 local win
 local syncers = {} -- one per checkbox: re-reads its source into the display
+local sliderSync   -- set in build(); the page's OnShow value sync
 
 -- The shared spacing grid, with the shipped literals as the fallback so this
 -- file still lays out sanely on a client where the theme layer failed to load.
@@ -56,15 +61,16 @@ local function fontOf(which)
   return "GameFontHighlight"
 end
 
-local function build()
-  -- 320x520. The height is the sum of the anchor chain below plus the footer
-  -- note; it grew with the rhythm, and it is deliberately generous enough that
-  -- the channel note wrapping to a fourth line still cannot reach the button
-  -- above it. Only the point and the per-window scale are ever persisted,
-  -- never the size, so growing it is safe for an existing user.
-  win = PG.UI.Window("settings", "Settings", WIN_W, WIN_H, "PG")
+-- SETTINGS IS A PAGE NOW, not a window. `win` is the page frame the shell
+-- hands in; everything below is the shipped layout with two numbers moved: the
+-- page is the slot's full 420 wide, and the first element sits at the page's
+-- own top padding instead of clearing a title bar that is no longer there.
+local function build(pageFrame)
+  win = pageFrame
+  if not win then return end
 
   local M = metrics()
+  M.FIRST = win.__pgTop or M.FIRST
   local CONTENT_W = WIN_W - M.INSET * 2
   local CB = 26                       -- UICheckButtonTemplate box
   local LABEL_X = CB + 4              -- label sits one gap right of the box
@@ -232,13 +238,18 @@ local function build()
     if self.__pgSyncing then return end
     if PG.UI.ApplyGlobalScale then PG.UI.ApplyGlobalScale(v) end
   end)
-  slider:SetScript("OnShow", function(self)
+  -- The page's onShow drives this too. Whether hiding an ancestor fires
+  -- OnShow/OnHide on a shown descendant is exactly the sort of thing that
+  -- differs by build, and the shell's page contract promises onShow on every
+  -- appearance - so the sync is a named function, called from both.
+  sliderSync = function()
     local v = (PG.db and PG.db.profile.scale) or 1
-    self.__pgSyncing = true
-    self:SetValue(v)
-    self.__pgSyncing = nil
+    slider.__pgSyncing = true
+    slider:SetValue(v)
+    slider.__pgSyncing = nil
     labelScale(v)
-  end)
+  end
+  slider:SetScript("OnShow", sliderSync)
 
   -- 20 below the slider, not 6: the template's 60% / 160% labels hang in the
   -- 15.5px band under the slider, and at -6 the hint's ascenders ran straight
@@ -270,16 +281,32 @@ local function build()
   note:SetTextColor(role("muted", 0.66, 0.66, 0.61))
 end
 
-function PG.Settings.Show()
-  if not win then build() end
-  win:Show()
+-- Every checkbox re-reads its source, and the slider re-reads the stored
+-- scale. Called on every appearance of the page, and by PG.Settings.Refresh.
+local function syncAll()
+  for i = 1, #syncers do syncers[i]() end
+  if sliderSync then sliderSync() end
 end
 
--- Re-sync every checkbox to reality while the window is open (called after
--- out-of-window toggles: launcher sign, minimap right-click, /pg dnd,
--- /pg minimap). No-op before the window is ever built or while hidden.
-function PG.Settings.Refresh()
-  if win and win:IsShown() then
-    for i = 1, #syncers do syncers[i]() end
-  end
+-- Unchanged signature: /pg settings and the shell's nav both call it. It
+-- focuses the shell's Settings page instead of opening a window.
+function PG.Settings.Show()
+  local S = PG.UI and PG.UI.Shell
+  if S then S.Focus("settings") end
 end
+
+-- Re-sync every control to reality while the page is on screen (called after
+-- out-of-page toggles: the footer sign, minimap right-click, /pg dnd,
+-- /pg minimap). IsVisible, not IsShown: the page frame is "shown" whenever it
+-- is the selected page, including while the whole shell is hidden.
+function PG.Settings.Refresh()
+  if win and win:IsVisible() then syncAll() end
+end
+
+PG.RegisterInit(function()
+  if not (PG.UI and PG.UI.Shell) then return end
+  PG.UI.Shell.RegisterPage("settings", {
+    build = build,
+    onShow = function() syncAll() end,
+  })
+end)

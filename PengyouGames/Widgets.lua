@@ -222,6 +222,12 @@ function PG.UI.Window(key, title, w, h, accent)
   f.title:SetText(title)
   local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   close:SetPoint("TOPRIGHT", -2, -2)
+  -- Exposed, because the X is the addon's ONE dismiss gesture (PLAN 2.5) and
+  -- ruling 5 made it load-bearing: a frozen result is dismissed by this button
+  -- and by nothing else, so its owner has to be able to hook it. Hooking OnHide
+  -- instead would be wrong - that also fires for a Safety hide, which is the
+  -- opposite of a dismissal.
+  f.closeBtn = close
   -- Skin applies the one design and stamps the accent; it also re-fonts and
   -- re-colours f.title, so the template above is only what a client without
   -- the theme layer would see.
@@ -258,6 +264,50 @@ function PG.UI.FitLabel(b, pad)
   pcall(fs.SetMaxLines, fs, 1)
   pcall(fs.SetWidth, fs, math.max(8, w - (tonumber(pad) or 8)))
   return b
+end
+
+-- Retitle a factory window. The title is a real FontString inside a bounded
+-- container (PLAN 2.6), so an over-long one ellipsizes instead of sliding under
+-- the close button and the caller just passes a string.
+--
+-- Both of these return false rather than erroring when the frame has no such
+-- chrome: the six game modules drive headless in five harnesses that stub
+-- PG.UI, and a window's decoration must never be a dependency of its logic.
+function PG.UI.SetTitle(f, text)
+  if not f then return false end
+  local fs = f.title
+  if type(fs) ~= "table" or type(fs.SetText) ~= "function" then return false end
+  fs:SetText(tostring(text or ""))
+  return true
+end
+
+-- Hook the window's X - the addon's ONE dismiss gesture, and the only way a
+-- frozen result is dismissed (ruling 5). Deliberately not OnHide: that also
+-- fires for a Safety hide, which is the opposite of a dismissal.
+function PG.UI.OnClose(f, fn)
+  if not (f and type(fn) == "function") then return false end
+  local b = f.closeBtn
+  if type(b) ~= "table" or type(b.HookScript) ~= "function" then return false end
+  b:HookScript("OnClick", fn)
+  return true
+end
+
+-- The wall-clock reading ("21:47") for something that happened `ago` seconds
+-- in the past, or nil when the client has no clock functions - a caller that
+-- cannot read the time renders without one rather than inventing one.
+--
+-- This is how a frozen result gets its timestamp WITHOUT the session record
+-- carrying an extra field for it. The freeze happens up to a minute after the
+-- game ended (longer if a boss pull is in the way), so the end time is derived
+-- from the record's own doneAt at freeze time and the record is then free to
+-- die. Nothing is stashed anywhere (PLAN 5.5).
+function PG.UI.ClockAgo(ago)
+  if type(date) ~= "function" or type(time) ~= "function" then return nil end
+  ago = tonumber(ago) or 0
+  if ago < 0 then ago = 0 end
+  local ok, s = pcall(date, "%H:%M", time() - math.floor(ago))
+  if ok and type(s) == "string" then return s end
+  return nil
 end
 
 function PG.UI.Button(parent, label, w, h, onClick)
@@ -1207,4 +1257,711 @@ function PG.UI.TimerBar(parent, w)
   -- bar and its text never animate.
   if PG.Theme and PG.Theme.TimerBar then PG.Theme.TimerBar(bar) end
   return bar
+end
+
+-------------------------------------------------------------------------------
+-- Raise a factory window by its key (PLAN 1.3, the footer's click-to-focus).
+--
+-- The six play windows stay separate windows and can get lost behind other
+-- frames; the shell is the index of them. `managed` is the only registry that
+-- knows every factory window, which is why this lives here rather than in the
+-- shell below.
+--
+-- It NEVER forces a window onto a screen that Safety owns, and it never
+-- resurrects a window whose owner says the record behind it is gone:
+--   * already shown  -> Raise only (no Show, no side effects)
+--   * hidden         -> Show only when every Safety flag is clear AND the
+--                       window's own __pgResume agrees, which is exactly the
+--                       predicate Core's auto-resume uses.
+-- Returns true if the window was actually raised or shown.
+-------------------------------------------------------------------------------
+function PG.UI.RaiseWindow(key)
+  key = tostring(key or "")
+  if key == "" then return false end
+  local f
+  for i = 1, #managed do
+    if managed[i].__pgKey == key then f = managed[i] break end
+  end
+  if not f then return false end
+  if f:IsShown() then
+    pcall(f.Raise, f)
+    return true
+  end
+  if not safetyAllClear() then return false end
+  if f.__pgResume then
+    local ok, res = pcall(f.__pgResume)
+    if not (ok and res) then return false end
+  end
+  pcall(f.Show, f)
+  pcall(f.Raise, f)
+  return true
+end
+
+-------------------------------------------------------------------------------
+-- THE GAME TILE (PLAN 2.8) - the Adventure-Guide picker button.
+--
+-- Six of these, anchored, 2 columns x 3 rows. Deliberately NOT a
+-- ScrollBoxListGridView: at n = 6 that view drags in the mandatory
+-- SetElementExtent hard-error, the MinimalScrollBar-must-be-an-EventFrame trap
+-- and a DataProvider, and buys nothing a SetPoint does not.
+--
+-- THE SILENT DEAD BUTTON DIES HERE. The launcher shipped a fully enabled grid
+-- button for a module that failed to load: click, nothing, no toast, no
+-- tooltip. A tile that cannot be started says WHY on hover, and it is never
+-- :Disable()d - that is the ScopePicker's reasoned idiom (a disabled Button is
+-- a dead hover target on some builds and the tooltip IS the feature).
+--
+--   cfg.code     "LG" | "PB" | "RPS" | "DR" | "GB" | "QZ"  (accent + tile art)
+--   cfg.label    the game's name, as the user reads it
+--   cfg.onClick  fn(tile) - the caller decides what a click means per state
+-- Returns a Button with:
+--   :SetState(state, sub, reason)
+--       state  "ready" | "yours" | "off"
+--       sub    optional sub-line ("2 seated", "book open - 100g"), "" clears
+--       reason "off" only: the sentence the hover tooltip gives instead
+--   .state     the current state string
+-------------------------------------------------------------------------------
+
+local TILE_W, TILE_H = 190, 104
+-- The six EJ dungeon-button files are 256 x 128 with the picture in the
+-- top-left 175 x 95: 175/256 = 0.68359375, 95/128 = 0.7421875.
+-- TWO TRAPS, both live on this line:
+--   * the 4-arg order is (left, right, top, bottom). The generated docs say
+--     (left, right, bottom, top); they are wrong, and the XML and the wiki
+--     agree with the order used here.
+--   * SetTexCoord must be re-applied AFTER every SetTexture, including the one
+--     inside Theme.Tex - so it is applied below the Theme.Tex call, never
+--     above it.
+local TILE_L, TILE_R, TILE_T, TILE_B = 0, 0.68359375, 0, 0.7421875
+local TILE_SCRIM_H = 34       -- the label band; grows for a two-line name
+local TILE_LABEL_W = 170      -- 190 - 2 x 10
+local TILE_EDGE = 2
+
+local function tileEdge(tile, colorTex)
+  local e = {}
+  for i = 1, 4 do
+    local t = tile:CreateTexture(nil, "BORDER", nil, 2)
+    e[i] = t
+  end
+  e[1]:SetPoint("TOPLEFT");     e[1]:SetPoint("TOPRIGHT");     e[1]:SetHeight(TILE_EDGE)
+  e[2]:SetPoint("BOTTOMLEFT");  e[2]:SetPoint("BOTTOMRIGHT");  e[2]:SetHeight(TILE_EDGE)
+  e[3]:SetPoint("TOPLEFT");     e[3]:SetPoint("BOTTOMLEFT");   e[3]:SetWidth(TILE_EDGE)
+  e[4]:SetPoint("TOPRIGHT");    e[4]:SetPoint("BOTTOMRIGHT");  e[4]:SetWidth(TILE_EDGE)
+  for i = 1, 4 do colorTex(e[i]) end
+  return e
+end
+
+function PG.UI.GameTile(parent, cfg)
+  cfg = cfg or {}
+  local Theme = PG.Theme
+  local code = tostring(cfg.code or "PG")
+  local acc = (Theme and Theme.Accent) and Theme.Accent(code) or nil
+  local C = (Theme and Theme.C) and Theme.C() or nil
+  local GOLD = (C and C.GOLD) or { 1, 0.82, 0 }
+  local GRAY = (C and C.CHGRAY) or { 0.66, 0.66, 0.61 }
+  local ACC = (acc and acc.color) or (C and C.CHGOLD) or { 1, 0.85, 0.46 }
+
+  local tile = CreateFrame("Button", nil, parent)
+  tile:SetSize(tonumber(cfg.width) or TILE_W, tonumber(cfg.height) or TILE_H)
+  tile.__pgCode = code
+  tile.__pgLabel = tostring(cfg.label or code)
+  tile.state = "ready"
+
+  -- the photo. A miss degrades through Theme.Tex's own chain to the second EJ
+  -- path and then to a flat BOARD fill, which the design treats as a legal
+  -- ground - so a wrong path costs a picture and never a layout.
+  local art = tile:CreateTexture(nil, "BACKGROUND")
+  art:SetAllPoints()
+  if Theme and Theme.Tex then
+    Theme.Tex(art, (acc and acc.tile) or "tile_pb")
+  else
+    art:SetColorTexture(0.07, 0.08, 0.10, 1)
+  end
+  pcall(art.SetTexCoord, art, TILE_L, TILE_R, TILE_T, TILE_B)  -- AFTER SetTexture
+  tile.art = art
+
+  -- the label band. Blizzard's own tile does this for the same reason: the
+  -- name sits on a photograph, so it needs its own ground and a shadow.
+  local scrim = tile:CreateTexture(nil, "BORDER")
+  scrim:SetPoint("TOPLEFT", 4, -4)
+  scrim:SetPoint("TOPRIGHT", -4, -4)
+  scrim:SetHeight(TILE_SCRIM_H)
+  scrim:SetColorTexture(0, 0, 0, 0.55)
+  tile.scrim = scrim
+
+  local edges = tileEdge(tile, function(t) t:SetColorTexture(0, 0, 0, 0.55) end)
+
+  local label = tile:CreateFontString(nil, "OVERLAY",
+    (Theme and Theme.FontTemplate) and Theme.FontTemplate("D2") or "GameFontNormalLarge")
+  if Theme and Theme.SetFont then Theme.SetFont(label, "D2") end
+  label:SetPoint("TOP", 0, -12)
+  label:SetWidth(TILE_LABEL_W)
+  label:SetJustifyH("CENTER")
+  label:SetWordWrap(true)      -- a long name costs a second line, never a clip
+  label:SetMaxLines(2)
+  label:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+  if Theme and Theme.Shadow then Theme.Shadow(label) end
+  label:SetText(tile.__pgLabel)
+  tile.label = label
+
+  local sub = tile:CreateFontString(nil, "OVERLAY",
+    (Theme and Theme.FontTemplate) and Theme.FontTemplate("S") or "GameFontHighlightSmall")
+  sub:SetPoint("BOTTOM", 0, 9)
+  sub:SetWidth(TILE_LABEL_W)
+  sub:SetJustifyH("CENTER")
+  sub:SetWordWrap(false)
+  sub:SetMaxLines(1)
+  sub:SetTextColor(GRAY[1], GRAY[2], GRAY[3])
+  if Theme and Theme.Shadow then Theme.Shadow(sub) end
+  sub:SetText("")
+  tile.sub = sub
+
+  -- the live badge: the same 6x6 dot language the Games nav item uses
+  local badge = tile:CreateTexture(nil, "OVERLAY", nil, 3)
+  badge:SetSize(6, 6)
+  badge:SetPoint("TOPRIGHT", -10, -10)
+  badge:SetColorTexture(ACC[1], ACC[2], ACC[3], 1)
+  badge:Hide()
+  tile.badge = badge
+
+  -- hover: the addon's one hover idiom, white at 0.08. HIGHLIGHT is a real
+  -- draw layer, so the button shows and hides it without a script.
+  local hi = tile:CreateTexture(nil, "HIGHLIGHT")
+  hi:SetAllPoints()
+  hi:SetColorTexture(1, 1, 1, 0.08)
+  hi:SetBlendMode("ADD")
+
+  local pushed = tile:CreateTexture(nil, "OVERLAY", nil, 2)
+  pushed:SetAllPoints()
+  pushed:SetColorTexture(0, 0, 0, 0.25)
+  pushed:Hide()
+
+  -- the scrim follows the label: "Rock Paper Scissors" is two Morpheus lines,
+  -- and a two-line name on a one-line band would put its second line on the
+  -- photograph.
+  local function fitScrim()
+    local ok, h = pcall(label.GetStringHeight, label)
+    if ok and type(h) == "number" and h > 0 then
+      scrim:SetHeight(math.max(TILE_SCRIM_H, math.floor(h + 0.5) + 16))
+    end
+  end
+  fitScrim()
+
+  local function paintEdge(bright)
+    local r, g, b, a = 0, 0, 0, 0.55
+    if bright then r, g, b, a = ACC[1], ACC[2], ACC[3], 0.9 end
+    for i = 1, #edges do edges[i]:SetColorTexture(r, g, b, a) end
+  end
+
+  local function showTip(self)
+    GameTooltip:SetOwner(self, "ANCHOR_RIGHT")
+    GameTooltip:AddLine(self.__pgLabel)
+    if self.state == "off" then
+      local why = self.__pgReason or "Not available right now."
+      if GameTooltip_AddErrorLine then
+        pcall(GameTooltip_AddErrorLine, GameTooltip, why)
+      else
+        GameTooltip:AddLine(why, 1, 0.54, 0.44, true)
+      end
+    elseif self.state == "yours" then
+      GameTooltip:AddLine(self.__pgSub ~= "" and self.__pgSub or "You are in this game.",
+        1, 1, 1, true)
+      GameTooltip:AddLine("Click to bring its window up.", 0.66, 0.66, 0.61, true)
+    else
+      GameTooltip:AddLine("Set up a game.", 1, 1, 1, true)
+    end
+    GameTooltip:Show()
+  end
+
+  tile:SetScript("OnEnter", function(self)
+    paintEdge(self.state ~= "off")
+    showTip(self)
+  end)
+  tile:SetScript("OnLeave", function()
+    paintEdge(false)
+    GameTooltip:Hide()
+  end)
+  tile:SetScript("OnMouseDown", function() pushed:Show() end)
+  tile:SetScript("OnMouseUp", function() pushed:Hide() end)
+  tile:SetScript("OnHide", function() pushed:Hide() end)
+  tile:SetScript("OnClick", function(self)
+    if self.state == "off" then
+      showTip(self)   -- swallowed click: repeat the reason, do nothing else
+      return
+    end
+    if type(cfg.onClick) == "function" then cfg.onClick(self) end
+  end)
+
+  -- state, sub-line and reason in one call, because they always change together
+  function tile:SetState(state, subText, reason)
+    if state ~= "yours" and state ~= "off" then state = "ready" end
+    self.state = state
+    self.__pgReason = (state == "off") and (reason or "Not available right now.") or nil
+    self.__pgSub = tostring(subText or "")
+    self.sub:SetText(self.__pgSub)
+    if state == "off" then
+      pcall(self.art.SetDesaturated, self.art, true)
+      self.label:SetTextColor(GRAY[1], GRAY[2], GRAY[3])
+      self.badge:Hide()
+    else
+      pcall(self.art.SetDesaturated, self.art, false)
+      self.label:SetTextColor(GOLD[1], GOLD[2], GOLD[3])
+      if state == "yours" then self.badge:Show() else self.badge:Hide() end
+    end
+    fitScrim()
+    return self
+  end
+
+  return tile
+end
+
+-------------------------------------------------------------------------------
+-- THE SHELL (PLAN 1.2, 1.5) - one hub window, four nav items, stacked pages.
+--
+-- ONLY THE HUB LIVES HERE. The six play windows stay their own windows: the
+-- Pull Book legitimately runs alongside another game, and the Rules have to be
+-- readable while a game is live.
+--
+-- Two navigation levels, Adventure-Guide shaped:
+--   level 0  the persistent four-item nav: Games . Ledger . Rules . Settings
+--   level 1  the four pages behind those items
+--   level 2  a page pushed from a tile (a game's setup panel), with the game's
+--            name in the title bar, an accent rule under it and a Back button
+--
+-- Pages are REAL FRAMES, one shown at a time - Blizzard's own
+-- Container{SettingsCanvas, SettingsList} shape, which this addon already
+-- ships a version of in PullBook.lua's configWidgets SetShown dance. They are
+-- built LAZILY on first focus (the createOnDemand pattern), so the shell costs
+-- less at load than the nine windows it replaces.
+--
+-- Selected state is PAINTED, never :Disable()d - one selection idiom addon
+-- wide, and a disabled Button is a dead hover target.
+-------------------------------------------------------------------------------
+
+-- 444 x 672, and every number below is a multiple of GRID = 4:
+--   12  top margin
+--   24  title row      (the factory's own title container)
+--    8  gap
+--   26  nav band       4 x 102 + 3 x 4 = 420
+--    8  gap
+--  548  content slot   420 wide, exactly one page shown
+--    8  gap
+--   26  footer         DND sign + status; always reserved, never resizes
+--   12  bottom margin
+local SHELL_W, SHELL_H = 444, 672
+local SHELL_PAD = 12
+local NAV_W, NAV_H, NAV_GAP, NAV_BAND = 102, 24, 4, 26
+local CONTENT_W, CONTENT_H = 420, 548
+local FOOTER_H = 26
+local NAV_Y = -44                       -- 12 + 24 + 8
+local SLOT_Y = NAV_Y - NAV_BAND - 8     -- -78
+local PAGE_PAD = 8                      -- first element inside a page
+local TITLE_RESERVE = 80                -- 56 back button + 12, and symmetric
+
+-- The nav is CHROME: four fixed items in a fixed order, declared by the shell
+-- rather than derived from whatever registered. A module that failed to load
+-- leaves its nav item in place and its page explains itself, instead of the
+-- row silently losing an item and re-flowing.
+local NAV_ITEMS = {
+  { id = "games",    label = "Games"    },
+  { id = "ledger",   label = "Ledger"   },
+  { id = "rules",    label = "Rules"    },
+  { id = "settings", label = "Settings" },
+}
+
+local Shell = {}
+PG.UI.Shell = Shell
+
+Shell.WIDTH, Shell.HEIGHT = SHELL_W, SHELL_H
+Shell.CONTENT_W, Shell.CONTENT_H = CONTENT_W, CONTENT_H
+Shell.PAGE_PAD = PAGE_PAD
+
+local shell, slot, footer, backBtn, accentRule
+local navBtns = {}
+local pages = {}            -- id -> { def = , frame = , broken = }
+local history = {}          -- level-2 return stack, capped
+local currentId
+local buildCbs = {}
+local missingFrame
+local inFocus = false       -- suppresses the OnShow refocus during a Focus
+
+local function pageLevel(id)
+  local p = pages[id]
+  local lv = p and tonumber(p.def.level) or 1
+  return (lv == 2) and 2 or 1
+end
+
+-- which nav item a page lights up: its own id when it is one, otherwise the
+-- def's declared owner, otherwise Games
+local function navOf(id)
+  for i = 1, #NAV_ITEMS do
+    if NAV_ITEMS[i].id == id then return id end
+  end
+  local p = pages[id]
+  local n = p and p.def.nav
+  return (type(n) == "string" and n) or "games"
+end
+
+local function titleOf(id)
+  local p = pages[id]
+  local t = p and p.def.title
+  if type(t) == "function" then
+    local ok, s = pcall(t)
+    if ok and type(s) == "string" and s ~= "" then return s end
+    t = nil
+  end
+  if type(t) == "string" and t ~= "" then return t end
+  return "Pengyou Games"
+end
+
+local function navPaint()
+  local want = currentId and navOf(currentId) or nil
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local SEL = (C and C.CHGOLD) or { 1, 0.85, 0.46 }
+  local IDLE = (C and C.CHGRAY) or { 0.66, 0.66, 0.61 }
+  for i = 1, #navBtns do
+    local b = navBtns[i]
+    local sel = (b.__pgNavId == want)
+    b.rule:SetShown(sel)
+    if PG.Theme and PG.Theme.SetFont then
+      PG.Theme.SetFont(b.label, sel and "T" or "B")
+    end
+    if sel then
+      b.label:SetTextColor(SEL[1], SEL[2], SEL[3])
+    else
+      b.label:SetTextColor(IDLE[1], IDLE[2], IDLE[3])
+    end
+  end
+end
+
+local function applyChrome(id)
+  if not shell then return end
+  if shell.title then shell.title:SetText(titleOf(id)) end
+  local lvl2 = (pageLevel(id) == 2)
+  backBtn:SetShown(lvl2)
+  if lvl2 then
+    local p = pages[id]
+    local acc = (PG.Theme and PG.Theme.Accent)
+      and PG.Theme.Accent(p and p.def.accent or id) or nil
+    local c = (acc and acc.color) or { 0.45, 0.32, 0.68 }
+    accentRule:SetColorTexture(c[1], c[2], c[3], 0.9)
+    accentRule:Show()
+  else
+    accentRule:Hide()
+  end
+  navPaint()
+end
+
+-- The page for a module that is not there. One frame, reused: it is the answer
+-- to a nav item whose file failed to load, and it is a sentence rather than a
+-- dead click.
+local function ensureMissing()
+  if missingFrame then return missingFrame end
+  local f = CreateFrame("Frame", nil, slot)
+  f:SetSize(CONTENT_W, CONTENT_H)
+  f:SetPoint("TOP", slot, "TOP", 0, 0)
+  local fs = f:CreateFontString(nil, "OVERLAY",
+    (PG.Theme and PG.Theme.FontTemplate) and PG.Theme.FontTemplate("B") or "GameFontHighlight")
+  fs:SetPoint("TOPLEFT", 24, -160)
+  fs:SetPoint("TOPRIGHT", -24, -160)
+  fs:SetJustifyH("CENTER")
+  fs:SetWordWrap(true)
+  fs:SetMaxLines(3)
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  if C then fs:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
+  f.text = fs
+  f:Hide()
+  missingFrame = f
+  return f
+end
+
+local function buildPage(id)
+  local p = pages[id]
+  if not p then return nil end
+  if p.frame then return p.frame end
+  local f = CreateFrame("Frame", nil, slot)
+  local w = math.min(tonumber(p.def.width) or CONTENT_W, CONTENT_W)
+  local h = math.min(tonumber(p.def.height) or CONTENT_H, CONTENT_H)
+  f:SetSize(w, h)
+  -- anchored TOP in the slot, so a page built at its old window's size keeps
+  -- every internal anchor it had
+  f:SetPoint("TOP", slot, "TOP", 0, 0)
+  f.__pgPageId = id
+  f.__pgTop = -PAGE_PAD          -- the page's first-element y; use it, do not
+                                 -- keep an old window's title reserve
+  f.__pgAccent = p.def.accent or "PG"
+  f:Hide()
+  p.frame = f
+  if type(p.def.build) == "function" then
+    local ok, err = pcall(p.def.build, f)
+    if not ok then
+      p.broken = true
+      if geterrorhandler then geterrorhandler()(err) end
+    end
+  end
+  return f
+end
+
+local function hideCurrent(nextId)
+  if currentId == nil or currentId == nextId then return end
+  local p = pages[currentId]
+  if p and p.frame then
+    p.frame:Hide()
+    if type(p.def.onHide) == "function" then pcall(p.def.onHide, p.frame) end
+  end
+  if missingFrame then missingFrame:Hide() end
+end
+
+-- Show the shell and select a page. Builds the shell and the page on demand.
+-- arg is handed to the page's onShow (Rules uses it for "which game").
+function Shell.Focus(id, arg)
+  local f = Shell.Frame()
+  if not f then return false end
+  id = tostring(id or "")
+  local p = pages[id]
+  local target
+  if p and not p.broken then
+    target = buildPage(id)
+    if p.broken then target = nil end
+  end
+  if not target then
+    target = ensureMissing()
+    local label = id
+    for i = 1, #NAV_ITEMS do
+      if NAV_ITEMS[i].id == id then label = NAV_ITEMS[i].label end
+    end
+    target.text:SetText(label .. " did not load. Reload the interface, and if it "
+      .. "keeps happening the addon is missing a file.")
+  end
+  hideCurrent(id)
+  -- A level-1 page normally clears the trail: you asked for a top-level place, so
+  -- Back has nowhere sensible to go. The exception is arriving from a level-2 page
+  -- - tapping Rules while filling in a game's setup form. Remembering that one step
+  -- is what lets Back return to the half-filled form instead of dumping the player
+  -- on the grid. Capped at one entry deliberately: a deeper trail through top-level
+  -- pages is a history nobody asked for.
+  if pageLevel(id) == 1 then
+    local from = currentId
+    wipe(history)
+    if from and from ~= id and pageLevel(from) == 2 then
+      history[1] = from
+    end
+  end
+  currentId = id
+  target:Show()
+  applyChrome(id)
+  if p and not p.broken and type(p.def.onShow) == "function" then
+    pcall(p.def.onShow, target, arg)
+  end
+  inFocus = true
+  if not f:IsShown() then f:Show() end
+  inFocus = false
+  return true
+end
+
+-- Level 2. Same as Focus, plus a return address: Back, the Games nav item and
+-- a right-click all come back out.
+function Shell.Push(id, arg)
+  local from = currentId
+  local ok = Shell.Focus(id, arg)
+  if ok and from and from ~= id and pageLevel(id) == 2 then
+    history[#history + 1] = from
+    while #history > 8 do table.remove(history, 1) end
+  end
+  return ok
+end
+
+function Shell.Back()
+  local id = table.remove(history)
+  if not id then
+    local p = pages[currentId]
+    id = (p and (p.def.back or p.def.nav)) or "games"
+  end
+  return Shell.Focus(id)
+end
+
+-- id must be unique. A page may be re-declared only while it is still unbuilt,
+-- so a live frame can never be orphaned by a second registration.
+--   def.title    string | fn() -> string   level 2 wants one; level 1 keeps
+--                                          the wordmark by default
+--   def.level    1 (default) | 2
+--   def.nav      which nav item lights up (level 2; default "games")
+--   def.back     where Back lands with an empty history (default def.nav)
+--   def.accent   game code for the level-2 accent rule (default the id)
+--   def.width    default 420, clamped to the slot
+--   def.height   default 548, clamped to the slot
+--   def.build    fn(page)          once, lazily, on first focus
+--   def.onShow   fn(page, arg)     every focus, and every shell re-open
+--   def.onHide   fn(page)          when another page takes the slot
+function Shell.RegisterPage(id, def)
+  id = tostring(id or "")
+  if id == "" or type(def) ~= "table" then return false end
+  local prev = pages[id]
+  if prev and prev.frame then return false end
+  pages[id] = { def = def }
+  return true
+end
+
+function Shell.HasPage(id) return pages[tostring(id or "")] ~= nil end
+
+-- The page frame, built if it is not yet. nil for an unregistered id.
+function Shell.Page(id)
+  local p = pages[tostring(id or "")]
+  if not p then return nil end
+  Shell.Frame()
+  return buildPage(tostring(id or ""))
+end
+
+function Shell.Current() return currentId end
+
+function Shell.IsShown() return (shell and shell:IsShown()) and true or false end
+
+function Shell.Hide() if shell then shell:Hide() end end
+
+-- Open on id, or close if that page is already the one on screen.
+function Shell.Toggle(id, arg)
+  id = tostring(id or "games")
+  if Shell.IsShown() and currentId == id then
+    shell:Hide()
+    return false
+  end
+  Shell.Focus(id, arg)
+  return true
+end
+
+-- A 6x6 dot on a nav item (open games waiting behind the Games item). Same
+-- badge language as the tiles.
+function Shell.SetBadge(id, on)
+  if not shell then return end
+  for i = 1, #navBtns do
+    if navBtns[i].__pgNavId == id then navBtns[i].badge:SetShown(on and true or false) end
+  end
+end
+
+-- The footer strip (DND sign left, status right). Its CONTENT belongs to the
+-- launcher; the strip itself is chrome and is always reserved.
+function Shell.Footer()
+  Shell.Frame()
+  return footer
+end
+
+-- Run fn(shell) once, immediately after the shell frame exists (or right now
+-- if it already does). This is how the launcher fills the footer without
+-- forcing the shell to be built at load.
+function Shell.OnBuild(fn)
+  if type(fn) ~= "function" then return end
+  if shell then
+    pcall(fn, shell)
+  else
+    buildCbs[#buildCbs + 1] = fn
+  end
+end
+
+local function buildNav()
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local ACC = (C and C.CHGOLD) or { 1, 0.85, 0.46 }
+  for i = 1, #NAV_ITEMS do
+    local item = NAV_ITEMS[i]
+    local b = CreateFrame("Button", nil, shell)
+    b:SetSize(NAV_W, NAV_H)
+    b:SetPoint("TOPLEFT", SHELL_PAD + (i - 1) * (NAV_W + NAV_GAP), NAV_Y)
+    b.__pgNavId = item.id
+    local hi = b:CreateTexture(nil, "HIGHLIGHT")
+    hi:SetAllPoints()
+    hi:SetColorTexture(1, 1, 1, 0.08)
+    hi:SetBlendMode("ADD")
+    b.label = b:CreateFontString(nil, "OVERLAY",
+      (PG.Theme and PG.Theme.FontTemplate) and PG.Theme.FontTemplate("B") or "GameFontHighlight")
+    b.label:SetPoint("LEFT")
+    b.label:SetPoint("RIGHT")
+    b.label:SetJustifyH("CENTER")
+    b.label:SetWordWrap(false)
+    b.label:SetMaxLines(1)
+    b.label:SetText(item.label)
+    if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(b.label) end
+    -- selected = a 2px accent bar under the label. Painted, never disabled.
+    b.rule = b:CreateTexture(nil, "OVERLAY")
+    b.rule:SetPoint("BOTTOMLEFT", 8, 0)
+    b.rule:SetPoint("BOTTOMRIGHT", -8, 0)
+    b.rule:SetHeight(2)
+    b.rule:SetColorTexture(ACC[1], ACC[2], ACC[3], 0.9)
+    b.rule:Hide()
+    b.badge = b:CreateTexture(nil, "OVERLAY")
+    b.badge:SetSize(6, 6)
+    b.badge:SetPoint("TOPRIGHT", -6, -2)
+    b.badge:SetColorTexture(ACC[1], ACC[2], ACC[3], 1)
+    b.badge:Hide()
+    b:SetScript("OnClick", function(self) Shell.Focus(self.__pgNavId) end)
+    navBtns[i] = b
+  end
+  navPaint()   -- idle colours from the start, before any page is focused
+end
+
+-- The one hub window. Built on first use, never rebuilt.
+function Shell.Frame()
+  if shell then return shell end
+  shell = PG.UI.Window("main", "Pengyou Games", SHELL_W, SHELL_H, "PG")
+
+  -- 68 reserved on the LEFT for the back button (56 + 12) and 68 on the right
+  -- (34 close + 34 symmetry), so a centred title is centred on the bar the
+  -- player can see and can never slide under the X.
+  if shell.titleBar then
+    shell.titleBar:ClearAllPoints()
+    shell.titleBar:SetPoint("TOPLEFT", TITLE_RESERVE, -SHELL_PAD)
+    shell.titleBar:SetPoint("TOPRIGHT", -TITLE_RESERVE, -SHELL_PAD)
+  end
+
+  backBtn = PG.UI.Button(shell, "< Back", 56, 22, function() Shell.Back() end)
+  backBtn:SetPoint("TOPLEFT", SHELL_PAD, -13)
+  backBtn:Hide()
+
+  -- the level-2 accent rule, directly under the title container
+  accentRule = shell:CreateTexture(nil, "OVERLAY")
+  accentRule:SetPoint("TOPLEFT", TITLE_RESERVE, -38)
+  accentRule:SetPoint("TOPRIGHT", -TITLE_RESERVE, -38)
+  accentRule:SetHeight(2)
+  accentRule:Hide()
+
+  buildNav()
+
+  slot = CreateFrame("Frame", nil, shell)
+  slot:SetSize(CONTENT_W, CONTENT_H)
+  slot:SetPoint("TOPLEFT", SHELL_PAD, SLOT_Y)
+
+  footer = CreateFrame("Frame", nil, shell)
+  footer:SetHeight(FOOTER_H)
+  footer:SetPoint("BOTTOMLEFT", SHELL_PAD, SHELL_PAD)
+  footer:SetPoint("BOTTOMRIGHT", -SHELL_PAD, SHELL_PAD)
+
+  -- Right-click: back on a pushed page, close on a level-1 page. Suppressed
+  -- while an EditBox has focus, so a right-click inside a setup field cannot
+  -- navigate away from what you are typing into.
+  shell:HookScript("OnMouseUp", function(self, button)
+    if button ~= "RightButton" then return end
+    if GetCurrentKeyBoardFocus then
+      local ok, f = pcall(GetCurrentKeyBoardFocus)
+      if ok and f then return end
+    end
+    if currentId and pageLevel(currentId) == 2 then
+      Shell.Back()
+    else
+      self:Hide()
+    end
+  end)
+
+  -- Re-opening the shell repaints whatever page was up. Page OnShow scripts are
+  -- deliberately NOT relied on: whether hiding an ancestor fires OnHide/OnShow
+  -- on a shown descendant is exactly the kind of thing that differs by build,
+  -- and the page contract here promises def.onShow on every appearance.
+  shell:HookScript("OnShow", function()
+    if inFocus or not currentId then return end
+    local p = pages[currentId]
+    if p and not p.broken and p.frame and type(p.def.onShow) == "function" then
+      pcall(p.def.onShow, p.frame)
+    end
+  end)
+
+  for i = 1, #buildCbs do pcall(buildCbs[i], shell) end
+  wipe(buildCbs)
+  return shell
 end
