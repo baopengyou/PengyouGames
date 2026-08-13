@@ -1,0 +1,26 @@
+# hand.iblog -- the hand-written log whose outcome harness/selftest.lua asserts
+# tick by tick, derived from Part C by hand rather than recorded from the sim.
+#
+# One spear each, same lane, same tick. Everything about the match is then
+# forced:
+#   tick 20   both deploy. 10 Levy each of the 30 Levy opening stipend (C.2).
+#   tick 116  both halt at own-frame pos 970. March is 10/tick (C.3) and the
+#             gap formula is LANE_LEN - p - q, so they close 20 a tick and stop
+#             exactly at spear range 60: 2000 - 970 - 970 = 60.
+#   tick 120  first resolve tick at which they are in range. 16 damage each way
+#             (C.3; spear preys on horse, so no counter bonus applies here).
+#   tick 245  26 hits landed, 420 - 416 = 4 HP left on both.
+#   tick 250  the 27th hit. Both die on the SAME resolve tick, because every
+#             source reads the tick-start snapshot (S9) -- a mutual kill is the
+#             sharpest test that damage is not applied side by side.
+#
+# The two arrive ticks differ from each other and from the exec tick on purpose,
+# so the parser and the arrival path are exercised by this log too.
+version 1
+seed 4242
+ticks 260
+loadout 1 0 0 0 0 0
+loadout 2 0 0 0 0 0
+# cmd <exec> <side> <seq> <kind> <target> <count> <arrive>
+cmd 20 1 1 S 1 1 5
+cmd 20 2 1 S 1 1 12
