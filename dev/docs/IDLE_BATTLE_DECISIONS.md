@@ -461,9 +461,31 @@ round trip.
 | Field | Chars | Meaning |
 |---|---|---|
 | `EEE` | 3 | exec tick, base-36, absolute (46,655 ticks = 77 min of active sim) |
-| `K` | 1 | kind: `S`/`H`/`B` units; `a`–`l` building catalogue; `i` Investment; `s` Scorched Earth; `l` Ley Line |
+| `K` | 1 | kind — **case is the namespace**: UPPERCASE `S`/`H`/`B` units, `I` Investment, `E` Scorched Earth, `L` Ley Line; lowercase `a`–`l` the 12-building catalogue, contiguous |
 | `T` | 1 | target: `1`–`3` lane for units and verbs, `1`–`6` slot for buildings |
-| `N` | 1 | count, base-36, capped at 9 by the UI; for `i`/`s` it is the block count |
+| `N` | 1 | count, base-36, capped at 9 by the UI; for `I`/`E` it is the block count |
+
+**Ruling, 2026-08-12 — the `K` collision is closed by case, not by skipping letters.** As
+originally written this table assigned `a`–`l` to the building catalogue *and* `i` to Investment
+and `l` to Ley Line, which collide. `Rules.lua` had worked around it by skipping `i` and `l`
+(running `a b c d e f g h j k m n`), which works but leaves a gap rule every future building has
+to remember.
+
+The better fix was already half-present in the design: **units were uppercase and buildings
+lowercase from the start.** Making the three verbs uppercase too finishes that rule instead of
+patching around it, and it turns out to encode something real —
+
+> **Uppercase means the target is a lane (`1`–`3`). Lowercase means the target is a slot
+> (`1`–`6`).** Case tells a reader how to interpret the very next field.
+
+So: verbs become `I` (Investment), `E` (Scorched Earth — `S` is Spear), `L` (Ley Line); the
+catalogue returns to a contiguous `a`–`l`. No collisions remain: uppercase holds `S H B I E L`,
+lowercase holds `a`–`l`. Costs zero bytes, removes the skip rule, and is self-documenting.
+
+*Implementation is deferred until the M2 sweep finishes, purely to avoid changing `rulesHash`
+underneath a running measurement — the letters are hashed, so editing them mid-sweep would
+invalidate the committed goldens. It must land before M5 freezes `proto`, and the decoder must
+be case-sensitive (never `lower()` an incoming `K`).*
 
 The atom did not need to change because v1 already got the hard part right. **The three Tier-3
 verbs Ruling 5 restored cost one letter each in the `K` field and nothing else** — this is the
@@ -1454,9 +1476,17 @@ mark, stop building economy and spend.**
 | Constant | Value |
 |---|---|
 | **Keep HP** | **48,000** (96,000 raw, since ×0.5 applies) |
-| Earliest possible keep kill (3-Horse opening) | affordable t = 24.5 s, deploys 26.5 s, arrives 36.5 s, razes at ≈ **400 s** |
+| Earliest possible keep kill (3-Horse opening) | affordable t = 21.0 s, deploys 23.0 s, arrives 33.0 s, razes at ≈ **400 s** |
 | A full 200-supply lane of Horses (6) razing | ≈ 182 s of chewing |
 | A full 200-supply lane of Spears (20) razing | ≈ 150 s of chewing |
+
+> **Corrected 2026-08-12 during M1.** The 3-Horse row previously read "affordable t = 24.5 s,
+> deploys 26.5 s, arrives 36.5 s" — arithmetic derived against the old 20-Levy stipend. With
+> the 30-Levy stipend of C.2, `bank(t) = 30 + 10 × floor(t / 35)`, so the chain is 1 Horse at
+> 0.0 s, 2 at 10.5 s, 3 at **21.0 s**. The rest of Part C was swept for the same error and is
+> clean: Trap Pit at 7 s (C.4) and Levy Post at 31.5 s (C.4) were both already re-derived
+> against 30. `dev/idlebattle/tools/smoke.lua` now pins all three landmarks as assertions, so
+> the document and the simulation cannot drift apart again without failing the build.
 
 **Keep HP is a pure length dial — third independent measurement, and the cleanest result in the
 exercise.** Swept 14,000 / 20,000 / 26,000 / 32,000 / 40,000 / 48,000 / 56,000: the median moves
