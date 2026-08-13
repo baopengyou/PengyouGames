@@ -1,47 +1,117 @@
 -- Settings.lua - the settings window: sounds, DND, minimap, scale, layout.
+--
+-- ONE left column, ONE type ramp, ONE set of gaps. Everything on this page is
+-- either a field label or body copy, so by the centring policy every string
+-- here is LEFT-aligned inside the shared inset and the page has no centred
+-- element at all - only the button's own label, which the button centres.
+-- Before this pass the page ran two alignment systems at once (checkboxes,
+-- header and channel note at TOPLEFT 24; slider, reset button and footer note
+-- centred at TOP 0). It read as "roughly aligned" at 320 wide and would have
+-- split visibly the moment the page was widened.
+--
+-- The vertical rhythm is ANCHORED, not absolute: every element hangs off the
+-- one above it with one of the shared METRIC gaps. That is what fixes the
+-- channel note vs slider-label collision - the note used to clear the label by
+-- half a pixel with a hardcoded SetHeight(48), and overlapped it outright
+-- whenever it wrapped to a fourth line, because nothing below it was anchored
+-- to it and the layout could not self-correct in either direction.
 local ADDON, PG = ...
 
 PG.Settings = {}
 
+local WIN_W, WIN_H = 320, 520
+
 local win
 local syncers = {} -- one per checkbox: re-reads its source into the display
 
+-- The shared spacing grid, with the shipped literals as the fallback so this
+-- file still lays out sanely on a client where the theme layer failed to load.
+local function metrics()
+  local M = PG.Theme and PG.Theme.METRIC
+  local top = ((M and M.TITLE_TOP) or -12)
+  local titleH = ((M and M.TITLE_H) or 24)
+  return {
+    INSET   = (M and M.INSET) or 24,
+    FIRST   = top - titleH - ((M and M.TITLE_GAP) or 20), -- title -> first element
+    SECTION = (M and M.SECTION) or 16,
+    RELATED = (M and M.RELATED) or 8,
+    FOOTER  = (M and M.FOOTER) or 16,
+    BTN_W   = (M and M.BTN_PRI_W) or 150,
+    BTN_H   = (M and M.BTN_PRI_H) or 26,
+  }
+end
+
+-- One role -> one colour, from the board ramp. Colour, not size, carries the
+-- heading/caption distinction here: before this pass the section header and the
+-- fine print were the same BRASS and only two points of size apart.
+local function role(name, r, g, b)
+  local R = PG.Theme and PG.Theme.ROLE
+  local c = R and R[name]
+  if c then return c[1], c[2], c[3] end
+  return r, g, b
+end
+
+local function fontOf(which)
+  if PG.Theme and PG.Theme.FontTemplate then return PG.Theme.FontTemplate(which) end
+  return "GameFontHighlight"
+end
+
 local function build()
-  -- 320x460, not SCOPE.md 5.6's 320x420: that budget does not close once the
-  -- section header and the (three-line at this width) channel note are given
-  -- real space - the -164 checkbox would start 4px below the one at -134, and
-  -- the note would run into the slider. Only the point and the per-window scale
-  -- are persisted (never the size), so growing it is safe for existing users.
-  win = PG.UI.Window("settings", "Settings", 320, 460, "neutral")
+  -- 320x520. The height is the sum of the anchor chain below plus the footer
+  -- note; it grew with the rhythm, and it is deliberately generous enough that
+  -- the channel note wrapping to a fourth line still cannot reach the button
+  -- above it. Only the point and the per-window scale are ever persisted,
+  -- never the size, so growing it is safe for an existing user.
+  win = PG.UI.Window("settings", "Settings", WIN_W, WIN_H, "PG")
+
+  local M = metrics()
+  local CONTENT_W = WIN_W - M.INSET * 2
+  local CB = 26                       -- UICheckButtonTemplate box
+  local LABEL_X = CB + 4              -- label sits one gap right of the box
+  local prev                          -- the element the next one hangs off
 
   -- checkbox helper (UICheckButtonTemplate: stable since vanilla). OnShow
   -- re-reads its source so the window always reflects reality (DND can also
   -- be toggled from the launcher sign, the minimap button, or /pg dnd);
   -- PG.Settings.Refresh re-syncs while the window is already open.
-  local function check(label, y, get, set)
+  --
+  -- The label is BOUND now. It had no width, no wrap policy and no ellipsis,
+  -- so its only overflow mode was "runs through the window border into empty
+  -- screen"; bound, an over-long or localised label truncates on the page.
+  local function check(label, anchor, gap, get, set)
     local cb = CreateFrame("CheckButton", nil, win, "UICheckButtonTemplate")
-    cb:SetSize(26, 26)
-    cb:SetPoint("TOPLEFT", 24, y)
-    cb.label = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    cb:SetSize(CB, CB)
+    if anchor then
+      cb:SetPoint("TOPLEFT", anchor, "BOTTOMLEFT", 0, -gap)
+    else
+      cb:SetPoint("TOPLEFT", M.INSET, M.FIRST)
+    end
+    cb.label = win:CreateFontString(nil, "OVERLAY", fontOf("B"))
     cb.label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    cb.label:SetWidth(CONTENT_W - LABEL_X)
+    cb.label:SetJustifyH("LEFT")
+    cb.label:SetWordWrap(false)
+    cb.label:SetMaxLines(1)
     cb.label:SetText(label)
+    cb.label:SetTextColor(role("body", 0.95, 0.93, 0.87))
     cb:SetScript("OnClick", function(self) set(self:GetChecked() and true or false) end)
     cb:SetScript("OnShow", function(self) self:SetChecked(get() and true or false) end)
     syncers[#syncers + 1] = function() cb:SetChecked(get() and true or false) end
+    prev = cb
     return cb
   end
 
-  check("Sounds", -44,
+  check("Sounds", nil, 0,
     function() return PG.db.profile.sounds end,
     function(v) PG.db.profile.sounds = v end)
 
-  check("Do Not Disturb (no popups or toasts)", -74,
+  check("Do Not Disturb (no popups or toasts)", prev, M.RELATED,
     PG.IsDND,
     function(v)
       if PG.IsDND() ~= v then PG.ToggleDND() end
     end)
 
-  check("Minimap button", -104,
+  check("Minimap button", prev, M.RELATED,
     function()
       local m = PG.db.profile.minimap
       return not (m and m.hide)
@@ -52,7 +122,7 @@ local function build()
       end
     end)
 
-  check("Hide game windows while in combat", -134,
+  check("Hide game windows while in combat", prev, M.RELATED,
     function() return PG.db.profile.hideInCombat end,
     function(v) PG.db.profile.hideInCombat = v end)
 
@@ -60,14 +130,23 @@ local function build()
   -- Games from outside your group (SCOPE.md 5.6). Both checkboxes go through
   -- the local check() helper, so each gets its syncers entry and its OnShow
   -- re-read for free and PG.Settings.Refresh keeps them honest.
+  --
+  -- The heading binds to what FOLLOWS it: a section gap above, a related gap
+  -- below. It used to be the other way round (6px above, 10px below), which
+  -- glued every heading to the block it was meant to be separating from.
   -----------------------------------------------------------------------------
 
-  local scopeHdr = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  scopeHdr:SetPoint("TOPLEFT", 24, -166)
+  local scopeHdr = win:CreateFontString(nil, "OVERLAY", fontOf("T"))
+  scopeHdr:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -M.SECTION)
+  scopeHdr:SetWidth(CONTENT_W)
+  scopeHdr:SetJustifyH("LEFT")
+  scopeHdr:SetWordWrap(false)
+  scopeHdr:SetMaxLines(1)
   scopeHdr:SetText("Games from outside your group")
-  scopeHdr:SetTextColor(0.80, 0.68, 0.42) -- BRASS
+  scopeHdr:SetTextColor(role("title", 1.00, 0.85, 0.46))
+  prev = scopeHdr
 
-  check("Guild games: show me invites", -190,
+  check("Guild games: show me invites", prev, M.RELATED,
     function()
       -- default ON, matching Comm's guildScopeOn()
       local p = PG.db and PG.db.profile
@@ -82,7 +161,7 @@ local function build()
       p.scopeIn.guild = v and true or false
     end)
 
-  check("Public games: join the public channel", -220,
+  check("Public games: join the public channel", prev, M.RELATED,
     function()
       local p = PG.db and PG.db.profile
       return (p and p.publicOptIn) and true or false
@@ -110,23 +189,30 @@ local function build()
       if PG.UI and PG.UI.RefreshScopePickers then PG.UI.RefreshScopePickers() end
     end)
 
-  local scopeNote = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  scopeNote:SetPoint("TOPLEFT", 24, -250)
-  scopeNote:SetPoint("TOPRIGHT", -20, -250)
+  -- No SetHeight: a FontString with a bound width sizes its own height, and
+  -- everything below hangs off that height. Three lines at 320 wide, two in a
+  -- wider slot, four if a word breaks badly - the slider moves either way.
+  local scopeNote = win:CreateFontString(nil, "OVERLAY", fontOf("S"))
+  scopeNote:SetPoint("TOPLEFT", prev, "BOTTOMLEFT", 0, -M.SECTION)
+  scopeNote:SetWidth(CONTENT_W)
   scopeNote:SetJustifyH("LEFT")
-  scopeNote:SetHeight(48) -- three or four wrapped lines at this width
   scopeNote:SetWordWrap(true)
   scopeNote:SetText("Public uses a hidden chat channel. It takes one of your ten "
     .. "channel slots and shows up in the Chat Channels list - nothing is ever "
     .. "printed to your chat windows.")
-  scopeNote:SetTextColor(0.80, 0.68, 0.42) -- BRASS
+  scopeNote:SetTextColor(role("muted", 0.66, 0.66, 0.61))
 
   -- window scale slider. OptionsSliderTemplate keys its Low/High/Text regions
   -- off the frame name, so this is one of our two deliberately named frames
   -- (the other is the minimap button).
+  --
+  -- 28px below the note: the template hangs its "Window scale: N%" label in the
+  -- 12.5px band directly ABOVE the slider's top edge, so the gap has to clear
+  -- the label, not the slider. That band is exactly what the old fixed -310
+  -- anchor put half a pixel under the note.
   local slider = CreateFrame("Slider", "PengyouGamesScaleSlider", win, "OptionsSliderTemplate")
-  slider:SetPoint("TOP", 0, -310)
-  slider:SetSize(240, 17)
+  slider:SetPoint("TOPLEFT", scopeNote, "BOTTOMLEFT", 0, -28)
+  slider:SetSize(CONTENT_W, 17)
   slider:SetMinMaxValues(0.6, 1.6)
   slider:SetValueStep(0.05)
   slider:SetObeyStepOnDrag(true)
@@ -153,25 +239,35 @@ local function build()
     self.__pgSyncing = nil
     labelScale(v)
   end)
-  local sliderHint = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  sliderHint:SetPoint("TOP", slider, "BOTTOM", 0, -6)
-  sliderHint:SetText("Windows also resize individually via their corner grip")
-  sliderHint:SetTextColor(0.66, 0.66, 0.61)
 
-  local resetBtn = PG.UI.Button(win, "Reset window layout", 200, 24, function()
+  -- 20 below the slider, not 6: the template's 60% / 160% labels hang in the
+  -- 15.5px band under the slider, and at -6 the hint's ascenders ran straight
+  -- through them.
+  local sliderHint = win:CreateFontString(nil, "OVERLAY", fontOf("S"))
+  sliderHint:SetPoint("TOPLEFT", slider, "BOTTOMLEFT", 0, -20)
+  sliderHint:SetWidth(CONTENT_W)
+  sliderHint:SetJustifyH("LEFT")
+  sliderHint:SetWordWrap(true)
+  sliderHint:SetText("Windows also resize individually via their corner grip")
+  sliderHint:SetTextColor(role("muted", 0.66, 0.66, 0.61))
+
+  local resetBtn = PG.UI.Button(win, "Reset window layout", M.BTN_W, M.BTN_H, function()
     if PG.UI.ResetLayout then PG.UI.ResetLayout() end
     PG.UI.Toast("Window layout reset.")
   end)
-  resetBtn:SetPoint("TOP", 0, -368)
+  resetBtn:SetPoint("TOPLEFT", sliderHint, "BOTTOMLEFT", 0, -M.SECTION)
 
-  local note = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  note:SetPoint("BOTTOM", 0, 20)
-  note:SetPoint("LEFT", 20, 0)
-  note:SetPoint("RIGHT", -20, 0)
-  note:SetJustifyH("CENTER")
+  -- BOTTOMLEFT/BOTTOMRIGHT, not BOTTOM + LEFT + RIGHT. That triple was the only
+  -- one of its shape in the addon and it stated two conflicting y constraints
+  -- (bottom edge -504, derived centre -260); if the resolver had ever preferred
+  -- the derived centre this sentence would have landed on a checkbox.
+  local note = win:CreateFontString(nil, "OVERLAY", fontOf("S"))
+  note:SetPoint("BOTTOMLEFT", M.INSET, M.FOOTER)
+  note:SetPoint("BOTTOMRIGHT", -M.INSET, M.FOOTER)
+  note:SetJustifyH("LEFT")
   note:SetWordWrap(true)
   note:SetText("Sounds only ever play out of combat, never during a countdown.")
-  note:SetTextColor(0.80, 0.68, 0.42) -- BRASS
+  note:SetTextColor(role("muted", 0.66, 0.66, 0.61))
 end
 
 function PG.Settings.Show()

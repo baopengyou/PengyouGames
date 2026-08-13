@@ -1,6 +1,14 @@
--- Theme.lua - goblin-heist / darkmoon-bookmaker skin layer (SKIN.md section 5).
--- Asset table, palettes, pcall-guarded texture/atlas/sound/model helpers,
--- reusable AnimationGroup factories, pooled coin shower, NPC model handle.
+-- Theme.lua - the shared design layer (SKIN.md section 5).
+-- Asset table, the one palette, the font ramp, the spacing grid, per-game
+-- accents, pcall-guarded texture/atlas/sound/model helpers, reusable
+-- AnimationGroup factories, pooled coin shower, NPC model handle, reveal stage.
+--
+-- ONE DESIGN. There is one backdrop, one border tint, one title treatment, one
+-- five-role font ramp (Theme.FONT / Theme.SetFont), one colour ramp
+-- (Theme.ROLE) and one spacing grid (Theme.METRIC). The "goblin" / "faire" /
+-- "neutral" skins are gone: what survives per game is an ACCENT - one mark,
+-- one colour, one tile - and every entry point that used to take a theme name
+-- now reads that argument as an accent selector (see ACCENT below).
 --
 -- Contract (SKIN.md section 0): every Blizzard art/sound/model call is pcall'd
 -- with a documented fallback; helpers never error and never return nil where a
@@ -116,6 +124,31 @@ local ASSETS = {
   book      = { { file = "Interface\\Icons\\INV_Misc_Book_09" },
                 { file = "Interface\\Spellbook\\Spellbook-Icon" },
                 color = { 0.82, 0.72, 0.55, 1 } },   -- PARCH
+  -- Game tile art (PLAN 2.8). Shipped as PATHS, never file ids: paths are the
+  -- durable addressing scheme (the 12.1 manifest keeps existing entries; only
+  -- new filenames stop being published), and a miss degrades through Theme.Tex
+  -- to BOARD, which the tile design already treats as a legal ground. Each
+  -- source is 256x128 with the picture in the top-left; the tile applies its
+  -- own SetTexCoord AFTER SetTexture (SetTexture resets tex coords - see the
+  -- trap note on Theme.Tex).
+  tile_lg   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-TheMotherlode" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },   -- BOARD
+  tile_pb   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-CinderbrewMeadery" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
+  tile_rps  = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-DomanaarArena" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
+  tile_dr   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-TheaterofPain" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
+  tile_gb   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Casino" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
+  tile_qz   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-TheAcademy" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
 }
 
 -- SKIN.md section 4. Every play goes through Theme.Sound's gates.
@@ -140,31 +173,84 @@ local EMOTE_DUR = {
 local NPC_IDS  = { host = { 6882, 7034, 2454 }, bookie = { 7051, 6882 } }
 local NPC_ICON = { host = "coinpile", bookie = "ticket" }
 
--- Backdrop treatment per theme (SKIN.md 1.3).
-local BACKDROPS = {
-  goblin = {
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border",
-    tile = true, tileSize = 32, edgeSize = 32,
-    insets = { left = 11, right = 11, top = 11, bottom = 11 },
-  },
-  faire = {
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 32, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 },
-  },
-  neutral = {
-    bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
-    edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
-    tile = true, tileSize = 32, edgeSize = 16,
-    insets = { left = 4, right = 4, top = 4, bottom = 4 },
-  },
+-- THE ONE BACKDROP. There are no per-theme grounds any more: every window in
+-- the addon is the same chalkboard, bordered in the same violet, titled in the
+-- same chalk-gold. The carnival identity lives in the display face, the accent
+-- marks, the card faces and the reveal stage - never in a second window ground.
+local BACKDROP = {
+  bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+  edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+  tile = true, tileSize = 32, edgeSize = 16,
+  insets = { left = 4, right = 4, top = 4, bottom = 4 },
 }
-local BORDER_TINT = { goblin = { 1, 1, 1 }, faire = COLORS.VIOLET, neutral = COLORS.BRASS }
-local TITLE_COLOR = { goblin = COLORS.GOLD, faire = COLORS.CHGOLD, neutral = COLORS.GOLD }
+local BORDER_TINT = COLORS.VIOLET   -- one edge colour, a constant, not a table
+local TITLE_COLOR = COLORS.CHGOLD   -- one title colour, a constant, not a table
+
+-------------------------------------------------------------------------------
+-- PER-GAME ACCENT. This is what "theme" means now.
+--
+-- Every public entry point that used to take a theme name (Theme.Skin,
+-- Theme.C, PG.UI.Window, PG.UI.Ask, Theme.Banner, a reveal payload's `theme`)
+-- still takes that argument and the fifteen existing call sites are unchanged.
+-- What the argument SELECTS is different: not a skin, but an accent - one mark
+-- glyph, one dark-safe colour, one tile art key. Nothing about the window's
+-- ground, border, font ramp or spacing depends on it any more.
+--
+-- The accent appears in exactly three places and nowhere else:
+--   1. the mark glyph beside a game's name (tile, Rules tab, Ask popup icon);
+--   2. a rule under a pushed panel's title, and a tile's badge colour;
+--   3. the reveal stage's title colour, edge colour and personal-row marker.
+--
+-- Pass a GAME CODE ("LG" "PB" "RPS" "DR" "GB" "QZ"); pass nothing, or one of
+-- the legacy skin names, to get the house accent.
+-------------------------------------------------------------------------------
+
+local ACCENT = {
+  LG  = { mark = "coin",      color = COLORS.GOLD,    tile = "tile_lg"  },
+  PB  = { mark = "ticket",    color = COLORS.VIOLET,  tile = "tile_pb"  },
+  RPS = { mark = "dice",      color = COLORS.CHGREEN, tile = "tile_rps" },
+  DR  = { mark = "skull",     color = COLORS.CHRED,   tile = "tile_dr"  },
+  GB  = { mark = "greedcoin", color = COLORS.BRASS,   tile = "tile_gb"  },
+  QZ  = { mark = "quiz",      color = COLORS.CHGOLD,  tile = "tile_qz"  },
+  -- The house accent: hub windows, and any caller that names no game.
+  PG  = { mark = "ticket",    color = COLORS.CHGOLD,  tile = "tile_pb"  },
+}
+-- The legacy skin names the call sites still pass. "goblin" was only ever Loot
+-- Goblins, so it keeps that game's accent exactly; "faire" and "neutral" named
+-- grounds that no longer differ, so they resolve to the house accent until a
+-- caller passes its game code instead.
+local ACCENT_ALIAS = { goblin = "LG", faire = "PG", neutral = "PG", plain = "PG" }
 
 local MORPHEUS = "Fonts\\MORPHEUS.TTF"
+
+-- Any accent selector -> a canonical code. Never errors, never returns nil.
+local function accentCode(v)
+  if type(v) ~= "string" then return "PG" end
+  local up = string.upper(v)
+  if ACCENT[up] then return up end
+  return ACCENT_ALIAS[string.lower(v)] or "PG"
+end
+Theme.AccentCode = accentCode
+
+-- The accent record for a code (or legacy name). ALWAYS a table with
+-- .mark (Theme.Mark/Theme.Tex key), .color ({r,g,b}) and .tile (Theme.Tex key).
+function Theme.Accent(code)
+  return ACCENT[accentCode(code)]
+end
+
+-- The accent of the window a widget lives in. Walks up at most 4 parents for
+-- the field Theme.Skin stamps, exactly as the TimerBar and the ScopePicker
+-- used to open-code. Returns the house accent when nothing is stamped.
+function Theme.AccentOf(frame)
+  local host = frame
+  for _ = 1, 4 do
+    if not host then break end
+    local a = host.__pgAccent
+    if a then return ACCENT[accentCode(a)], accentCode(a) end
+    host = host.GetParent and host:GetParent() or nil
+  end
+  return ACCENT.PG, "PG"
+end
 
 -------------------------------------------------------------------------------
 -- Small guarded primitives
@@ -243,8 +329,12 @@ end
 -- For each NAME: t.NAME = {r,g,b} and t.name = "|cffrrggbb".
 -------------------------------------------------------------------------------
 
+-- The argument has never been read (this has always returned one frozen union
+-- of all sixteen colours) and it is kept only so the call sites do not churn.
+-- There is ONE palette. Which colours are legal WHERE is the discipline, and
+-- Theme.ROLE below is where that discipline is written down.
 local paletteCache
-function Theme.C(themeName)
+function Theme.C(accent)
   if not paletteCache then
     paletteCache = {}
     for name, c in pairs(COLORS) do
@@ -256,12 +346,82 @@ function Theme.C(themeName)
 end
 
 -------------------------------------------------------------------------------
+-- THE BOARD ROLE RAMP. The ground is the BOARD everywhere now, so every role
+-- here is a dark-safe colour. Reach for a role, not for a colour name.
+--
+-- FADE, INK, AMBER, LOSS, WIN and PARCH are the parchment material and are
+-- legal at exactly two surfaces: the Ledger sheet and Theme.CardFace's ticket
+-- stub. INK on a frame is a bug: 402c14 on 12141a is 1.1:1.
+-------------------------------------------------------------------------------
+
+Theme.ROLE = {
+  ground = COLORS.BOARD,    -- every window and page interior
+  edge   = COLORS.VIOLET,   -- the one border tint
+  title  = COLORS.CHGOLD,   -- Morpheus text, section heads
+  body   = COLORS.CHALK,    -- the default text colour
+  muted  = COLORS.CHGRAY,   -- sub-lines, hints, timestamps
+  win    = COLORS.CHGREEN,
+  loss   = COLORS.CHRED,    -- including the stamp and destructive labels
+  money  = COLORS.GOLD,     -- money figures and tile labels only
+  detail = COLORS.BRASS,    -- taglines, captions, neutral accent
+  -- reveal-row aliases (REVEAL.md 2.3 role names, same ramp)
+  fade   = COLORS.CHGRAY, gold = COLORS.CHGOLD,
+  silver = COLORS.CHGRAY,  bronze = COLORS.BRASS,
+}
+-- Disabled is `muted` at this alpha, NEVER COLORS.FADE: 6b5c42 is a parchment
+-- colour and reads at ~1.4:1 on the board.
+Theme.DISABLED_ALPHA = 0.55
+
+-------------------------------------------------------------------------------
+-- THE SPACING GRID. Every offset in every file is a multiple of GRID. These
+-- are the shared numbers the six game windows and the three hub windows all
+-- lay out against; do not invent a local variant of one.
+-------------------------------------------------------------------------------
+
+Theme.METRIC = {
+  GRID          = 4,
+  INSET         = 24,  -- page/window side inset, and the roster row inset
+  TITLE_GAP     = 20,  -- window title -> first element
+  SECTION       = 16,  -- gap between sections
+  RELATED       = 8,   -- gap between related elements
+  LINE          = 4,   -- gap between lines
+  ROW_PITCH     = 20,  -- roster row pitch: 12px line + 8 leading
+  ROW_H         = 12,  -- one roster row
+  AUD_Y         = -38, -- audience line: centred, TOP 0, AUD_Y, S role.
+                       -- -38 not -34: the title container is -12..-36, so -34 put
+                       -- this box 2px inside it and title descenders met audience
+                       -- ascenders in all six windows at once.
+  BAR_Y         = -84, -- timer bar: TOPLEFT INSET, BAR_Y
+  BAR_H         = 18,  -- timer bar height (PG.UI.TimerBar builds this)
+  FOOTER        = 16,  -- BOTTOM* offset of the footer button row
+  BTN_W         = 105, -- secondary button (Cancel / Rules / Ledger)
+  BTN_H         = 22,
+  BTN_PRI_W     = 150, -- primary button (Start / Open the table / Join)
+  BTN_PRI_H     = 26,
+  BTN_INLINE_W  = 76,  -- inline button (the Open-games Join)
+  BTN_INLINE_H  = 20,
+  TITLE_RESERVE = 34,  -- px reserved EACH side of a window title (close button)
+  TITLE_TOP     = -12, -- the title container's top offset
+  TITLE_H       = 24,  -- the title container's height
+}
+
+-------------------------------------------------------------------------------
 -- 5.2 / 5.3 / 5.4 Texture and markup helpers
 -------------------------------------------------------------------------------
 
 -- Applies art for key onto an existing Texture. True if themed art rendered,
 -- false if the solid-color fallback was applied (already applied; the return
 -- lets decoration-only callers choose tex:Hide()).
+--
+-- TWO TRAPS FOR CALLERS THAT CROP (the tiles do):
+--   * SetTexCoord must be RE-APPLIED after every SetTexture, including the one
+--     this function performs. Set your coords after calling Theme.Tex, never
+--     before.
+--   * The generated docs name the 4-arg form (left, right, bottom, top). That
+--     is a long-standing doc quirk: the real order is (left, right, top,
+--     bottom), matching the XML and the wiki.
+-- SetTexCoord also carries SecretArgumentsAddAspect in 12.1 - fine for literal
+-- constants, but never feed it anything derived from unit data.
 function Theme.Tex(tex, key)
   if not tex then return false end
   local entry = ASSETS[key]
@@ -320,24 +480,30 @@ local function fileRenders(path)
   return not okG or cur ~= nil
 end
 
+-- MARK_PX is not cosmetic. `|A:name:0:0|a` means "native atlas size" while
+-- `|T file:0|t` means "the font's height", so which step of an asset chain
+-- happened to resolve decided how big the glyph was - the Ledger's inline coin
+-- rendered at a different size from every other glyph in the addon and no
+-- column containing money had a computable width. Both branches now state one
+-- explicit size, in the same height:width order both escapes use.
+local MARK_PX = 14
+
 function Theme.Mark(key)
   local hit = markCache[key]
   if hit ~= nil then return hit end
   local entry = ASSETS[key]
   local mark = ""
-  if entry then
-    for i = 1, #entry do
-      local step = entry[i]
-      if step.atlas then
-        if atlasExists(step.atlas) then
-          mark = "|A:" .. step.atlas .. ":0:0|a"
-          break
-        end
-      elseif step.file then
-        if fileRenders(step.file) then
-          mark = "|T" .. step.file .. ":0|t"
-          break
-        end
+  for i = 1, (entry and #entry or 0) do
+    local step = entry[i]
+    if step.atlas then
+      if atlasExists(step.atlas) then
+        mark = "|A:" .. step.atlas .. ":" .. MARK_PX .. ":" .. MARK_PX .. "|a"
+        break
+      end
+    elseif step.file then
+      if fileRenders(step.file) then
+        mark = "|T" .. step.file .. ":" .. MARK_PX .. ":" .. MARK_PX .. "|t"
+        break
       end
     end
   end
@@ -350,13 +516,64 @@ function Theme.Money(g)
 end
 
 -------------------------------------------------------------------------------
--- 1.2 Typography helpers
+-- THE FONT RAMP. Five roles, five values, one place. Every FontString in the
+-- addon is one of these; nothing else is a size.
+--
+--   D1  Morpheus 24  hero: the reveal-stage title, and the ONE big number a
+--                    game window is allowed (DR ceiling, GB wager)
+--   D2  Morpheus 18  display: window titles, banner, marquee, stamp, strip
+--                    titles, page headers
+--   T   GameFontNormal        12  nav labels, section heads, field labels,
+--                                 button labels
+--   B   GameFontHighlight     12  status lines, notes, prompts, timer text,
+--                                 toast, the Ask body
+--   S   GameFontHighlightSmall 10 roster rows, gain lines, hints, captions
+--
+-- Colour, not size, carries the gold/white distinction: reach for Theme.ROLE.
+--
+-- Use it two ways:
+--   local fs = parent:CreateFontString(nil, "OVERLAY", Theme.FontTemplate("B"))
+--   Theme.SetFont(fs, "D2")     -- on an existing FontString, any role
+--
+-- Only the D roles need SetFont after creation (FontTemplate returns their
+-- Blizzard fallback so a client with no Morpheus still gets the right step).
+-- Theme.Shadow is separate and deliberate: apply it to any text over art.
 -------------------------------------------------------------------------------
 
--- Morpheus display font with Blizzard font-object fallback.
+local FONT_ROLE = {
+  D1 = { size = 24, object = "GameFontNormalHuge"      },
+  D2 = { size = 18, object = "GameFontNormalLarge"     },
+  T  = {            object = "GameFontNormal"          },
+  B  = {            object = "GameFontHighlight"       },
+  S  = {            object = "GameFontHighlightSmall"  },
+}
+Theme.FONT = { D1 = 24, D2 = 18 }   -- the two display sizes, for SetHeader
+
+-- The template name to pass to CreateFontString for a role. Always a string.
+function Theme.FontTemplate(role)
+  local r = FONT_ROLE[role]
+  return (r and r.object) or "GameFontHighlight"
+end
+
+-- Apply a ramp role to an existing FontString. Returns fs.
+function Theme.SetFont(fs, role)
+  if not fs then return fs end
+  local r = FONT_ROLE[role] or FONT_ROLE.B
+  if r.size then
+    Theme.SetHeader(fs, r.size)
+  else
+    local obj = _G[r.object]
+    if obj then pcall(fs.SetFontObject, fs, obj) end
+  end
+  return fs
+end
+
+-- Morpheus display font with Blizzard font-object fallback. Only D1 (24) and
+-- D2 (18) are requested now, so the fallback ladder has exactly one rung per
+-- step instead of flattening four sizes into two.
 function Theme.SetHeader(fs, size)
   if not fs then return end
-  size = size or 16
+  size = size or FONT_ROLE.D2.size
   local ok, applied = pcall(fs.SetFont, fs, MORPHEUS, size, "")
   if not (ok and applied) then
     local obj = (size >= 20) and GameFontNormalHuge or GameFontNormalLarge
@@ -365,10 +582,33 @@ function Theme.SetHeader(fs, size)
 end
 
 -- Standard shadow for text over world/busy art (never for ink-on-parchment).
+-- With one dark ground this is now unconditional on every text over art; the
+-- old `if theme == "faire"` gates were the reason the window title and the
+-- countdown had none.
 function Theme.Shadow(fs)
   if not fs then return end
   pcall(fs.SetShadowColor, fs, 0, 0, 0, 0.8)
   pcall(fs.SetShadowOffset, fs, 1, -1)
+end
+
+-- Fit a single-line FontString inside maxW: measure it unbound, then bind it to
+-- exactly the width it needs, capped. An overlong string then truncates on its
+-- own art instead of spilling onto whatever is behind it. Returns the applied
+-- width, so a caller can grow the art under it to match.
+--
+-- Re-run it after every SetText - the bound width belongs to the string that
+-- was measured, not to the region.
+function Theme.CapText(fs, maxW)
+  if not fs then return 0 end
+  maxW = (type(maxW) == "number" and maxW > 0) and maxW or 0
+  pcall(fs.SetWordWrap, fs, false)
+  pcall(fs.SetMaxLines, fs, 1)
+  pcall(fs.SetWidth, fs, 0)
+  local ok, w = pcall(fs.GetStringWidth, fs)
+  local need = (ok and type(w) == "number" and w > 0) and w or 0
+  if maxW > 0 and need > maxW then need = maxW end
+  if need > 0 then pcall(fs.SetWidth, fs, need) end
+  return need
 end
 
 -------------------------------------------------------------------------------
@@ -550,34 +790,26 @@ end
 -- 5.5 Banner (A7)
 -------------------------------------------------------------------------------
 
-local function buildBanner(parent, themeName)
+local BANNER_W, BANNER_H = 260, 26   -- the bar at rest; it grows to a long line
+
+local function buildBanner(parent)
   local fx = Theme.EnsureFX(parent)
   local ok, b = pcall(CreateFrame, "Frame", nil, fx)
   if not (ok and b) then return nil end
-  b:SetSize(260, 42)
+  b:SetSize(BANNER_W, 42)
+  -- one composition: dark bar, chalk-gold display text. The gold-ribbon variant
+  -- is gone with the parchment it belonged to.
   local art = b:CreateTexture(nil, "ARTWORK")
-  local textColor
-  if themeName == "faire" then
-    -- deliberate chalk-bar composition: dark bar, chalk-gold text (rule 6.1)
-    art:SetPoint("CENTER")
-    art:SetSize(260, 26)
-    art:SetColorTexture(COLORS.BOARD[1], COLORS.BOARD[2], COLORS.BOARD[3], 0.9)
-    textColor = COLORS.CHGOLD
-  else
-    if Theme.Tex(art, "ribbon") then
-      art:SetAllPoints(b)
-    else
-      -- ribbon atlas failed: solid GOLD bar 260x26 (color already applied)
-      art:SetPoint("CENTER")
-      art:SetSize(260, 26)
-    end
-    textColor = COLORS.INK
-  end
-  b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  art:SetPoint("CENTER")
+  art:SetSize(BANNER_W, BANNER_H)
+  art:SetColorTexture(COLORS.BOARD[1], COLORS.BOARD[2], COLORS.BOARD[3], 0.9)
+  b.art = art
+  b.text = b:CreateFontString(nil, "OVERLAY", Theme.FontTemplate("D2"))
   b.text:SetPoint("CENTER", 0, 2)
-  Theme.SetHeader(b.text, 16)
-  pcall(b.text.SetTextColor, b.text, textColor[1], textColor[2], textColor[3])
-  Theme.Shadow(b.text) -- banner text always sits on ribbon/bar art
+  Theme.SetFont(b.text, "D2")
+  pcall(b.text.SetJustifyH, b.text, "CENTER")
+  pcall(b.text.SetTextColor, b.text, TITLE_COLOR[1], TITLE_COLOR[2], TITLE_COLOR[3])
+  Theme.Shadow(b.text) -- banner text always sits on bar art
   local g = newGroup(b)
   if g then
     local slide = newAnim(g, "Translation")
@@ -615,11 +847,13 @@ end
 -- One banner per parent, reused. Text is set BEFORE the slide plays and never
 -- changes mid-flight (rule 6.2). Returns the frame; plays nothing if parent is
 -- not visible.
-function Theme.Banner(parent, text, themeName)
+-- accent (third argument) is accepted and ignored: there is one banner
+-- composition. The fifteen call sites keep their shape.
+function Theme.Banner(parent, text, accent)
   if not parent then return nil end
   local b = parent.__pgBanner
   if b == nil then
-    b = buildBanner(parent, themeName)
+    b = buildBanner(parent)
     parent.__pgBanner = b or false
   end
   if not b then return nil end
@@ -632,7 +866,23 @@ function Theme.Banner(parent, text, themeName)
   else
     b:SetPoint("TOP", parent, "TOP", -40, -60)
   end
-  if b.text then b.text:SetText(tostring(text or "")) end
+  if b.text then
+    -- 260 px of art under a FontString with no width cap used to spill a long
+    -- line straight off the bar (the marquee fixed exactly this and it was
+    -- never back-ported). Grow the bar to the line up to the host width, then
+    -- cap the text so anything still too long truncates ON the bar. The cap
+    -- keeps 40 px of slack each side so the -40 slide-in never starts off-frame.
+    b.text:SetText(tostring(text or ""))
+    local maxW = BANNER_W
+    local okW, pw = pcall(parent.GetWidth, parent)
+    if okW and type(pw) == "number" and pw > 0 then
+      maxW = math.max(BANNER_W, pw - 80)
+    end
+    local need = Theme.CapText(b.text, maxW - 24)
+    local barW = math.max(BANNER_W, math.min(maxW, need + 24))
+    pcall(b.SetSize, b, barW, 42)
+    if b.art then pcall(b.art.SetSize, b.art, barW, BANNER_H) end
+  end
   if not parent:IsVisible() then return b end
   if b.group then
     pcall(b.group.Stop, b.group)
@@ -654,7 +904,10 @@ local function buildStamp(parent)
   local ok, s = pcall(CreateFrame, "Frame", nil, fx)
   if not (ok and s) then return nil end
   s:SetSize(120, 34)
-  local c = COLORS.LOSS
+  -- CHRED, not LOSS. The dark 8f1600 was designed for the parchment window and
+  -- three of its four callers already put it on the board at 2.0:1; with one
+  -- dark ground that would have been all four. CHRED on BOARD is 7.97:1.
+  local c = COLORS.CHRED
   local function edge()
     local t = s:CreateTexture(nil, "BORDER")
     t:SetColorTexture(c[1], c[2], c[3], 0.9)
@@ -676,10 +929,12 @@ local function buildStamp(parent)
   right:SetPoint("TOPRIGHT")
   right:SetPoint("BOTTOMRIGHT")
   right:SetWidth(2)
-  s.text = s:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  s.text = s:CreateFontString(nil, "OVERLAY", Theme.FontTemplate("D2"))
   s.text:SetPoint("CENTER")
-  Theme.SetHeader(s.text, 15)
+  Theme.SetFont(s.text, "D2")
+  pcall(s.text.SetJustifyH, s.text, "CENTER")
   pcall(s.text.SetTextColor, s.text, c[1], c[2], c[3])
+  Theme.Shadow(s.text) -- the one reveal surface that never had it
   local g = newGroup(s)
   if g then
     local sc = newAnim(g, "Scale")
@@ -738,9 +993,15 @@ function Theme.Stamp(parent, text)
     s:SetPoint("CENTER", parent, "CENTER", 0, 20)
   end
   s.text:SetText(tostring(text or ""))
-  local tw, th = 60, 16
-  local okW, wv = pcall(s.text.GetStringWidth, s.text)
-  if okW and wv and wv > 0 then tw = wv end
+  -- The slam plays the box at 2.0x, so a stamp wider than half the host runs
+  -- off both edges mid-animation. Cap the line at (host/2 - 16) and the final
+  -- box can never exceed the host.
+  local cap = 200
+  local okP, pw = pcall(parent.GetWidth, parent)
+  if okP and type(pw) == "number" and pw > 0 then cap = math.max(60, pw / 2 - 16) end
+  local tw = Theme.CapText(s.text, cap)
+  if tw <= 0 then tw = 60 end
+  local th = 16
   local okH, hv = pcall(s.text.GetStringHeight, s.text)
   if okH and hv and hv > 0 then th = hv end
   s:SetSize(math.max(tw + 16, 60), math.max(th + 16, 28))
@@ -1004,9 +1265,24 @@ function Theme.CardFace(parent, label, w, h)
   hl:SetAllPoints()
   hl:SetColorTexture(1, 0.82, 0, 0.18)
   pcall(hl.SetBlendMode, hl, "ADD")
-  pcall(b.SetNormalFontObject, b, GameFontHighlightSmall)
-  pcall(b.SetHighlightFontObject, b, GameFontHighlightSmall)
-  pcall(b.SetDisabledFontObject, b, GameFontDisableSmall or GameFontHighlightSmall)
+  -- 16, not 10: these are the addon's PRIMARY actions (SHARE / HOARD / ROLL /
+  -- the three throws) on 46 px buttons, and the plain-button fallback path in
+  -- PG.UI.CardButton renders 16 too - the same button used to be two sizes
+  -- depending on whether an atlas resolved.
+  local CARD_FONT = GameFontNormalLarge
+  pcall(b.SetNormalFontObject, b, CARD_FONT)
+  pcall(b.SetHighlightFontObject, b, CARD_FONT)
+  pcall(b.SetDisabledFontObject, b, GameFontDisableLarge or CARD_FONT)
+  -- The ink colour must be re-applied on every state change: SetFontObject
+  -- re-copies ALL attributes including colour, so the constructor's
+  -- SetTextColor(INK) was discarded by the first Disable()/Enable() cycle and
+  -- the label came back WHITE on a light parchment face for the rest of the
+  -- session. Both games call SetEnabled() every RefreshUI.
+  local ink = COLORS.INK
+  local function inkify(self)
+    if self.text then pcall(self.text.SetTextColor, self.text, ink[1], ink[2], ink[3]) end
+  end
+  b.__pgInk = inkify
   -- disabled visual state: the plain-button fallback grays out via its
   -- template, so the themed face must too (desaturate + dim the parchment)
   b:SetScript("OnDisable", function(self)
@@ -1014,19 +1290,25 @@ function Theme.CardFace(parent, label, w, h)
       pcall(self.face.SetDesaturated, self.face, true)
       pcall(self.face.SetAlpha, self.face, 0.55)
     end
+    inkify(self)
   end)
   b:SetScript("OnEnable", function(self)
     if self.face then
       pcall(self.face.SetDesaturated, self.face, false)
       pcall(self.face.SetAlpha, self.face, 1)
     end
+    inkify(self)
   end)
   b:SetText(label or "")
   local okF, fs = pcall(b.GetFontString, b)
   if okF and fs then
     b.text = fs
-    local ink = COLORS.INK
     pcall(fs.SetTextColor, fs, ink[1], ink[2], ink[3]) -- dark ink on parchment card
+    -- a label never spills past the card: bound, single line, centred
+    pcall(fs.SetJustifyH, fs, "CENTER")
+    pcall(fs.SetWordWrap, fs, false)
+    pcall(fs.SetMaxLines, fs, 1)
+    pcall(fs.SetWidth, fs, math.max(8, (w or 0) - 12))
   end
   pcall(b.SetPushedTextOffset, b, 1, -1)
   b.__pgCard = true
@@ -1034,8 +1316,9 @@ function Theme.CardFace(parent, label, w, h)
 end
 
 -------------------------------------------------------------------------------
--- 2.4.1 Goblin timer-bar skin. Fallback: keep the current UI-StatusBar look.
--- The bar and its text NEVER animate; color constant for the whole round.
+-- The timer-bar skin, now universal (it used to be gated on the goblin theme).
+-- Fallback: keep the plain UI-StatusBar look. The bar and its text NEVER
+-- animate; the colour is constant for the whole round.
 -------------------------------------------------------------------------------
 
 function Theme.TimerBar(bar)
@@ -1046,7 +1329,10 @@ function Theme.TimerBar(bar)
     skinned = pcall(tex.SetAtlas, tex, "lootroll-timer-fill", false)
   end
   if not skinned then return bar end
-  pcall(bar.SetStatusBarColor, bar, 1, 0.85, 0.4)
+  -- Darkened from (1, 0.85, 0.4). That bright gold put the white countdown at
+  -- 1.38:1 - invisible for the first half of every timer - and this skin is
+  -- now on every bar in the suite rather than on Loot Goblins alone. 4.6:1.
+  pcall(bar.SetStatusBarColor, bar, 0.72, 0.52, 0.16)
   if atlasExists("lootroll-timer-background") then
     local bg = bar:CreateTexture(nil, "BACKGROUND", nil, 2)
     bg:SetAllPoints()
@@ -1061,29 +1347,35 @@ function Theme.TimerBar(bar)
 end
 
 -------------------------------------------------------------------------------
--- 5.1 Skin: backdrop + title treatment + FX wiring + pop-on-show.
--- Idempotent; re-calling (even with a different theme) only re-applies the
--- visual treatment - hooks and fx wiring install exactly once.
+-- Skin: the one backdrop + the one title treatment + FX wiring + pop-on-show.
+-- Idempotent; re-calling only re-applies the visual treatment - hooks and fx
+-- wiring install exactly once.
+--
+-- The second argument is an ACCENT SELECTOR (a game code, or nil), NOT a skin
+-- name. It stamps win.__pgAccent for the widgets that want the host game's
+-- mark or colour; it changes nothing about the ground, the border or the type.
 -------------------------------------------------------------------------------
 
-function Theme.Skin(win, themeName)
+function Theme.Skin(win, accent)
   if not win then return win end
-  if not BACKDROPS[themeName] then themeName = "neutral" end
   Theme.EnsureFX(win)
-  win.__pgTheme = themeName
+  local code = accentCode(accent)
+  win.__pgAccent = code
+  win.__pgTheme = code   -- legacy field name; __pgAccent is the canonical one
   if win.SetBackdrop then
     -- SetBackdrop succeeds silently when a file is missing (it would simply
     -- render nothing, replacing the working plain backdrop with a transparent
     -- frame), so gate on file existence - pcall alone cannot see that failure
-    local bd = BACKDROPS[themeName]
-    local usable = fileExists(bd.bgFile) and fileExists(bd.edgeFile)
-    local ok = usable and pcall(win.SetBackdrop, win, bd)
+    local usable = fileExists(BACKDROP.bgFile) and fileExists(BACKDROP.edgeFile)
+    local ok = usable and pcall(win.SetBackdrop, win, BACKDROP)
     if ok then
       pcall(win.SetBackdropColor, win, 1, 1, 1, 1)
-      local t = BORDER_TINT[themeName]
-      pcall(win.SetBackdropBorderColor, win, t[1], t[2], t[3], 1)
-    elseif themeName == "faire" then
-      -- backdrop unusable: paint the chalkboard directly
+      pcall(win.SetBackdropBorderColor, win,
+            BORDER_TINT[1], BORDER_TINT[2], BORDER_TINT[3], 1)
+      if win.__pgBoardFallback then win.__pgBoardFallback:Hide() end
+    else
+      -- backdrop unusable: paint the chalkboard directly. This used to be the
+      -- faire-only branch; it is the primary fallback now.
       if not win.__pgBoardFallback then
         local tex = win:CreateTexture(nil, "BACKGROUND")
         tex:SetPoint("TOPLEFT", 4, -4)
@@ -1093,30 +1385,13 @@ function Theme.Skin(win, themeName)
       end
       win.__pgBoardFallback:Show()
     end
-    -- (goblin/neutral backdrop failure: SetBackdrop was never called, so the
-    -- plain tooltip backdrop from PG.UI.Window's applyBackdrop remains)
-  end
-  if themeName == "goblin" then
-    if not win.__pgParch then
-      local tex = win:CreateTexture(nil, "ARTWORK", nil, -8)
-      tex:SetPoint("TOPLEFT", 11, -11)
-      tex:SetPoint("BOTTOMRIGHT", -11, 11)
-      Theme.Tex(tex, "parchment") -- fail -> solid PARCH (applied by Tex)
-      win.__pgParch = tex
-    end
-    win.__pgParch:Show()
-  elseif win.__pgParch then
-    win.__pgParch:Hide()
-  end
-  if win.__pgBoardFallback and themeName ~= "faire" then
-    win.__pgBoardFallback:Hide()
   end
   local fs = win.title
   if fs then
-    Theme.SetHeader(fs, 20)
-    local c = TITLE_COLOR[themeName]
-    pcall(fs.SetTextColor, fs, c[1], c[2], c[3])
-    if themeName == "faire" then Theme.Shadow(fs) end
+    Theme.SetFont(fs, "D2")
+    pcall(fs.SetTextColor, fs, TITLE_COLOR[1], TITLE_COLOR[2], TITLE_COLOR[3])
+    Theme.Shadow(fs)   -- unconditional now; the faire gate is what left the
+                       -- Loot Goblins title unshadowed at 1.32:1
   end
   if not win.__pgPopHooked then
     win.__pgPopHooked = true
@@ -1154,15 +1429,13 @@ local RV_ROW_TOP  = -128  -- row 1 offset from the stage TOP
 local RV_ROW_STEP = -22
 local RV_IDLE, RV_PLAYING, RV_HOLD, RV_FADING = 0, 1, 2, 3
 
--- Row color roles. The ground is always the BOARD scrim, so only dark-safe
--- colors appear here (REVEAL.md 2.3).
-local RV_ROLE = {
-  body   = COLORS.CHALK,  win    = COLORS.CHGREEN, loss  = COLORS.CHRED,
-  fade   = COLORS.CHGRAY, gold   = COLORS.CHGOLD,  silver = COLORS.CHGRAY,
-  bronze = COLORS.BRASS,
-}
-local RV_TITLE_C   = { goblin = COLORS.GOLD, faire = COLORS.CHGOLD }
-local RV_MARKER    = { goblin = "coin", faire = "ticket" }
+-- Row color roles: the stage's own ramp, which is now the whole addon's ramp
+-- (the ground here was always the BOARD scrim, so it was already dark-safe -
+-- promoting it is most of what the single design IS).
+local RV_ROLE = Theme.ROLE
+-- The title colour and the personal-row marker come from the payload's accent
+-- now, not from a theme table. All five faire games used to share one ticket;
+-- each game gets its own mark the moment it passes its code.
 local RV_BURST_ART = { coins = "goldicon", stars = "star", tickets = "ticket" }
 
 local rvStage             -- nil = unbuilt, false = construction failed
@@ -1221,7 +1494,11 @@ local function rvNormalize(payload)
   local title = rvStr(payload.title)
   if not title then return nil end
   local p = {}
-  p.theme    = (rvStr(payload.theme) == "goblin") and "goblin" or "faire"
+  -- `game` is the new key (a game code); `theme` is the shipped one and still
+  -- works. Either resolves through accentCode, which never returns nil - the
+  -- old RV_TITLE_C[p.theme] indexed ec[1] with no guard, so a renamed key would
+  -- have hard-errored every reveal in the suite.
+  p.accent   = accentCode(rvStr(payload.game) or rvStr(payload.theme))
   p.variant  = (rvStr(payload.variant) == "podium") and "podium" or "cascade"
   p.title    = title
   p.subtitle = rvStr(payload.subtitle)
@@ -1389,10 +1666,15 @@ local function rvBuild()
   end
 
   -- title: the slam
-  local title = rvFS(s, "GameFontNormalHuge", 24)
+  local title = rvFS(s, Theme.FontTemplate("D1"), Theme.FONT.D1)
   s.rvTitle = title
   if title then
     title:SetPoint("TOP", s, "TOP", 0, -56)
+    -- 28 px of line in a 36 px gap: a wrapped title overlaps the subtitle by
+    -- 20. Truncate instead. (The SUBTITLE keeps wrapping - it has 8 px of slack
+    -- and it is the one region here carrying a sentence.)
+    title:SetWordWrap(false)
+    title:SetMaxLines(1)
     title:SetAlpha(0)
     local tg = newGroup(title)
     if tg then
@@ -1410,7 +1692,7 @@ local function rvBuild()
   end
 
   -- subtitle
-  local sub = rvFS(s, "GameFontNormal")
+  local sub = rvFS(s, Theme.FontTemplate("B"))
   s.rvSub = sub
   if sub then
     sub:SetPoint("TOP", s, "TOP", 0, -92)
@@ -1433,10 +1715,16 @@ local function rvBuild()
   s.rvRow = {}
   for i = 1, RV_ROWS do
     local rec = { slot = i }
-    local fs = rvFS(s, "GameFontHighlight")
+    local fs = rvFS(s, Theme.FontTemplate("B"))
     rec.fs = fs
     if fs then
       fs:SetPoint("TOP", s, "TOP", 0, RV_ROW_TOP + RV_ROW_STEP * (i - 1))
+      -- Rows sit on a FIXED 22 px pitch and rvSettleRow re-pins each one to its
+      -- slot on completion, so a wrapped row lands on its neighbour every play,
+      -- skip included. Rows carry full Name-Realm plus money and are the most
+      -- likely region here to grow: never wrap.
+      fs:SetWordWrap(false)
+      fs:SetMaxLines(1)
       fs:SetAlpha(0)
       fs:Hide()
       local mk = s:CreateTexture(nil, "ARTWORK")
@@ -1459,15 +1747,19 @@ local function rvBuild()
     s.rvRow[i] = rec
   end
 
-  -- marquee: slides in and STAYS (unlike Banner). Composition per theme is the
-  -- buildBanner recipe, re-applied only when the theme changes.
+  -- marquee: slides in and STAYS (unlike Banner). One composition, built here
+  -- once: the buildBanner bar, sized per play.
   local okM, mq = pcall(CreateFrame, "Frame", nil, fx)
   if okM and mq then
     mq:SetSize(300, 30)
     mq.art = mq:CreateTexture(nil, "ARTWORK")
-    mq.text = mq:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    mq.art:SetPoint("CENTER")
+    mq.art:SetColorTexture(COLORS.BOARD[1], COLORS.BOARD[2], COLORS.BOARD[3], 0.9)
+    mq.text = mq:CreateFontString(nil, "OVERLAY", Theme.FontTemplate("D2"))
     mq.text:SetPoint("CENTER", 0, 2)
-    Theme.SetHeader(mq.text, 16)
+    Theme.SetFont(mq.text, "D2")
+    mq.text:SetJustifyH("CENTER")
+    mq.text:SetTextColor(TITLE_COLOR[1], TITLE_COLOR[2], TITLE_COLOR[3])
     Theme.Shadow(mq.text)
     mq:SetAlpha(0)
     mq:Hide()
@@ -1782,7 +2074,8 @@ local function rvPlay(p)
     pcall(s.rvScrim.Show, s.rvScrim)
     pcall(s.rvScrim.SetAlpha, s.rvScrim, s.rvScrimG and 0 or 0.85)
   end
-  local ec = RV_TITLE_C[p.theme]
+  local acc = Theme.Accent(p.accent)
+  local ec = acc.color
   for i = 1, 4 do
     local e = s.rvEdge[i]
     if e then
@@ -1814,7 +2107,7 @@ local function rvPlay(p)
   end
 
   -- rows: text, color, composition, pre-play offset
-  local markerKey = RV_MARKER[p.theme]
+  local markerKey = acc.mark
   local field = 0
   for i = 1, RV_ROWS do
     local rec = s.rvRow[i]
@@ -1899,43 +2192,18 @@ local function rvPlay(p)
     if p.marquee then
       s.rvMqUsed = true
       s.rvMqY = RV_ROW_TOP + RV_ROW_STEP * n - 12
-      if s.rvMqTheme ~= p.theme then
-        s.rvMqTheme = p.theme
-        local art = mq.art
-        pcall(art.ClearAllPoints, art)
-        mq.artFull = false -- art sized per play below unless it fills the frame
-        if p.theme == "goblin" then
-          if Theme.Tex(art, "ribbon") then
-            pcall(art.SetAllPoints, art, mq)
-            mq.artFull = true -- the ribbon stretches with the frame
-          else
-            pcall(art.SetPoint, art, "CENTER") -- ribbon failed: solid gold bar
-          end
-          pcall(mq.text.SetTextColor, mq.text, COLORS.INK[1], COLORS.INK[2], COLORS.INK[3])
-        else
-          pcall(art.SetPoint, art, "CENTER")
-          pcall(art.SetColorTexture, art, COLORS.BOARD[1], COLORS.BOARD[2],
-                COLORS.BOARD[3], 0.9)
-          pcall(mq.text.SetTextColor, mq.text, COLORS.CHGOLD[1], COLORS.CHGOLD[2],
-                COLORS.CHGOLD[3])
-        end
-      end
-      -- The ribbon is 300 px of art under a FontString with no width cap, so a
-      -- long line used to spill its INK text off the art and onto the near-
-      -- black scrim (SKIN.md: INK never sits on the scrim). Measure the string
-      -- unbound, grow the ribbon to it up to the stage width, then cap the text
-      -- so anything still too long truncates ON the ribbon.
-      pcall(mq.text.SetWordWrap, mq.text, false)
-      pcall(mq.text.SetWidth, mq.text, 0)
+      -- One composition, built once in rvBuild (dark bar, chalk-gold display
+      -- text). The per-theme ribbon branch is gone with the parchment.
+      --
+      -- The bar is art under a FontString, so it keeps the recipe that fixed
+      -- it: measure the string unbound, grow the bar to it up to the stage
+      -- width, then cap the text so anything still too long truncates ON the
+      -- bar rather than spilling onto the near-black scrim.
       pcall(mq.text.SetText, mq.text, p.marquee)
-      local mqW = 300
-      local okT, tw = pcall(mq.text.GetStringWidth, mq.text)
-      if okT and type(tw) == "number" and tw > 0 then
-        mqW = math.max(300, math.min(w - 40, tw + 24))
-      end
+      local need = Theme.CapText(mq.text, math.max(0, w - 64))
+      local mqW = math.max(300, math.min(w - 40, need + 24))
       pcall(mq.SetSize, mq, mqW, 30)
-      pcall(mq.text.SetWidth, mq.text, mqW - 24)
-      if not mq.artFull then pcall(mq.art.SetSize, mq.art, mqW, 26) end
+      pcall(mq.art.SetSize, mq.art, mqW, 26)
       pcall(mq.ClearAllPoints, mq)
       pcall(mq.SetPoint, mq, "TOP", s, "TOP", s.rvMqG and -40 or 0, s.rvMqY)
       pcall(mq.SetAlpha, mq, s.rvMqG and 0 or 1)

@@ -25,6 +25,11 @@ PG.PB = {}
 -- Read by PG.UI.ScopePicker (SCOPE.md 1.2 / 5.2).
 PG.PB.SCOPES = { group = true, guild = false, public = false }
 
+-- Window layout, on the shared spacing grid (PG.Theme.METRIC). Mirrored as a
+-- literal because file scope may not read another module's tables; every
+-- offset in this file is a multiple of GRID = 4.
+local INSET = 24            -- METRIC.INSET
+
 -- The Pull Book NEVER takes the single round-based seat (CONCURRENCY.md I10):
 -- it is passive pre-pull betting and runs alongside anything else in the suite.
 -- Since 1.1.0 the launcher's Join gate reads this flag instead of naming "PB"
@@ -88,8 +93,8 @@ local BOOKIE_AUTHORED = { CLOSE = true, HB = true, FD = true }
 -- absent, and no gameplay path branches on any of it.
 -------------------------------------------------------------------------------
 
--- Faire palette, literal spec values (SKIN.md 1.1); refreshed from PG.Theme.C
--- at init when the theme layer is present (the values are identical).
+-- The board palette, literal spec values (SKIN.md 1.1); refreshed from
+-- PG.Theme.C at init when the theme layer is present (values identical).
 local P = {
   chgold = "|cffffd876", chgreen = "|cff7deda4", chred = "|cffff8a70",
   chgray = "|cffa8a89c", win = "|cff145214",
@@ -161,7 +166,7 @@ local attempt
 local lastSnap        -- bookie's latest out-of-combat roster snapshot { [guid] = { name, role } }
 
 local strip           -- bet strip frame (NOT Safety-registered; managed manually)
-local dlg, stakeBox, lineBox, statusFS, closeBtn, configWidgets, picker
+local dlg, stakeBox, lineBox, statusFS, statusHead, closeBtn, configWidgets, picker
 local bookieNPC       -- the dialog's goblin bookie handle (Emote self-gates)
 local pullAt = 0      -- GetTime() of the last pull-timer expiry (see PULL_GRACE)
 
@@ -456,7 +461,7 @@ local function emitReport(rep, rec, title, emote)
   -- settlement info is never stale, but the stage must still answer the pull
   -- gates at the moment the engine drains it, not just when we hand it over
   local payload = {
-    theme = "faire", anchor = { mode = "screen" },
+    game = "PB", anchor = { mode = "screen" },
     title = title,
     subtitle = rep.sub,
     rows = rows,
@@ -509,7 +514,7 @@ local function closePodium(rec, sub)
     }
   end
   local payload = {
-    theme = "faire", anchor = { mode = "screen" }, variant = "podium",
+    game = "PB", anchor = { mode = "screen" }, variant = "podium",
     title = "THE BOOK CLOSES",
     subtitle = sub,
     rows = rows,
@@ -809,9 +814,16 @@ local function buildStrip()
   -- FX registry + instant OnHide Stop contract for the lock pop (the strip's
   -- only animation); never Safety-registered, this module hides it manually
   if PG.Theme and PG.Theme.EnsureFX then PG.Theme.EnsureFX(strip) end
-  strip.title = strip:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  strip.title:SetPoint("TOP", 0, -10)
-  if PG.Theme and PG.Theme.SetHeader then PG.Theme.SetHeader(strip.title, 14) end
+  -- The strip's own title: display face at D2, like every other display line
+  -- in the addon (Morpheus 14 was a fifth size for one string), centred with
+  -- an explicit width pair rather than by anchoring TOP and hoping.
+  strip.title = strip:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge") -- D2
+  strip.title:SetPoint("TOPLEFT", INSET, -10)
+  strip.title:SetPoint("TOPRIGHT", -INSET, -10)
+  strip.title:SetJustifyH("CENTER")
+  strip.title:SetWordWrap(false)
+  strip.title:SetMaxLines(1)
+  if PG.Theme and PG.Theme.SetFont then PG.Theme.SetFont(strip.title, "D2") end
   strip.title:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   shadow(strip.title)
   strip.rows, strip.tallies, strip.pins = {}, {}, {}
@@ -1214,15 +1226,18 @@ local function bookieClose()
   closeBook(book, "You closed the Pull Book.")
 end
 
+-- One field row, the same shape as the other five games' (F15): label LEFT at
+-- the shared inset, box right-anchored at the same inset, box 2px above the
+-- label's line. It used to sit at 24/-30 with the label 4px lower.
 local function numBox(parent, labelText, defaultText, maxLetters, y)
-  local label = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  label:SetPoint("TOPLEFT", 24, y - 4)
+  local label = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")     -- T
+  label:SetPoint("TOPLEFT", INSET, y)
   label:SetText(labelText)
   label:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3]) -- chalk on the board
   shadow(label)
   local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
   eb:SetSize(70, 20)
-  eb:SetPoint("TOPRIGHT", -30, y)
+  eb:SetPoint("TOPRIGHT", -INSET, y + 2)
   eb:SetAutoFocus(false)
   eb:SetNumeric(true)
   eb:SetMaxLetters(maxLetters)
@@ -1230,23 +1245,32 @@ local function numBox(parent, labelText, defaultText, maxLetters, y)
   return eb, label
 end
 
+-- 340x340 -> 340x380. Three things had to fit that did not: the audience block
+-- is 58 tall now (its hint used to render 13px outside the rect it declared),
+-- the open-book status panel is bounded instead of growing without limit, and
+-- the goblin bookie had to move out of the bottom-LEFT corner so the Rules
+-- button can sit where it sits in the other five dialogs (F12) - the two used
+-- to overlap by 1px, with 9px of Rules unclickable under the resize grip.
 local function buildDialog()
-  dlg = PG.UI.Window("pullbook", "The Pull Book", 340, 340, "faire")
+  dlg = PG.UI.Window("pullbook", "The Pull Book", 340, 380, "PB")
   local stakeLabel, lineLabel, hint, openBtn, poster, posterOK
   -- notice-board poster (SKIN.md 2.6). The poster slot is positioned whether
   -- or not the atlas renders, so the layout never depends on the art: the
   -- hint always sits in the slot, restyled per surface.
   poster = dlg:CreateTexture(nil, "ARTWORK")
   poster:SetSize(300, 88)
-  poster:SetPoint("TOP", 0, -34)
+  poster:SetPoint("TOP", 0, -40)   -- 4 under the title container (-12..-36)
   posterOK = (PG.Theme and PG.Theme.Tex) and PG.Theme.Tex(poster, "warboard") or false
   if not posterOK then poster:Hide() end
   dlg.__pgStampSlot = poster -- BOOK OPEN/CLOSED stamps slam across the poster
-  hint = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  hint = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")         -- S
   hint:SetPoint("TOPLEFT", poster, "TOPLEFT", 18, -16)
   hint:SetPoint("TOPRIGHT", poster, "TOPRIGHT", -18, -16)
-  hint:SetJustifyH("LEFT")
+  hint:SetJustifyH("LEFT")   -- body copy, like every other dialog hint
+  hint:SetJustifyV("TOP")
+  hint:SetHeight(48)
   hint:SetWordWrap(true)
+  hint:SetMaxLines(4)
   hint:SetText("Bets open on a strip at every ready check or pull timer. All gold is virtual - settle up after.")
   if posterOK then
     hint:SetTextColor(P.INK[1], P.INK[2], P.INK[3]) -- ink on parchment, no shadow
@@ -1271,32 +1295,57 @@ local function buildDialog()
       end,
     })
     picker:SetPoint("TOPLEFT", dlg, "TOPLEFT", 0, -200)
+    picker:SetPoint("TOPRIGHT", dlg, "TOPRIGHT", 0, -200)
   end
-  openBtn = PG.UI.Button(dlg, mark("ticket") .. " Open book", 150, 24, tryOpenBook)
-  openBtn:SetPoint("BOTTOM", 30, 18)
-  -- bottom-LEFT belongs to the goblin bookie here, so the rules sit right
-  local dlgRules = PG.UI.Button(dlg, "Rules", 56, 22, function()
+  -- The primary button is centred and the Rules button sits BOTTOMLEFT 16,18
+  -- at 60x22, exactly as in the other five dialogs (F12). The +30 x-offset
+  -- pushed "Open book" onto "Rules" in both dialog states.
+  openBtn = PG.UI.Button(dlg, mark("ticket") .. " Open book", 150, 26, tryOpenBook)
+  openBtn:SetPoint("BOTTOM", 0, 18)
+  local dlgRules = PG.UI.Button(dlg, "Rules", 60, 22, function()
     if PG.Rules and PG.Rules.Show then PG.Rules.Show("PB") end
   end)
-  dlgRules:SetPoint("BOTTOMRIGHT", -10, 18)
-  statusFS = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  statusFS:SetPoint("TOPLEFT", 24, -56)
-  statusFS:SetPoint("TOPRIGHT", -24, -56)
-  statusFS:SetJustifyH("LEFT")
+  dlgRules:SetPoint("BOTTOMLEFT", 16, 18)
+  -- The open-book panel: one centred display headline and a bounded body. The
+  -- body used to have no height and no line cap while carrying four real
+  -- paragraphs plus one line per overheard book, so it cleared the bookie by
+  -- luck and grew towards him with every book in earshot (A11).
+  statusHead = dlg:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")  -- D2
+  statusHead:SetPoint("TOPLEFT", INSET, -56)
+  statusHead:SetPoint("TOPRIGHT", -INSET, -56)
+  statusHead:SetJustifyH("CENTER")
+  statusHead:SetWordWrap(false)
+  statusHead:SetMaxLines(1)
+  if PG.Theme and PG.Theme.SetFont then PG.Theme.SetFont(statusHead, "D2") end
+  statusHead:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
+  shadow(statusHead)
+  statusFS = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlight")       -- B
+  statusFS:SetPoint("TOPLEFT", INSET, -88)
+  statusFS:SetPoint("TOPRIGHT", -INSET, -88)
+  statusFS:SetJustifyH("LEFT")   -- four paragraphs of body copy: LEFT
+  statusFS:SetJustifyV("TOP")
+  statusFS:SetHeight(140)   -- 10 lines; the worst real case is 9
+  statusFS:SetWordWrap(true)
+  statusFS:SetMaxLines(10)
   statusFS:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
   shadow(statusFS)
-  closeBtn = PG.UI.Button(dlg, "Close book", 150, 24, bookieClose)
-  closeBtn:SetPoint("BOTTOM", 30, 18)
+  closeBtn = PG.UI.Button(dlg, "Close book", 150, 26, bookieClose)
+  closeBtn:SetPoint("BOTTOM", 0, 18)
   configWidgets = { stakeLabel, stakeBox, lineLabel, lineBox, hint, openBtn }
   if picker then configWidgets[#configWidgets + 1] = picker end
   if posterOK then configWidgets[#configWidgets + 1] = poster end
-  -- decorative goblin bookie in the bottom-left corner (SKIN.md 2.6)
+  -- Decorative goblin bookie (SKIN.md 2.6), bottom-RIGHT: the bottom-left
+  -- corner is the Rules button's slot in every dialog, and at 80x100 from the
+  -- left he also had the audience picker's first segment across his head.
+  -- Decor moves, navigation does not (F12). x 252..332 clears the centred
+  -- 150px primary button (ends 245) and the picker block above him (ends
+  -- -258 against his -262 top).
   if PG.Theme and PG.Theme.NPC then
     local npc = PG.Theme.NPC(dlg, "bookie")
     bookieNPC = npc -- the results stage nods to him; Emote self-gates on visibility
     npc.frame:SetSize(80, 100)
     npc.frame:ClearAllPoints()
-    npc.frame:SetPoint("BOTTOMLEFT", 18, 16)
+    npc.frame:SetPoint("BOTTOMRIGHT", -8, 18)
     dlg:HookScript("OnShow", function()
       npc:Emote("greet")
       if PG.Theme.Sound then PG.Theme.Sound("greet") end
@@ -1333,10 +1382,12 @@ local function otherBookLine()
     end
   end
   if n == 0 then return "" end
+  -- |n, the addon's one line-break idiom (F17): this file used to be the only
+  -- one writing real "\n", so a grep for one missed the other
   if n == 1 then
-    return "\n\n" .. P.chgray .. who .. " is running another book - it's in the Pengyou Games window.|r"
+    return "|n|n" .. P.chgray .. who .. " is running another book - it's in the Pengyou Games window.|r"
   end
-  return "\n\n" .. P.chgray .. n .. " other books are open - they're in the Pengyou Games window.|r"
+  return "|n|n" .. P.chgray .. n .. " other books are open - they're in the Pengyou Games window.|r"
 end
 
 refreshDialog = function()
@@ -1347,15 +1398,19 @@ refreshDialog = function()
     configWidgets[i]:SetShown(not isOpen)
   end
   statusFS:SetShown(isOpen)
+  statusHead:SetShown(isOpen)
   closeBtn:SetShown(isOpen and book.isBookie or false)
   -- availability is a live query: the config side reappearing after a book ends
   -- must show the audience as it is now, not as it was when the book opened
   if not isOpen and picker then picker:Refresh() end
   if book then
+    -- the headline states WHOSE book and what it costs; the body carries the
+    -- rest as body copy, which is why the two are separate fontstrings
     local who = book.isBookie and "Your book is open" or (shortOf(book.bookie) .. "'s book is open")
-    statusFS:SetText(who .. " - " .. P.chgold .. tmoney(book.stake) .. "|r a bet, wipe line "
-      .. book.line .. "%.\n\nAudience: Party."
-      .. "\n\nThe bet strip appears at every ready check or pull timer."
+    statusHead:SetText(who)
+    statusFS:SetText(P.chgold .. tmoney(book.stake) .. "|r a bet, wipe line "
+      .. book.line .. "%.|n|nAudience: Party."
+      .. "|n|nThe bet strip appears at every ready check or pull timer."
       .. otherBookLine())
   end
 end
@@ -1656,10 +1711,10 @@ end
 -------------------------------------------------------------------------------
 
 PG.RegisterInit(function()
-  -- capture the faire palette from the theme layer (SKIN.md 5.8); the literal
+  -- capture the one palette from the theme layer (SKIN.md 5.8); the literal
   -- defaults above are the same values, so this is a formality, not a branch
   if PG.Theme and PG.Theme.C then
-    local c = PG.Theme.C("faire")
+    local c = PG.Theme.C()
     for k in pairs(P) do
       if c[k] ~= nil then P[k] = c[k] end
     end

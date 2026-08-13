@@ -159,7 +159,9 @@ local SYNC_REPLY_SECS = 25   -- how long a resync WE ASKED FOR may still be
                              -- host's own 30s syncReplayUntil shield for the
                              -- same replay, so the window can never outlive the
                              -- reply it is waiting for.
-local MAX_ROWS = 14          -- roster rows drawn in the window
+local MAX_ROWS = 11          -- roster rows drawn in the window: derived from the
+                             -- band between ROSTER_Y and ui.mine at the shared
+                             -- Theme.METRIC.ROW_PITCH of 20, not guessed
 local ROLL_TOAST_EVERY = 5   -- own-roll feedback: at most one line per this
 
 -- Registry budget (CONCURRENCY.md 2.1 / 7.3), identical to LG and RPS.
@@ -1901,7 +1903,7 @@ local function raiseInvite(rec)
     -- longer has, and row 6 of the OPEN table picks its eviction victim by
     -- exactly that field.
     function() if sessions[rec.key] == rec then rec.askKey = nil end end,
-    "faire")
+    "DR")
   if ok then rec.askKey = key end
 end
 
@@ -2514,7 +2516,7 @@ fxElim = function()
   local sess = S
   Theme.Sound("stamp")
   Theme.Reveal({
-    theme = "faire",
+    game = "DR",
     anchor = { mode = "window", host = win },
     title = "OUT",
     subtitle = shortOf(name) .. ((S.lastRoll.value == 0)
@@ -2563,7 +2565,7 @@ fxEnd = function()
   local sess = S
   local winner = S.roster[S.winIdx or 0]
   Theme.RevealQueue({
-    theme = "faire",
+    game = "DR",
     anchor = { mode = "window", host = win },
     variant = "podium",
     title = "DEATH ROLL",
@@ -2582,7 +2584,51 @@ end
 
 -------------------------------------------------------------------------------
 -- Game window
+--
+-- Laid out on the shared grid (Theme.METRIC) and the shared five-role ramp
+-- (Theme.FontTemplate). Every y offset below is a multiple of METRIC.GRID; the
+-- side inset, roster pitch, audience offset, timer height and footer geometry
+-- are the shared numbers, read through mt() rather than copied.
+--
+-- THE BOOKIE'S COLUMN. Theme.NPC returns a real child Frame, so it draws ABOVE
+-- this window's OVERLAY fontstrings: anything sharing its band was not merely
+-- crowded, it was hidden - the ceiling, the turn line and the info block all
+-- ran under the model in every game state. The model is now cornered at
+-- NPC_W x NPC_H and everything inside its vertical band stops a gutter short of
+-- it, while the ceiling, the ROLL card and the roster start BELOW it and use
+-- the full content width. That is what lets the one big number of the game be
+-- centred on the window rather than on whatever the goblin left over.
 -------------------------------------------------------------------------------
+
+local WIN_W, WIN_H = 400, 560
+-- Resized from Theme.NPC's default 120x150, near enough its 0.8 aspect that the
+-- model is not letterboxed; PullBook.lua resizes its bookie the same way. The
+-- box starts below the audience line's and ends above the ceiling's, so no
+-- region of this window shares a single pixel with the model.
+local NPC_W, NPC_H = 80, 96
+local NPC_TOP, NPC_RIGHT = -48, -14
+local ROSTER_Y = -280
+
+-- The shared ramp and grid, read at call time. The literals are only what a
+-- client with no theme layer would see; this file never carries its own copy of
+-- a shared number (Widgets.lua reads METRIC the same way).
+local FONT_FALLBACK = {
+  D1 = "GameFontNormalHuge", D2 = "GameFontNormalLarge", T = "GameFontNormal",
+  B = "GameFontHighlight", S = "GameFontHighlightSmall",
+}
+local METRIC_FALLBACK = {
+  INSET = 24, ROW_PITCH = 20, AUD_Y = -34, FOOTER = 16, BTN_W = 105, BTN_H = 22,
+}
+local function ft(role)
+  if Theme and Theme.FontTemplate then return Theme.FontTemplate(role) end
+  return FONT_FALLBACK[role] or "GameFontHighlight"
+end
+local function mt(key)
+  local M = Theme and Theme.METRIC
+  local v = M and M[key]
+  if type(v) == "number" then return v end
+  return METRIC_FALLBACK[key]
+end
 
 local function chalk(fs)
   fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
@@ -2591,11 +2637,13 @@ end
 
 rowAt = function(i)
   if not rows[i] then
-    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fs:SetPoint("TOPLEFT", 26, -252 - (i - 1) * 17)
-    fs:SetWidth(348)
+    local inset = mt("INSET")
+    local fs = win:CreateFontString(nil, "OVERLAY", ft("S"))
+    fs:SetPoint("TOPLEFT", inset, ROSTER_Y - (i - 1) * mt("ROW_PITCH"))
+    fs:SetWidth(WIN_W - 2 * inset)
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(false)
+    fs:SetMaxLines(1)
     fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
     if Theme then Theme.Shadow(fs) end
     rows[i] = fs
@@ -2605,7 +2653,7 @@ end
 
 local function ensureWindow()
   if win then return end
-  win = PG.UI.Window("dr", "Death Roll", 400, 560, "faire")
+  win = PG.UI.Window("dr", "Death Roll", WIN_W, WIN_H, "DR")
   -- Safety auto-resume, but never for a session that has since died or been
   -- replaced: the window is bound to one record and shows nothing else.
   win.__pgResume = function()
@@ -2613,67 +2661,106 @@ local function ensureWindow()
     return S ~= nil and win.__pgRec == S
   end
 
-  ui.aud = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.aud:SetPoint("TOP", 0, -34)
+  local inset = mt("INSET")
+  -- everything in the model's band stops here: 12px of air, then the goblin
+  local colGutter = -NPC_RIGHT + NPC_W + 12
+
+  ui.aud = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.aud:SetPoint("TOPLEFT", inset, mt("AUD_Y"))
+  ui.aud:SetPoint("TOPRIGHT", -inset, mt("AUD_Y"))
+  ui.aud:SetJustifyH("CENTER")
+  ui.aud:SetWordWrap(false)
+  ui.aud:SetMaxLines(1)
   ui.aud:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(ui.aud) end
 
-  ui.info = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.info:SetPoint("TOPLEFT", 24, -52)
-  ui.info:SetPoint("TOPRIGHT", -24, -52)
-  ui.info:SetHeight(32)
+  ui.info = win:CreateFontString(nil, "OVERLAY", ft("B"))
+  ui.info:SetPoint("TOPLEFT", inset, -52)
+  ui.info:SetPoint("TOPRIGHT", -colGutter, -52)
+  ui.info:SetHeight(44)
   ui.info:SetJustifyH("LEFT")
   ui.info:SetJustifyV("TOP")
   ui.info:SetWordWrap(true)
-  ui.info:SetMaxLines(2)
+  -- three lines, not two: the block is a column beside the model now, so a
+  -- six-figure wager wraps its first line rather than losing it
+  ui.info:SetMaxLines(3)
   ui.info:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   if Theme then Theme.Shadow(ui.info) end
 
-  -- The hero element: the number every player is looking for.
-  ui.ceil = win:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  ui.ceil:SetPoint("TOP", 0, -96)
+  ui.bar = PG.UI.TimerBar(win, WIN_W - inset - colGutter)
+  ui.bar:SetPoint("TOPLEFT", inset, -100)
+
+  -- The hero element: the number every player is looking for. Full content
+  -- width, explicitly centred, and below the model rather than behind it.
+  ui.ceil = win:CreateFontString(nil, "OVERLAY", ft("D1"))
+  ui.ceil:SetPoint("TOPLEFT", inset, -148)
+  ui.ceil:SetPoint("TOPRIGHT", -inset, -148)
+  ui.ceil:SetJustifyH("CENTER")
+  ui.ceil:SetWordWrap(false)
+  ui.ceil:SetMaxLines(1)
   ui.ceil:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   if Theme then
-    Theme.SetHeader(ui.ceil, 26)
+    Theme.SetFont(ui.ceil, "D1")
     Theme.Shadow(ui.ceil)
   end
 
-  ui.turn = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  ui.turn:SetPoint("TOP", 0, -132)
+  ui.rollBtn = PG.UI.CardButton(win, "ROLL", 220, 46, doRoll)
+  ui.rollBtn:SetPoint("TOP", 0, -184)
+
+  -- LEFT with a width pair, never centred: this line ticks once a second on the
+  -- host's join countdown, and a centred string whose width changes every tick
+  -- shuffles sideways once a second (PLAN 4).
+  ui.turn = win:CreateFontString(nil, "OVERLAY", ft("B"))
+  ui.turn:SetPoint("TOPLEFT", inset, -236)
+  ui.turn:SetPoint("TOPRIGHT", -inset, -236)
+  ui.turn:SetJustifyH("LEFT")
+  ui.turn:SetWordWrap(false)
+  ui.turn:SetMaxLines(1)
   chalk(ui.turn)
 
-  ui.bar = PG.UI.TimerBar(win, 340)
-  ui.bar:SetPoint("TOPLEFT", 30, -156)
-
-  ui.rollBtn = PG.UI.CardButton(win, "ROLL", 220, 46, doRoll)
-  ui.rollBtn:SetPoint("TOP", 0, -178)
-
-  ui.hint = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  ui.hint:SetPoint("TOPLEFT", 24, -230)
-  ui.hint:SetPoint("TOPRIGHT", -24, -230)
+  ui.hint = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.hint:SetPoint("TOPLEFT", inset, -256)
+  ui.hint:SetPoint("TOPRIGHT", -inset, -256)
   ui.hint:SetJustifyH("LEFT")
   ui.hint:SetWordWrap(false)
+  ui.hint:SetMaxLines(1)
   ui.hint:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(ui.hint) end
 
-  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.mine:SetPoint("BOTTOMLEFT", 24, 46)
-  ui.mine:SetPoint("BOTTOMRIGHT", -24, 46)
-  ui.mine:SetJustifyH("LEFT")
+  -- The empty state is NOT list item zero: it gets its own centred line across
+  -- the roster band instead of inheriting row 1's left inset (PLAN 4).
+  ui.empty = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.empty:SetPoint("TOPLEFT", inset, ROSTER_Y)
+  ui.empty:SetPoint("TOPRIGHT", -inset, ROSTER_Y)
+  ui.empty:SetJustifyH("CENTER")
+  ui.empty:SetWordWrap(false)
+  ui.empty:SetMaxLines(1)
+  ui.empty:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
+  if Theme then Theme.Shadow(ui.empty) end
+
+  -- one short sentence about you, alone above a centred button row: centred
+  ui.mine = win:CreateFontString(nil, "OVERLAY", ft("B"))
+  ui.mine:SetPoint("BOTTOMLEFT", inset, 46)
+  ui.mine:SetPoint("BOTTOMRIGHT", -inset, 46)
+  ui.mine:SetJustifyH("CENTER")
   ui.mine:SetWordWrap(false)
+  ui.mine:SetMaxLines(1)
   chalk(ui.mine)
 
-  ui.startBtn = PG.UI.Button(win, "Start now", 105, 22, function()
+  local btnW, btnH, foot = mt("BTN_W"), mt("BTN_H"), mt("FOOTER")
+  ui.startBtn = PG.UI.Button(win, "Start now", btnW, btnH, function()
     local S = mySession()
     if S and S.isHost and S.phase == "join" then hostCloseJoin() end
   end)
-  ui.startBtn:SetPoint("BOTTOMLEFT", 20, 16)
-  ui.cancelBtn = PG.UI.Button(win, "Cancel game", 105, 22, function()
+  -- the shared footer inset, which is also what opens the 1px clearance
+  -- between the right-hand button and the resize grip to 5px
+  ui.startBtn:SetPoint("BOTTOMLEFT", inset, foot)
+  ui.cancelBtn = PG.UI.Button(win, "Cancel game", btnW, btnH, function()
     local S = mySession()
     if S and S.isHost and S.phase ~= "done" then hostCancel("host") end
   end)
-  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -20, 16)
-  ui.withdrawBtn = PG.UI.Button(win, "Withdraw", 105, 22, function()
+  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -inset, foot)
+  ui.withdrawBtn = PG.UI.Button(win, "Withdraw", btnW, btnH, function()
     local S = mySession()
     if S and not S.isHost and S.phase == "join" and S.joinAccepted then
       if Theme then Theme.Sound("coincancel") end
@@ -2685,15 +2772,20 @@ local function ensureWindow()
       if me then applyLeft(me) end
     end
   end)
-  ui.withdrawBtn:SetPoint("BOTTOMLEFT", 20, 16) -- shares the host-only Start slot
-  ui.ledgerBtn = PG.UI.Button(win, "Open Ledger", 120, 22, function()
+  -- shares the host-only Start slot
+  ui.withdrawBtn:SetPoint("BOTTOMLEFT", inset, foot)
+  ui.ledgerBtn = PG.UI.Button(win, "Open Ledger", btnW, btnH, function()
     if PG.Ledger and PG.Ledger.Show then PG.Ledger.Show() end
   end)
-  ui.ledgerBtn:SetPoint("BOTTOM", 0, 16)
+  ui.ledgerBtn:SetPoint("BOTTOM", 0, foot)
 
   if Theme then
     npc = Theme.NPC(win, "bookie")
-    if npc and npc.frame then npc.frame:SetPoint("TOPRIGHT", -14, -44) end
+    if npc and npc.frame then
+      -- decoration, so it yields: sized and cornered clear of the text column
+      npc.frame:SetSize(NPC_W, NPC_H)
+      npc.frame:SetPoint("TOPRIGHT", NPC_RIGHT, NPC_TOP)
+    end
     win.__pgBannerSlot = rowAt(1)
   end
 end
@@ -2800,7 +2892,9 @@ RefreshUI = function()
   elseif isPlay then
     if S.spectator then
       turnText = S.syncDead and "Spectating - too far out of sync to catch up."
-        or "Out of sync - watch chat; the host is still counting your turns."
+        -- shortened to fit the one status line at the content width: the old
+        -- 63-character form measured past it and lost its own last word
+        or "Out of sync - watch chat; the host is still counting you."
     elseif S.frozen then
       turnText = "Paused - the raid needs the screen. This turn resumes after."
     elseif myTurn and S.selfRoll and S.selfRoll.seq == S.seq then
@@ -2844,20 +2938,24 @@ RefreshUI = function()
       hint = "Type /roll " .. S.ceil .. " in chat - this client can't roll for you."
     end
   elseif isDone and S.disputed then
-    hint = "Scroll up - every roll of this game is in your chat log, exactly as"
-      .. " the server printed it."
+    -- The one line that tells a player how to settle a money dispute, so it may
+    -- not be the line that truncates: shortened to fit the content width.
+    hint = "Scroll up - every roll is in your chat log, as the server printed it."
   end
   ui.hint:SetText(hint)
 
-  local lines
+  -- emptyText goes to the centred ui.empty, never into roster row 1: an empty
+  -- state is not list item zero. One string across all six games (PLAN 4).
+  local lines, emptyText
   if isJoin then
     lines = {}
     for _, name in ipairs(S.roster) do
       lines[#lines + 1] = name .. ((name == me) and (P.chgold .. " (you)|r") or "")
     end
-    if #lines == 0 then lines[1] = P.chgray .. "Nobody has entered yet.|r" end
+    if #lines == 0 then emptyText = "Nobody has joined yet." end
   elseif S.spectator then
-    lines = { P.chgray .. "Out of sync - the roster is shown once the host resyncs you.|r" }
+    lines = {}
+    emptyText = "Out of sync - the roster is shown once the host resyncs you."
   else
     lines = rosterLines(S, me)
     if isDone and S.ended and S.winIdx and not S.disputed and not S.missed then
@@ -2874,6 +2972,12 @@ RefreshUI = function()
   end
   if S.refereed then
     table.insert(lines, 1, P.chgray .. shortOf(S.host) .. " (running the game)|r")
+    -- the referee line occupies the band, so the notice is no longer the only
+    -- thing on screen and goes back into the list where it reads as one
+    if emptyText then
+      lines[2] = P.chgray .. emptyText .. "|r"
+      emptyText = nil
+    end
   end
   -- The local player's row is the one row the collapse may not eat: when it
   -- falls past the cut it is lifted into the last visible slot, the same rule
@@ -2900,13 +3004,17 @@ RefreshUI = function()
     rowAt(i):Show()
   end
   for i = shown + 1, #rows do rows[i]:Hide() end
+  ui.empty:SetText(emptyText or "")
+  ui.empty:SetShown(emptyText ~= nil)
 
   if isDone and S.disputed then
     -- BRIEF 2: the mirror stays on screen so the player can see BOTH answers
     -- and go read the chat log, which is the actual evidence.
+    -- "no winner", not "a different outcome": the long form measured past the
+    -- content width and dropped the host's name, which is half the sentence.
     local ours = S.derived and S.roster[S.derived]
     ui.mine:SetText(P.chred .. "This client saw "
-      .. (ours and shortOf(ours) or "a different outcome")
+      .. (ours and shortOf(ours) or "no winner")
       .. "; the host said " .. shortOf(S.roster[S.winIdx or 0] or "?") .. ".|r")
   elseif S.refereed then
     ui.mine:SetText(P.chgray .. "You have no stake in this game - you're running it.|r")
@@ -2957,14 +3065,27 @@ end
 -- Host config dialog
 -------------------------------------------------------------------------------
 
+-- The host dialog's own geometry. A left label column against a right-anchored
+-- input column, both at the shared inset, so the two edges finally agree (they
+-- were 20 and 24).
+local DLG_W = 320
+local FIELD_W = 70
 local function makeField(parent, label, y, default)
-  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  fs:SetPoint("TOPLEFT", 20, y)
+  local inset = mt("INSET")
+  local fs = parent:CreateFontString(nil, "OVERLAY", ft("T"))
+  fs:SetPoint("TOPLEFT", inset, y)
+  -- bounded: the label column is what the input column leaves, and no
+  -- FontString in this file is allowed to be unbounded
+  fs:SetWidth(DLG_W - 2 * inset - FIELD_W - 8)
+  fs:SetJustifyH("LEFT")
+  fs:SetWordWrap(false)
+  fs:SetMaxLines(1)
   fs:SetText(label)
   fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
+  if Theme then Theme.Shadow(fs) end
   local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
-  eb:SetSize(70, 20)
-  eb:SetPoint("TOPRIGHT", -24, y + 2)
+  eb:SetSize(FIELD_W, 20)
+  eb:SetPoint("TOPRIGHT", -inset, y + 2)
   eb:SetAutoFocus(false)
   eb:SetNumeric(true)
   eb:SetMaxLetters(6)
@@ -3029,12 +3150,15 @@ end
 
 local function ensureDialog()
   if dialog then return end
-  dialog = PG.UI.Window("drdialog", "Start Death Roll", 320, 320, "faire")
+  -- 344, not 320: PG.UI.ScopePicker is 58 tall now (its fallback hint used to
+  -- render 13px OUTSIDE the rect it declared), and the note under it has to
+  -- clear the Open button with all three of its lines showing.
+  dialog = PG.UI.Window("drdialog", "Start Death Roll", DLG_W, 344, "DR")
   dlgInputs = {
-    wager = makeField(dialog, "Wager (gold)", -60, 100),
-    ceil0 = makeField(dialog, "Starting roll", -90, 100),
+    wager = makeField(dialog, "Wager (gold)", -56, 100),
+    ceil0 = makeField(dialog, "Starting roll", -88, 100),
     joinSecs = makeField(dialog, "Join window (sec)", -120, 45),
-    turnSecs = makeField(dialog, "Turn timer (sec)", -150, 30),
+    turnSecs = makeField(dialog, "Turn timer (sec)", -152, 30),
   }
   -- "Default: the wager amount" without ever fighting a deliberate choice - the
   -- mirror stops the moment the user touches the ceiling box themselves.
@@ -3065,16 +3189,23 @@ local function ensureDialog()
     end,
     onChange = function() refreshDialog() end,
   })
-  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -182)
-  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -182)
+  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -184)
+  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -184)
 
-  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  dlgNote:SetPoint("TOPLEFT", 20, -244)
-  dlgNote:SetPoint("TOPRIGHT", -20, -244)
+  -- Anchored to the picker's own bottom, not to an absolute offset that has to
+  -- be re-guessed every time the control changes height.
+  dlgNote = dialog:CreateFontString(nil, "OVERLAY", ft("S"))
+  dlgNote:SetPoint("TOPLEFT", dlgScope, "BOTTOMLEFT", mt("INSET"), -8)
+  dlgNote:SetPoint("TOPRIGHT", dlgScope, "BOTTOMRIGHT", -mt("INSET"), -8)
   dlgNote:SetJustifyH("LEFT")
-  dlgNote:SetHeight(34)
+  -- TOP, so a one-line note sits where a three-line note starts instead of
+  -- floating in the middle of its box (four of the five dialogs did this)
+  dlgNote:SetJustifyV("TOP")
+  dlgNote:SetHeight(36)
   dlgNote:SetWordWrap(true)
+  dlgNote:SetMaxLines(3)
   dlgNote:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
+  if Theme then Theme.Shadow(dlgNote) end
 
   local openLabel = "Open the table"
   if Theme then openLabel = Theme.Mark("dice") .. " Open the table" end
@@ -3126,7 +3257,7 @@ end
 PG.RegisterInit(function()
   if PG.Theme and PG.Theme.C then
     Theme = PG.Theme
-    TC = Theme.C("faire")
+    TC = Theme.C()
     P.chgold, P.chgreen, P.chred, P.chgray = TC.chgold, TC.chgreen, TC.chred, TC.chgray
     P.CHALK, P.CHGOLD, P.CHGRAY = TC.CHALK, TC.CHGOLD, TC.CHGRAY
   end

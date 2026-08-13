@@ -17,7 +17,21 @@ local REVEAL_SECS = 5       -- pause between RESULT and the next ROUND
 local VOID_PAUSE_SECS = 3   -- pause between VOID and the next ROUND
 local BEGIN_PAUSE_SECS = 2  -- pause between BEGIN and round 1
 local MIN_REOPEN_SECS = 3   -- floor for the timer when re-opening a frozen round
-local MAX_ROWS = 16
+-- Window layout, on the shared spacing grid (PG.Theme.METRIC). These mirror
+-- METRIC.INSET / ROW_PITCH / ROW_H as literals because file scope may not read
+-- another module's tables; every offset in this file is a multiple of GRID = 4.
+--
+-- The roster band runs from ROWS_TOP downwards at ROW_PITCH, and its last row
+-- must clear ui.mine (whose top edge is MINE_TOP) by one row plus a 12px gap.
+-- MAX_ROWS is DERIVED from that band rather than hand-set (PLAN 2.4 / F5), so
+-- the cap and the geometry can never disagree.
+local INSET = 24            -- METRIC.INSET: side inset AND roster row inset
+local ROW_PITCH = 20        -- METRIC.ROW_PITCH: 12px line + 8 leading
+local ROW_H = 12            -- METRIC.ROW_H
+local ROWS_TOP = 292        -- first roster row, 8px under the status line
+local MINE_TOP = 560        -- 620 window - 46 bottom anchor - 14 line
+local MAX_ROWS = math.floor((MINE_TOP - ROW_H - 12 - ROWS_TOP) / ROW_PITCH) + 1
+local NPC_RESERVE = 150     -- 120 NPC container + 18 right margin + 12 gap
 local MAX_GOLD = 100000 * 40 -- buy-in cap * roster cap: bound for every
                              -- pot/pay/carry/dust wire field (keeps huge/inf
                              -- out of the persisted ledger)
@@ -90,11 +104,13 @@ local win, dialog, dlgInputs, dlgScope, dlgNote, dlgOpen
 local ui = {}
 local rows = {}
 local rowOffset = 0 -- roster rows start one line lower under a referee host
+local rowLifted = false -- the local player's row was hoisted past the cut (F6),
+                        -- so that slot no longer matches its roster index
 
--- Presentation layer (SKIN.md, goblin theme). Captured at init / built with
--- the window; ALL of it is decoration - game logic never branches on any of
--- these, and every Blizzard art/sound/model call routes through PG.Theme.
-local Theme, TC        -- PG.Theme and the goblin palette (nil if Theme absent)
+-- Presentation layer (SKIN.md). Captured at init / built with the window; ALL
+-- of it is decoration - game logic never branches on any of these, and every
+-- Blizzard art/sound/model call routes through PG.Theme.
+local Theme, TC        -- PG.Theme and the one palette (nil if Theme absent)
 local npc              -- Grizzle, the 3D goblin host (Theme.NPC handle)
 local stampPool             -- A6: up to 8 pooled red-X hoarder stamps
 local sparkFrame, sparkGroup -- A9 END sparkles
@@ -1350,7 +1366,7 @@ local function raiseInvite(rec)
     -- outright. The identity guard stops a late callback resurrecting the field
     -- on a record that has since been evicted or replaced.
     function() if sessions[rec.key] == rec then rec.askKey = nil end end,
-    "goblin")
+    "LG")
   if ok then
     rec.askKey = key
     -- spent only on a popup that actually appeared: PG.UI.Ask's DND branch runs
@@ -2022,9 +2038,13 @@ placeStamps = function(pattern)
   if not stampPool or not win then return end
   hideStamps()
   local limit = #pattern
-  -- last visible row is the "... and more" line, and a referee host has pushed
-  -- the roster down by one
-  if limit + rowOffset > MAX_ROWS then limit = MAX_ROWS - 1 - rowOffset end
+  -- last visible row is the "... and more" line, a referee host has pushed the
+  -- roster down by one, and a hoisted local-player row (F6) no longer holds
+  -- the roster entry its index says it does - stop before all three
+  if limit + rowOffset > MAX_ROWS then
+    limit = MAX_ROWS - 1 - rowOffset
+    if rowLifted then limit = limit - 1 end
+  end
   local used = 0
   for i = 1, limit do
     if pattern:sub(i, i) == "H" then
@@ -2074,7 +2094,7 @@ end
 -- Buy-in closes: banner + stamp sound + the goblin gets excited.
 fxBegin = function()
   if not (win and win:IsShown()) then return end
-  Theme.Banner(win, "BUY-IN CLOSED", "goblin")
+  Theme.Banner(win, "BUY-IN CLOSED", "LG")
   Theme.Sound("stamp")
   Theme.After(win, 0.2, function()
     if npc then npc:Emote("excited") end
@@ -2172,7 +2192,7 @@ fxResult = function()
   local paid = (lr.hoardPay > 0 or lr.sharePay > 0)
   local sess = S
   Theme.Reveal({
-    theme = "goblin",
+    game = "LG",
     -- OWNERSHIP (CONCURRENCY.md 5.8 rule 2): the payload belongs to ONE record.
     -- A round moment whose session was superseded, withdrawn or swept between
     -- the applier and the stage is culled instead of playing over whatever
@@ -2284,7 +2304,7 @@ fxEnd = function()
   local bigWin = S.basePot ~= nil and topNet >= S.basePot / 2
   local sess = S
   Theme.RevealQueue({
-    theme = "goblin",
+    game = "LG",
     anchor = { mode = "window", host = win },
     variant = "podium",
     title = "FINAL RESULTS",
@@ -2316,14 +2336,24 @@ end
 -- Game window
 -------------------------------------------------------------------------------
 
+-- Chalk on the board: the one body colour, with the standard over-art shadow.
+-- Text is never INK anywhere but the Ledger sheet and a card face (PLAN 2.1).
+local function chalk(fs)
+  if not fs then return end
+  if TC then fs:SetTextColor(TC.CHALK[1], TC.CHALK[2], TC.CHALK[3]) end
+  if Theme then Theme.Shadow(fs) end
+end
+
+-- The roster row: LEFT, always (a ragged name column is unscannable), at the
+-- same inset as the status line above it and the full derived width.
 rowAt = function(i)
   if not rows[i] then
-    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fs:SetPoint("TOPLEFT", 26, -286 - (i - 1) * 17)
-    fs:SetWidth(388)
+    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") -- S
+    fs:SetPoint("TOPLEFT", INSET, -ROWS_TOP - (i - 1) * ROW_PITCH)
+    fs:SetWidth(440 - 2 * INSET)
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(false)
-    if TC then fs:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
+    chalk(fs)
     rows[i] = fs
   end
   return rows[i]
@@ -2331,7 +2361,7 @@ end
 
 local function ensureWindow()
   if win then return end
-  win = PG.UI.Window("lg", "Loot Goblins", 440, 620, "goblin")
+  win = PG.UI.Window("lg", "Loot Goblins", 440, 620, "LG")
   -- Safety auto-resume: come back after an encounter/ready-check/countdown,
   -- but never resurrect for a session that has since died OR been replaced -
   -- the window is bound to one record (win.__pgRec) and shows nothing else.
@@ -2340,95 +2370,117 @@ local function ensureWindow()
     return S ~= nil and win.__pgRec == S
   end
 
-  -- Title ribbon (decor; failure -> plain title, today's look)
-  if Theme then
-    local ribbon = win:CreateTexture(nil, "ARTWORK", nil, -6)
-    if Theme.Tex(ribbon, "ribbon") then
-      ribbon:SetSize(320, 40)
-      ribbon:SetPoint("TOP", 0, -10)
-      win.title:ClearAllPoints()
-      win.title:SetPoint("CENTER", ribbon, "CENTER", 0, 2)
-      Theme.Shadow(win.title) -- title now sits on ribbon art
-    else
-      ribbon:Hide()
-      -- no ribbon art: the Skin-applied GOLD title would sit straight on the
-      -- parchment overlay (~1.6:1, illegible; SKIN.md 6.1) - recolor to INK
-      if TC then win.title:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
-    end
-  end
+  -- the audience, under the title (SCOPE.md 5.4): "who can see this game" is
+  -- the first thing a player needs to know about a session they did not start.
+  -- Centred at the shared -34, like every other game: it used to sit at -100
+  -- and LEFT, which drew its first eleven characters INSIDE the treasure chest
+  -- in amber-on-gold (F2 / A5).
+  ui.aud = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")   -- S
+  ui.aud:SetPoint("TOPLEFT", INSET, -34)                          -- METRIC.AUD_Y
+  ui.aud:SetPoint("TOPRIGHT", -INSET, -34)
+  ui.aud:SetJustifyH("CENTER")
+  ui.aud:SetWordWrap(false)
+  ui.aud:SetMaxLines(1)
+  if TC then ui.aud:SetTextColor(TC.CHGRAY[1], TC.CHGRAY[2], TC.CHGRAY[3]) end
+  if Theme then Theme.Shadow(ui.aud) end
 
   -- Treasure chest in a fixed 56x56 slot (art may fall back to a coin icon;
   -- layout never depends on which rendered) - also the origin every coin
   -- shower, glow, and sparkle anchors to.
   if Theme then
     ui.chest = Theme.Icon(win, "chest", 56)
-    ui.chest:SetPoint("TOPLEFT", 24, -50)
+    ui.chest:SetPoint("TOPLEFT", INSET, -52)
     win.__pgFXOrigin = ui.chest
   end
 
-  ui.info = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  ui.info = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")        -- B
   -- 3-line money column: the ~200px between chest and goblin model cannot fit
   -- the one-line join string, which ellipsized the pot (the headline number).
   -- RefreshUI leads with the pot on its own short line; wrap-within-48px
-  -- guards the rare overlong case (huge pots, 3-digit rosters).
-  ui.info:SetPoint("TOPLEFT", 88, -48)
-  ui.info:SetPoint("TOPRIGHT", -150, -48)
+  -- guards the rare overlong case (huge pots, 3-digit rosters). The right edge
+  -- is the shared NPC reserve, which is what keeps this column off the model.
+  -- Body copy: LEFT (PLAN 4).
+  ui.info:SetPoint("TOPLEFT", 88, -52)
+  ui.info:SetPoint("TOPRIGHT", -NPC_RESERVE, -52)
   ui.info:SetHeight(48)
   ui.info:SetJustifyH("LEFT")
   ui.info:SetJustifyV("TOP")
   ui.info:SetWordWrap(true)
   ui.info:SetMaxLines(3)
-  if TC then ui.info:SetTextColor(TC.AMBER[1], TC.AMBER[2], TC.AMBER[3]) end
+  if TC then ui.info:SetTextColor(TC.CHGOLD[1], TC.CHGOLD[2], TC.CHGOLD[3]) end
+  if Theme then Theme.Shadow(ui.info) end
 
-  -- the audience, under the title (SCOPE.md 5.4): "who can see this game" is
-  -- the first thing a player needs to know about a session they did not start
-  ui.aud = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.aud:SetPoint("TOPLEFT", 24, -100)
-  ui.aud:SetPoint("TOPRIGHT", -24, -100)
-  ui.aud:SetJustifyH("LEFT")
-  ui.aud:SetWordWrap(false)
-  if TC then ui.aud:SetTextColor(TC.AMBER[1], TC.AMBER[2], TC.AMBER[3]) end
-
-  ui.bar = PG.UI.TimerBar(win, 260)
-  ui.bar:SetPoint("TOPLEFT", 24, -118)
+  -- The timer bar: shared inset, shared 18px height, and its right edge on the
+  -- NPC reserve so the one bar in the suite that shares a band with a model
+  -- still lines up with the money column above it.
+  ui.bar = PG.UI.TimerBar(win, 440 - INSET - NPC_RESERVE)
+  ui.bar:SetPoint("TOPLEFT", INSET, -116)
 
   -- Grizzle the Pit Boss: 3D goblin host, reacts to the game (pure decor;
   -- Theme.NPC falls back to a static coin-pile icon in the same container)
   if Theme then
     npc = Theme.NPC(win, "host")
     npc.frame:SetPoint("TOPRIGHT", -18, -44)
-    ui.plate = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    ui.plate:SetPoint("TOP", npc.frame, "BOTTOM", 0, 1)
+    -- the nameplate hangs 4px under the container and the cards start 6px
+    -- below it: it used to be 1px above the HOARD card, which Theme.Shadow
+    -- closed to zero, so any change to the container height put "Grizzle the
+    -- Pit Boss" on the card face (A6).
+    ui.plate = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")    -- S
+    ui.plate:SetPoint("TOP", npc.frame, "BOTTOM", 0, -4)
+    ui.plate:SetWidth(140)
+    ui.plate:SetJustifyH("CENTER")
+    ui.plate:SetWordWrap(false)
+    ui.plate:SetMaxLines(1)
     ui.plate:SetText("Grizzle the Pit Boss")
-    if TC then ui.plate:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
+    chalk(ui.plate)
   end
 
   ui.shareBtn = PG.UI.CardButton(win, "SHARE", 190, 46, function() doPick("S") end)
-  ui.shareBtn:SetPoint("TOPLEFT", 24, -206)
+  ui.shareBtn:SetPoint("TOPLEFT", INSET, -216)
   ui.hoardBtn = PG.UI.CardButton(win, "HOARD", 190, 46, function() doPick("H") end)
-  ui.hoardBtn:SetPoint("TOPRIGHT", -24, -206)
-  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  ui.status:SetPoint("TOPLEFT", 24, -262)
-  ui.status:SetPoint("TOPRIGHT", -24, -262)
+  ui.hoardBtn:SetPoint("TOPRIGHT", -INSET, -216)
+  -- the status line ticks ("...45s" -> "...44s"), so it is LEFT with a width
+  -- pair: centred, it would shuffle sideways once per second (PLAN 4).
+  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")      -- B
+  ui.status:SetPoint("TOPLEFT", INSET, -270)
+  ui.status:SetPoint("TOPRIGHT", -INSET, -270)
   ui.status:SetJustifyH("LEFT")
   ui.status:SetWordWrap(false)
-  if TC then ui.status:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
-  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.mine:SetPoint("BOTTOMLEFT", 24, 46)
-  ui.mine:SetPoint("BOTTOMRIGHT", -24, 46)
-  ui.mine:SetJustifyH("LEFT")
+  chalk(ui.status)
+  -- The empty state is not list item zero: it gets its own centred line in the
+  -- first free roster slot instead of being written into rowAt(1) with the
+  -- roster's LEFT justification (T3-2 / F7).
+  ui.empty = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")  -- S
+  ui.empty:SetPoint("TOPLEFT", INSET, -ROWS_TOP)
+  ui.empty:SetPoint("TOPRIGHT", -INSET, -ROWS_TOP)
+  ui.empty:SetJustifyH("CENTER")
+  ui.empty:SetWordWrap(false)
+  ui.empty:SetMaxLines(1)
+  if TC then ui.empty:SetTextColor(TC.CHGRAY[1], TC.CHGRAY[2], TC.CHGRAY[3]) end
+  if Theme then Theme.Shadow(ui.empty) end
+  ui.empty:Hide()
+  -- one short sentence about YOU, alone above a centred button row: centred
+  -- (PLAN 4), and bounded so a long one truncates instead of spilling
+  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")        -- B
+  ui.mine:SetPoint("BOTTOMLEFT", INSET, 46)
+  ui.mine:SetPoint("BOTTOMRIGHT", -INSET, 46)
+  ui.mine:SetJustifyH("CENTER")
   ui.mine:SetWordWrap(false)
-  if TC then ui.mine:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
+  ui.mine:SetMaxLines(1)
+  chalk(ui.mine)
   ui.startBtn = PG.UI.Button(win, "Start now", 105, 22, function()
     local S = mySession()
     if S and S.isHost and S.phase == "join" then hostCloseJoin() end
   end)
-  ui.startBtn:SetPoint("BOTTOMLEFT", 20, 16)
+  -- Footer: 105x22 at the shared 24 inset and 16 bottom margin. The old 20
+  -- left 1px between "Cancel game" and the frame-level +10 resize grip, so at
+  -- fractional scales the button's right edge became a resize handle (A12).
+  ui.startBtn:SetPoint("BOTTOMLEFT", INSET, 16)
   ui.cancelBtn = PG.UI.Button(win, "Cancel game", 105, 22, function()
     local S = mySession()
     if S and S.isHost and S.phase ~= "done" then hostCancel("host") end
   end)
-  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -20, 16)
+  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -INSET, 16)
   ui.withdrawBtn = PG.UI.Button(win, "Withdraw", 105, 22, function()
     local S = mySession()
     if S and not S.isHost and S.phase == "join" and S.joinAccepted then
@@ -2441,15 +2493,16 @@ local function ensureWindow()
       if me then applyLeft(me) end
     end
   end)
-  ui.withdrawBtn:SetPoint("BOTTOMLEFT", 20, 16) -- shares the host-only Start slot
-  ui.ledgerBtn = PG.UI.Button(win, "Open Ledger", 120, 22, function()
+  ui.withdrawBtn:SetPoint("BOTTOMLEFT", INSET, 16) -- shares the host-only Start slot
+  ui.ledgerBtn = PG.UI.Button(win, "Open Ledger", 105, 22, function()
     if PG.Ledger and PG.Ledger.Show then PG.Ledger.Show() end
   end)
   ui.ledgerBtn:SetPoint("BOTTOM", 0, 16)
 
   if Theme then
-    -- gold-pile decor behind the bottom buttons (above the parchment sheet,
-    -- which sits at ARTWORK sublayer -8); hidden entirely if the art fails
+    -- gold-pile decor behind the bottom buttons, on the board (an icon is
+    -- identity, a background is a theme: the decor stays, the parchment ground
+    -- it used to sit on does not); hidden entirely if the art fails
     local pile = win:CreateTexture(nil, "ARTWORK", nil, -7)
     pile:SetSize(220, 48)
     pile:SetPoint("BOTTOM", 0, 10)
@@ -2567,15 +2620,16 @@ RefreshUI = function()
     lines[1] = GRAY .. shortOf(S.host) .. " (running the game)|r"
     rowOffset = 1 -- hoarder stamps follow the roster down one row
   end
+  local emptyMsg = nil
   if S.spectator and not isJoin then
     lines[#lines + 1] = GRAY .. "Out of sync - results are shown in the status line only.|r"
   elseif isJoin then
     for _, name in ipairs(S.roster) do
       lines[#lines + 1] = name .. (name == me and (GOLD .. " (you)|r") or "")
     end
-    if #S.roster == 0 then
-      lines[#lines + 1] = GRAY .. "Nobody has bought in yet.|r"
-    end
+    -- one string, one treatment, in every game (F7): centred in the first free
+    -- roster slot, never written into row 1 as though it were a player
+    if #S.roster == 0 then emptyMsg = "Nobody has joined yet." end
   else
     local lr = S.lastResult
     local annotate = lr and #lr.pattern == #S.roster
@@ -2593,13 +2647,35 @@ RefreshUI = function()
       end
       local total = S.totals[name] or 0
       local line = name .. (name == me and (GOLD .. " (you)|r") or "") .. ann
-        .. "  -  " .. PG.Money(total)
       if isDone and S.ended then
+        -- the running total is buy-in + net, so printing BOTH pushed the row
+        -- past its width and the ellipsis ate the (+net) figure - the one
+        -- number the player is looking for (B1). Final rows show the net.
         local netN = total - S.buyin
         line = line .. "  (" .. (netN >= 0 and (GREEN .. "+" .. PG.Money(netN))
           or (RED .. "-" .. PG.Money(-netN))) .. "|r)"
+      else
+        line = line .. "  -  " .. PG.Money(total)
       end
       lines[#lines + 1] = line
+    end
+  end
+  -- The local player's row is the one row the collapse may not eat: when it
+  -- falls past the cut it is lifted into the last visible slot, the same rule
+  -- Death Roll and the reveal stage already apply. Without it you can be
+  -- player 20 of 40 and simply not appear in your own window (F6).
+  rowLifted = false
+  if #lines > MAX_ROWS and me then
+    local mineAt
+    for i = MAX_ROWS, #lines do
+      if lines[i]:find(me, 1, true) then
+        mineAt = i
+        break
+      end
+    end
+    if mineAt then
+      table.insert(lines, MAX_ROWS - 1, table.remove(lines, mineAt))
+      rowLifted = true
     end
   end
   local shown = math.min(#lines, MAX_ROWS)
@@ -2611,6 +2687,16 @@ RefreshUI = function()
     rowAt(i):Show()
   end
   for i = shown + 1, #rows do rows[i]:Hide() end
+  -- the empty line lands in the first slot the roster did not use, so a
+  -- refereed game shows "(running the game)" and then the message under it
+  if emptyMsg then
+    local y = -ROWS_TOP - shown * ROW_PITCH
+    ui.empty:ClearAllPoints()
+    ui.empty:SetPoint("TOPLEFT", INSET, y)
+    ui.empty:SetPoint("TOPRIGHT", -INSET, y)
+    ui.empty:SetText(emptyMsg)
+  end
+  ui.empty:SetShown(emptyMsg ~= nil)
 
   if S.spectator then
     ui.mine:SetText(GRAY .. "No stake this game (spectating).|r")
@@ -2672,13 +2758,13 @@ end
 -------------------------------------------------------------------------------
 
 local function makeField(parent, label, y, default)
-  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  fs:SetPoint("TOPLEFT", 20, y)
+  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")        -- T
+  fs:SetPoint("TOPLEFT", INSET, y)
   fs:SetText(label)
-  if TC then fs:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end -- ink on parchment
+  chalk(fs) -- chalk on the board, with the over-art shadow
   local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
   eb:SetSize(70, 20)
-  eb:SetPoint("TOPRIGHT", -24, y + 2)
+  eb:SetPoint("TOPRIGHT", -INSET, y + 2)
   eb:SetAutoFocus(false)
   eb:SetNumeric(true)
   eb:SetMaxLetters(6)
@@ -2740,32 +2826,22 @@ end
 
 local function ensureDialog()
   if dialog then return end
-  -- 320x270 -> 320x320 for the audience block (SCOPE.md 5.3)
-  dialog = PG.UI.Window("lgdialog", "Start Loot Goblins", 320, 320, "goblin")
-  -- gold crown header behind the title (decor; failure keeps the plain title)
-  if Theme then
-    local header = dialog:CreateTexture(nil, "ARTWORK", nil, -6)
-    if Theme.Tex(header, "goldheader") then
-      header:SetSize(300, 64)
-      header:SetPoint("TOP", 0, 12)
-      dialog.title:ClearAllPoints()
-      dialog.title:SetPoint("TOP", header, "TOP", 0, -14)
-      Theme.Shadow(dialog.title) -- title sits on the gold header art
-    else
-      header:Hide()
-      -- no header art: GOLD-on-parchment is illegible (SKIN.md 6.1); use INK
-      if TC then dialog.title:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
-    end
-  end
+  -- 320x320 -> 320x340: the audience block is 58 tall now (its hint used to
+  -- render outside the rect it declared), and the note under it has to clear
+  -- the button row. The title is the factory's bounded, centred container -
+  -- the gold crown header and its INK recolour went with the one design.
+  dialog = PG.UI.Window("lgdialog", "Start Loot Goblins", 320, 340, "LG")
+  -- one 32px field pitch, starting 20 under the title container (-36)
   dlgInputs = {
-    buyin = makeField(dialog, "Buy-in (gold)", -60, 100),
-    rounds = makeField(dialog, "Rounds", -90, 5),
+    buyin = makeField(dialog, "Buy-in (gold)", -56, 100),
+    rounds = makeField(dialog, "Rounds", -88, 5),
     joinSecs = makeField(dialog, "Join window (sec)", -120, 45),
-    roundSecs = makeField(dialog, "Round timer (sec)", -150, 20),
+    roundSecs = makeField(dialog, "Round timer (sec)", -152, 20),
   }
-  -- Audience picker (SCOPE.md 5.3): label at -182, segments at -202. Every
-  -- segment renders at every moment - an unavailable one is greyed with its
-  -- reason on hover, because the disabled state IS the message.
+  -- Audience picker (SCOPE.md 5.3): one 58px block - centred label, centred
+  -- 216px segment row, hint inside. Every segment renders at every moment - an
+  -- unavailable one is greyed with its reason on hover, because the disabled
+  -- state IS the message.
   dlgScope = PG.UI.ScopePicker(dialog, {
     key = "LG",
     allowed = PG.LG.SCOPES,
@@ -2775,16 +2851,25 @@ local function ensureDialog()
     end,
     onChange = function() refreshDialog() end,
   })
-  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -182)
-  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -182)
+  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -184)
+  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -184)
 
-  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  dlgNote:SetPoint("TOPLEFT", 20, -244)
-  dlgNote:SetPoint("TOPRIGHT", -20, -244)
+  -- anchored to the picker's bottom, not to an absolute offset: the picker
+  -- grew 44 -> 58 and every dialog in the suite was one copy edit away from
+  -- the note and the picker hint sharing a band (T1-8). Two wrapped lines of
+  -- explanation: LEFT, top-aligned in its box so a one-line note does not
+  -- float (F14).
+  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")   -- S
+  dlgNote:SetPoint("TOPLEFT", dlgScope, "BOTTOMLEFT", INSET, -8)
+  dlgNote:SetPoint("TOPRIGHT", dlgScope, "BOTTOMRIGHT", -INSET, -8)
   dlgNote:SetJustifyH("LEFT")
-  dlgNote:SetHeight(34)
+  dlgNote:SetJustifyV("TOP")
+  dlgNote:SetHeight(40)
   dlgNote:SetWordWrap(true)
-  if TC then dlgNote:SetTextColor(TC.INK[1], TC.INK[2], TC.INK[3]) end
+  dlgNote:SetMaxLines(3)
+  -- CHGOLD, which is what RPS, Gambler and Quiz already use for this line
+  if TC then dlgNote:SetTextColor(TC.CHGOLD[1], TC.CHGOLD[2], TC.CHGOLD[3]) end
+  if Theme then Theme.Shadow(dlgNote) end
 
   local openLabel = "Open buy-in"
   if Theme then openLabel = Theme.Mark("coin") .. " Open buy-in" end
@@ -2838,13 +2923,16 @@ function PG.LG.OpenDialog()
 end
 
 PG.RegisterInit(function()
-  -- capture the skin layer once (SKIN.md 1.1/5.8): parchment-safe inline
-  -- colors replace the bright defaults; everything degrades to the plain
-  -- look when Theme is absent. Presentation only - no logic depends on it.
+  -- capture the skin layer once (SKIN.md 1.1/5.8). ONE DESIGN: the ground is
+  -- the board in every window, so the inline codes are the board ramp
+  -- (Theme.ROLE), never the parchment ramp. win/loss/fade/amber here used to
+  -- put #145214, #8f1600, #6b5c42 and #7a4a00 straight on #12141a - between
+  -- 1.4:1 and 2.4:1 - across the roster, the status line and every toast.
+  -- Everything degrades to the plain look when Theme is absent.
   if PG.Theme and PG.Theme.C then
     Theme = PG.Theme
-    TC = Theme.C("goblin")
-    GREEN, RED, GRAY, GOLD = TC.win, TC.loss, TC.fade, TC.amber
+    TC = Theme.C()
+    GREEN, RED, GRAY, GOLD = TC.chgreen, TC.chred, TC.chgray, TC.chgold
   end
   PG.Comm.Register("LG", onComm, onDrop)
   PG.Safety.OnChange(onSafetyChange)

@@ -155,13 +155,16 @@ end
 -- Movable, screen-clamped, safety-registered window; position, per-window
 -- scale (corner grip) persisted in db.profile.positions[key]; never overlaps
 -- another factory window (the solver nudges the shown/moved one clear).
--- Returns the frame (created hidden); the title fontstring is frame.title.
+-- Returns the frame (created hidden); the title fontstring is frame.title and
+-- its container is frame.titleBar.
 -- ESC deliberately does NOT close it (we stay out of UISpecialFrames and all
 -- other Blizzard tables).
--- theme (optional): "goblin" | "faire" | "neutral" (default "neutral"),
--- applied via PG.Theme.Skin; the plain backdrop below stays the ultimate
--- fallback when the theme layer is unavailable.
-function PG.UI.Window(key, title, w, h, theme)
+-- accent (optional, 5th argument - the old `theme` slot): a game code, "LG"
+-- "PB" "RPS" "DR" "GB" "QZ", or nothing for the house accent. It selects the
+-- per-game mark and colour ONLY; there is one design and PG.Theme.Skin applies
+-- it to every window. The plain backdrop below stays the ultimate fallback for
+-- when the theme layer is unavailable. Legacy names still resolve.
+function PG.UI.Window(key, title, w, h, accent)
   local f = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
   f.__pgKey = key
   f:SetSize(w, h)
@@ -191,13 +194,39 @@ function PG.UI.Window(key, title, w, h, theme)
     end
   end
   if not placed then f:SetPoint("CENTER") end
-  f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-  f.title:SetPoint("TOP", 0, -14)
+  -- THE TITLE IS A CONTAINER, NOT A FLOATING FONTSTRING.
+  --
+  -- UIPanelCloseButton occupies x in [W-34, W-2] and the title's line shares
+  -- that band, so a TOP-anchored string with no width slid under the X the
+  -- moment it got long ("Start Rock Paper Scissors" already did). Reserving
+  -- TITLE_RESERVE on BOTH sides makes the collision structurally impossible
+  -- and keeps a centred string centred on the bar the player can see.
+  --
+  -- The width alone would have made it worse: WordWrap defaults ON, so a long
+  -- title would wrap to two display lines and run into the page content at
+  -- -52. Hence wrap off + one line: a title that does not fit ellipsizes.
+  local M = (PG.Theme and PG.Theme.METRIC) or nil
+  local reserve = (M and M.TITLE_RESERVE) or 34
+  f.titleBar = CreateFrame("Frame", nil, f)
+  f.titleBar:SetPoint("TOPLEFT", reserve, (M and M.TITLE_TOP) or -12)
+  f.titleBar:SetPoint("TOPRIGHT", -reserve, (M and M.TITLE_TOP) or -12)
+  f.titleBar:SetHeight((M and M.TITLE_H) or 24)
+  local tmpl = (PG.Theme and PG.Theme.FontTemplate)
+    and PG.Theme.FontTemplate("D2") or "GameFontNormalLarge"
+  f.title = f.titleBar:CreateFontString(nil, "OVERLAY", tmpl)
+  f.title:SetPoint("LEFT")
+  f.title:SetPoint("RIGHT")          -- LEFT+RIGHT, never TOP plus a guess
+  f.title:SetJustifyH("CENTER")
+  f.title:SetWordWrap(false)
+  f.title:SetMaxLines(1)
   f.title:SetText(title)
   local close = CreateFrame("Button", nil, f, "UIPanelCloseButton")
   close:SetPoint("TOPRIGHT", -2, -2)
+  -- Skin applies the one design and stamps the accent; it also re-fonts and
+  -- re-colours f.title, so the template above is only what a client without
+  -- the theme layer would see.
   if PG.Theme and PG.Theme.Skin then
-    PG.Theme.Skin(f, theme or "neutral")
+    PG.Theme.Skin(f, accent)
   end
   addResizeGrip(f)
   managed[#managed + 1] = f
@@ -208,10 +237,34 @@ function PG.UI.Window(key, title, w, h, theme)
   return f
 end
 
+-- Bind a button's label to the button. UIPanelButtonTemplate's text is
+-- CENTER-anchored with no width and the template neither clips nor ellipsizes,
+-- so an over-long label used to spill symmetrically past BOTH bevels onto
+-- whatever was behind it. Bound, it truncates instead - which is visible,
+-- fixable and never lands on a neighbour.
+--
+-- pad is the total reserve (default 8, i.e. 4 a side, about the width of the
+-- template's bevel caps). A caller whose label is genuinely 2 px over should
+-- pass a smaller pad or a wider button rather than ship an ellipsis.
+-- Re-run it after a SetText that changes the label's length class; a plain
+-- recolour or a same-length swap needs nothing (the width persists).
+function PG.UI.FitLabel(b, pad)
+  if not b then return b end
+  local ok, fs = pcall(b.GetFontString, b)
+  if not (ok and fs) then return b end
+  local w = (b.GetWidth and b:GetWidth()) or 0
+  pcall(fs.SetJustifyH, fs, "CENTER")
+  pcall(fs.SetWordWrap, fs, false)
+  pcall(fs.SetMaxLines, fs, 1)
+  pcall(fs.SetWidth, fs, math.max(8, w - (tonumber(pad) or 8)))
+  return b
+end
+
 function PG.UI.Button(parent, label, w, h, onClick)
   local b = CreateFrame("Button", nil, parent, "UIPanelButtonTemplate")
   b:SetSize(w, h)
   b:SetText(label)
+  PG.UI.FitLabel(b)
   if onClick then
     b:SetScript("OnClick", function(self) onClick(self) end)
   end
@@ -229,7 +282,18 @@ function PG.UI.CardButton(parent, label, w, h, onClick)
     b = PG.Theme.CardFace(parent, label, w, h)
   end
   if not b then
-    return PG.UI.Button(parent, label, w, h, onClick)
+    -- the fallback must render at the CARD size (16), not the plain button's
+    -- 12: the same primary action was two different sizes depending on whether
+    -- an atlas resolved
+    local plain = PG.UI.Button(parent, label, w, h, onClick)
+    local big = GameFontNormalLarge
+    if big then
+      pcall(plain.SetNormalFontObject, plain, big)
+      pcall(plain.SetHighlightFontObject, plain, big)
+      pcall(plain.SetDisabledFontObject, plain, GameFontDisableLarge or big)
+      PG.UI.FitLabel(plain)   -- re-fit: the font object changed under the label
+    end
+    return plain
   end
   if onClick then
     b:SetScript("OnClick", function(self) onClick(self) end)
@@ -260,8 +324,13 @@ local SCOPE_TIP = {   -- enabled tooltips, SCOPE.md 5.4, verbatim
   public = { "Public - your realm and its connected realms, your faction only.",
              "Not cross-faction. Not other realms." },
 }
-local SEG_W, SEG_H, SEG_GAP, SEG_INSET = 82, 22, 4, 20
-local SCOPE_GREY = "|cff808080"   -- SCOPE.md 5.2: forbidden never looks selected
+-- 3*68 + 2*6 = 216, which centres cleanly under 320 and 420 alike, so the same
+-- control works in a dialog and in a page. 82px segments were 44px of dead
+-- space each for a 6-character label, and right-aligning the block while the
+-- label sat left meant nothing in the control was centred.
+local SEG_W, SEG_H, SEG_GAP, SEG_INSET = 68, 22, 6, 24
+local SEG_BLOCK = SEG_W * 3 + SEG_GAP * 2
+local PICKER_H = 58   -- label 20 + segments 22 + hint 16; see the note below
 
 local pickers = {}  -- every live picker, for the availability event hooks
 
@@ -309,7 +378,7 @@ end
 --                it rides along as an advisory (LG's public gold warning).
 --   cfg.onChange optional fn(scope), user clicks only
 --   cfg.width    optional, defaults to the parent's width
--- Returns a frame (44px block, unanchored - the caller places it) with:
+-- Returns a frame (58px block, unanchored - the caller places it) with:
 --   :Get()      -> scope, or nil when nothing is selectable
 --   :Set(scope) -> selects if allowed and available; else no-op. Programmatic:
 --                  it neither persists nor fires onChange.
@@ -321,40 +390,44 @@ function PG.UI.ScopePicker(parent, cfg)
   local width = tonumber(cfg.width)
     or (parent and parent.GetWidth and parent:GetWidth()) or 320
   local f = CreateFrame("Frame", nil, parent)
-  f:SetSize(width, 44)
+  -- The declared height is the truth now. The hint used to render 13px BELOW a
+  -- frame the caller was told was 44 tall, which is a live 7px overlap in the
+  -- Quiz dialog and 1-5px of clearance in three others - every dialog was one
+  -- copy edit from the same collision.
+  f:SetSize(width, PICKER_H)
 
-  -- inherit the host window's skin the same way PG.UI.TimerBar does
-  local theme, host = nil, parent
-  for _ = 1, 4 do
-    if not host then break end
-    theme = host.__pgTheme
-    if theme then break end
-    host = host.GetParent and host:GetParent() or nil
-  end
-  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C(theme) or nil
-  -- selected tint + label color per skin; the button's own dark art is what the
-  -- label sits on, so GOLD is legible here even in the goblin dialog (the
-  -- parchment rule of SKIN.md 6.1 applies to the parchment, not to the button)
-  local SEL_CODE = (C and (theme == "faire" and C.chgold or C.gold)) or "|cffffd200"
-  local TINT = (C and (theme == "faire" and C.VIOLET or C.GOLD)) or { 1, 0.82, 0 }
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local Shadow = (PG.Theme and PG.Theme.Shadow) or nil
+  local Font = (PG.Theme and PG.Theme.FontTemplate) or nil
+  -- One selection idiom: the selected segment is painted, never forbidden.
+  -- The inline colour escape is load-bearing - it is what renders the selected
+  -- label gold THROUGH the disabled font object. Keep it if paint() is ever
+  -- refactored.
+  local SEL_CODE = (C and C.chgold) or "|cffffd876"
+  local TINT = (C and C.VIOLET) or { 0.45, 0.32, 0.68 }
 
-  local label = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  label:SetPoint("TOPLEFT", f, "TOPLEFT", SEG_INSET, 0)
+  local label = f:CreateFontString(nil, "OVERLAY", Font and Font("T") or "GameFontNormal")
+  label:SetPoint("TOP", f, "TOP", 0, 0)
+  label:SetWidth(width)
+  label:SetJustifyH("CENTER")   -- the label and the block are one centred unit
+  label:SetWordWrap(false)
   label:SetText("Audience")
-  if C and theme == "goblin" then
-    label:SetTextColor(C.INK[1], C.INK[2], C.INK[3])
-  elseif C and theme == "faire" then
+  if C then
     label:SetTextColor(C.CHALK[1], C.CHALK[2], C.CHALK[3])
-    if PG.Theme.Shadow then PG.Theme.Shadow(label) end
+    if Shadow then Shadow(label) end
   end
 
-  -- fallback hint (SCOPE.md 1.3), below the 44px block; empty most of the time
-  local hint = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  -- fallback hint (SCOPE.md 1.3), INSIDE the block; empty most of the time.
+  -- Never wraps: two lines would put it back outside the frame.
+  local hint = f:CreateFontString(nil, "OVERLAY", Font and Font("S") or "GameFontHighlightSmall")
   hint:SetPoint("TOPLEFT", f, "TOPLEFT", SEG_INSET, -44)
   hint:SetPoint("TOPRIGHT", f, "TOPRIGHT", -SEG_INSET, -44)
-  hint:SetJustifyH("LEFT")
+  hint:SetJustifyH("CENTER")
+  hint:SetWordWrap(false)
+  hint:SetMaxLines(1)
   hint:SetText("")
   if C then hint:SetTextColor(C.BRASS[1], C.BRASS[2], C.BRASS[3]) end
+  if Shadow then Shadow(hint) end
 
   local selected = nil
   local segs = {}
@@ -407,10 +480,15 @@ function PG.UI.ScopePicker(parent, cfg)
       if not ok then
         -- NOT :Disable()d: a disabled Button is a dead hover target on some
         -- builds and the tooltip here IS the feature. The click is swallowed in
-        -- the handler instead, and the grey label plus faded face say "no".
+        -- the handler instead, and the faded face says "no".
+        --
+        -- Faded ONCE. It used to be SetAlpha(0.6) AND a |cff808080 label, which
+        -- put the label at ~2.7:1 - and the disabled state is only a message if
+        -- you can read it. Alpha on the button dims the label and its own art
+        -- together, so the label keeps its contrast against the face it sits on.
         b:SetEnabled(true)
-        b:SetAlpha(0.6)
-        b:SetText(SCOPE_GREY .. SCOPE_LABEL[scope] .. "|r")
+        b:SetAlpha((PG.Theme and PG.Theme.DISABLED_ALPHA) or 0.55)
+        b:SetText(SCOPE_LABEL[scope])
         b.tint:Hide()
       elseif scope == selected then
         -- the ledger-tab idiom (Ledger.lua): the selected one is the disabled-
@@ -429,7 +507,9 @@ function PG.UI.ScopePicker(parent, cfg)
   end
 
   local prev
-  for i = #SCOPE_ORDER, 1, -1 do    -- built right to left; right-aligned to -20
+  local blockX = math.floor((width - SEG_BLOCK) / 2)   -- the block is centred
+  if blockX < SEG_INSET then blockX = SEG_INSET end
+  for i = 1, #SCOPE_ORDER do        -- built left to right, under the label
     local scope = SCOPE_ORDER[i]
     local b = PG.UI.Button(f, SCOPE_LABEL[scope], SEG_W, SEG_H, function(self)
       if self.__pgOff then
@@ -439,9 +519,9 @@ function PG.UI.ScopePicker(parent, cfg)
       selectScope(self.__pgScope, true)
     end)
     if prev then
-      b:SetPoint("TOPRIGHT", prev, "TOPLEFT", -SEG_GAP, 0)
+      b:SetPoint("TOPLEFT", prev, "TOPRIGHT", SEG_GAP, 0)
     else
-      b:SetPoint("TOPRIGHT", f, "TOPRIGHT", -SEG_INSET, -20)
+      b:SetPoint("TOPLEFT", f, "TOPLEFT", blockX, -20)
     end
     b.__pgScope = scope
     b.tint = b:CreateTexture(nil, "OVERLAY")
@@ -527,23 +607,20 @@ end
 -- silently auto-decline the first - that replacement path now only fires for a
 -- genuine re-invitation to the SAME session.
 --
--- Keys are unbounded over a session's life, so frames are pooled per theme
--- rather than kept per key. At most ASK_MAX are active at once, so each pool
--- tops out at ASK_MAX frames and CreateFrame calls stay bounded.
+-- Keys are unbounded over a session's life, so frames are pooled rather than
+-- kept per key. At most ASK_MAX are active at once, so the pool tops out at
+-- ASK_MAX frames and CreateFrame calls stay bounded.
 local ASK_MAX = 3
 PG.UI.ASK_MAX = ASK_MAX   -- games route invitation number ASK_MAX+1 to the launcher
 
-local askPool = {}   -- theme name -> array of frames (active or idle)
+local askPool = {}   -- ONE array of frames (active or idle), <= ASK_MAX
 local askActive = {} -- key -> frame
 local askOrder = {}  -- keys in activation order; drives the stack layout
 
--- Per-theme Ask flavor (icon + sounds). Goblin keeps the SKIN.md 2.3 coin
--- treatment; faire swaps in the dice mark and carnival-appropriate sounds
--- (every key exists in Theme's ASSETS/SOUNDS tables with reachable fallbacks).
-local ASK_STYLE = {
-  goblin = { icon = "coinpile", greet = "greet", accept = "coinlock", decline = "coincancel" },
-  faire  = { icon = "dice", greet = "ticket", accept = "click", decline = "coincancel" },
-}
+-- One Ask flavour. The icon is the only per-game thing left, and it is applied
+-- per ACTIVATION from the inviting game's accent - which is why one pool now
+-- serves every game instead of one pool per theme.
+local ASK_SOUND = { greet = "ticket", accept = "click", decline = "coincancel" }
 
 local function safetyAllClear()
   local s = PG.Safety and PG.Safety.state
@@ -602,57 +679,65 @@ local function finishAsk(f, accepted)
   if cb then cb() end
 end
 
-local function buildAsk(theme)
+local function buildAsk()
   local f = CreateFrame("Frame", nil, UIParent, "BackdropTemplate")
-  f.__pgAskTheme = theme or "plain" -- the theme is baked in at build time
-  f:SetSize(340, 130)
+  f:SetSize(360, 140)
   f:SetFrameStrata("DIALOG")
-  applyBackdrop(f)
-  f.text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  f.text:SetPoint("TOPLEFT", 18, -18)
-  f.text:SetPoint("TOPRIGHT", -18, -18)
-  f.text:SetJustifyH("CENTER")
-  f.timerText = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  applyBackdrop(f)   -- the ultimate fallback; Skin paints the one design over it
+  local Theme = PG.Theme
+  local Font = Theme and Theme.FontTemplate
+  local C = (Theme and Theme.C) and Theme.C() or nil
+  if Theme and Theme.Skin then
+    Theme.Skin(f)    -- one backdrop, pop-on-show, OnHide contract
+  end
+  -- the countdown first: the body's bottom rail anchors to it, so a longer
+  -- invitation can never run down through it into the buttons
+  f.timerText = f:CreateFontString(nil, "OVERLAY", Font and Font("S") or "GameFontNormalSmall")
   f.timerText:SetPoint("BOTTOM", 0, 44)
+  f.timerText:SetJustifyH("CENTER")
+  -- 36px mark on the TEXT's top rail, not floating at the frame's centre: with
+  -- a two-line body (every real invitation is exactly two lines) the old
+  -- LEFT 16,8 anchor left the icon beside white space.
+  if Theme and Theme.Icon then
+    f.icon = Theme.Icon(f, "ticket", 36)
+    f.icon:SetPoint("TOPLEFT", 16, -18)
+  end
+  f.text = f:CreateFontString(nil, "OVERLAY", Font and Font("B") or "GameFontHighlight")
+  f.text:SetPoint("TOPLEFT", f.icon and 62 or 18, -18)
+  f.text:SetPoint("TOPRIGHT", -18, -18)
+  f.text:SetJustifyH("CENTER")   -- one invitation sentence on a symmetric popup
+  f.text:SetJustifyV("TOP")
+  -- Bounded vertically, but by a HEIGHT, not by a third anchor: the box already
+  -- has a left and a right, and a BOTTOM point would also constrain its centre
+  -- x to the frame's, which contradicts them. 60 = the -18 top rail down to the
+  -- countdown at -84, and 4 lines of 12pt cannot exceed it. Today's longest
+  -- invitation is 2 lines; without this a wire-format change could run the body
+  -- straight through the countdown and into the buttons.
+  f.text:SetHeight(60)
+  f.text:SetMaxLines(4)
+  if C then
+    -- chalk body (~14:1 on the board), CHRED countdown as the urgency cue;
+    -- the number itself never animates
+    f.text:SetTextColor(C.CHALK[1], C.CHALK[2], C.CHALK[3])
+    f.timerText:SetTextColor(C.CHRED[1], C.CHRED[2], C.CHRED[3])
+  end
+  if Theme and Theme.Shadow then
+    Theme.Shadow(f.text)
+    Theme.Shadow(f.timerText)
+  end
   f.acceptBtn = PG.UI.Button(f, "Accept", 130, 24, function() finishAsk(f, true) end)
   f.acceptBtn:SetPoint("BOTTOMLEFT", 20, 14)
   f.declineBtn = PG.UI.Button(f, "Decline", 130, 24, function() finishAsk(f, false) end)
   f.declineBtn:SetPoint("BOTTOMRIGHT", -20, 14)
-  -- Themed variant (SKIN.md 2.3): per-theme treatment + icon + pop-on-show +
-  -- sounds. Goblin keeps parchment/ink/coins; faire uses chalk-on-board text
-  -- (rule 6.1: never INK on the chalkboard) with the dice mark. Buttons stay
-  -- UIPanelButtonTemplate (raid-facing reliability); the plain look above is
-  -- the fallback at every layer.
-  if theme and PG.Theme and PG.Theme.Skin then
-    local style = ASK_STYLE[theme] or ASK_STYLE.goblin
-    f:SetSize(360, 140)
-    PG.Theme.Skin(f, theme) -- backdrop/parchment, pop-on-show, OnHide contract
-    local C = PG.Theme.C(theme)
-    f.icon = PG.Theme.Icon(f, style.icon, 36)
-    f.icon:SetPoint("LEFT", 16, 8)
-    f.text:ClearAllPoints()
-    f.text:SetPoint("TOPLEFT", 62, -18)
-    f.text:SetPoint("TOPRIGHT", -18, -18)
-    f.text:SetJustifyH("LEFT")
-    if theme == "faire" then
-      -- chalkboard: CHALK body (~14:1 on BOARD) + shadow, CHRED countdown
-      f.text:SetTextColor(C.CHALK[1], C.CHALK[2], C.CHALK[3])
-      if PG.Theme.Shadow then PG.Theme.Shadow(f.text) end
-      f.timerText:SetTextColor(C.CHRED[1], C.CHRED[2], C.CHRED[3])
-      if PG.Theme.Shadow then PG.Theme.Shadow(f.timerText) end
-    else
-      f.text:SetTextColor(C.INK[1], C.INK[2], C.INK[3])
-      -- the countdown is the urgency cue; the number itself never animates
-      f.timerText:SetTextColor(C.LOSS[1], C.LOSS[2], C.LOSS[3])
-    end
+  if Theme and Theme.Sound then
     f:HookScript("OnShow", function(self)
       if self.active and not self.__pgGreeted then
         self.__pgGreeted = true -- once per activation, even across deferred shows
-        PG.Theme.Sound(style.greet)
+        Theme.Sound(ASK_SOUND.greet)
       end
     end)
-    f.acceptBtn:HookScript("OnClick", function() PG.Theme.Sound(style.accept) end)
-    f.declineBtn:HookScript("OnClick", function() PG.Theme.Sound(style.decline) end)
+    f.acceptBtn:HookScript("OnClick", function() Theme.Sound(ASK_SOUND.accept) end)
+    f.declineBtn:HookScript("OnClick", function() Theme.Sound(ASK_SOUND.decline) end)
   end
   -- safety hides the popup but the timeout keeps running (ticker, not
   -- OnUpdate) and still declines on expiry
@@ -664,20 +749,14 @@ local function buildAsk(theme)
   return f
 end
 
--- An idle frame of this theme, or a new one. Called only when the cap allows
--- another popup, so a pool holds at most ASK_MAX frames.
-local function acquireAsk(theme)
-  local name = theme or "plain"
-  local pool = askPool[name]
-  if not pool then
-    pool = {}
-    askPool[name] = pool
+-- An idle frame, or a new one. Called only when the cap allows another popup,
+-- so the pool holds at most ASK_MAX frames.
+local function acquireAsk()
+  for i = 1, #askPool do
+    if not askPool[i].active then return askPool[i] end
   end
-  for i = 1, #pool do
-    if not pool[i].active then return pool[i] end
-  end
-  local f = buildAsk(theme)
-  pool[#pool + 1] = f
+  local f = buildAsk()
+  askPool[#askPool + 1] = f
   return f
 end
 
@@ -696,8 +775,9 @@ end
 --                   Open games list plus one throttled toast (CONCURRENCY.md
 --                   5.6 rule 1). An Ask you cannot see must not silently
 --                   decline itself.
--- theme (optional, trailing - existing callers unaffected): "goblin" etc.
-function PG.UI.Ask(key, text, acceptLabel, declineLabel, timeoutSec, onAccept, onDecline, theme)
+-- accent (optional, trailing - the old `theme` slot, existing callers
+-- unaffected): the inviting game's code, which selects the popup's mark.
+function PG.UI.Ask(key, text, acceptLabel, declineLabel, timeoutSec, onAccept, onDecline, accent)
   if PG.IsDND() then
     if onDecline then onDecline() end
     return false, "dnd"
@@ -709,13 +789,17 @@ function PG.UI.Ask(key, text, acceptLabel, declineLabel, timeoutSec, onAccept, o
   -- ordering matters and must stay: finishAsk grabs the OLD callbacks before
   -- the new ones are bound below
   if prev then finishAsk(prev, false) end
-  local f = acquireAsk(theme)
+  local f = acquireAsk()
   f.active = true
   f.__pgGreeted = nil
   f.__pgAskKey = key
   askActive[key] = f
   askOrder[#askOrder + 1] = key
   f.onAccept, f.onDecline = onAccept, onDecline
+  -- the inviting game's mark, per activation (one pool, six possible marks)
+  if f.icon and PG.Theme and PG.Theme.Accent and PG.Theme.Tex then
+    PG.Theme.Tex(f.icon, PG.Theme.Accent(accent).mark)
+  end
   f.text:SetText(tostring(text or ""))
   f.acceptBtn:SetText(acceptLabel or "Accept")
   f.declineBtn:SetText(declineLabel or "Decline")
@@ -818,9 +902,7 @@ end
 
 -- every pooled frame, active or idle (idle ones are hidden and cheap to skip)
 local function forEachAskFrame(fn)
-  for _, pool in pairs(askPool) do
-    for i = 1, #pool do fn(pool[i]) end
-  end
+  for i = 1, #askPool do fn(askPool[i]) end
 end
 
 PG.RegisterInit(function()
@@ -846,6 +928,11 @@ end)
 -- click targets a mouse-swallowing overlay must not cover. Pure query - it
 -- moves nothing, registers nothing, and lives here (not next to the solver)
 -- only because it needs the Ask registry above.
+-- Declared here, above rectHits, because PG.UI.RectFree has to be able to see
+-- it: the reveal stage's first candidate anchor (CENTER +120) swallows the
+-- toast slot whole, and the stage's scrim is opaque enough to erase it.
+local toast
+
 local function rectHits(f, l, b, w, h)
   if not f:IsShown() then return false end
   local ol, ob, ow, oh = rectOf(f)
@@ -860,6 +947,7 @@ function PG.UI.RectFree(l, b, w, h)
   for i = 1, #managed do
     if rectHits(managed[i], l, b, w, h) then return false end
   end
+  if toast and rectHits(toast, l, b, w, h) then return false end
   local free = true
   forEachAskFrame(function(f)
     if free and rectHits(f, l, b, w, h) then free = false end
@@ -889,7 +977,6 @@ end
 --     fight that suppressed the screen in the first place.
 -------------------------------------------------------------------------------
 
-local toast
 local toastQ = {}       -- pending entries, oldest first
 local toastTicker
 local TOAST_LIFE  = 3
@@ -909,11 +996,29 @@ end
 
 local function buildToast()
   toast = CreateFrame("Frame", nil, UIParent)
-  toast:SetSize(700, 26)
-  toast:SetPoint("TOP", 0, -170)
+  -- 660 x 44: two 12pt lines and their padding.
+  --
+  -- It was 700 x 26 with a 16pt fontstring that had no width, and a FontString
+  -- with no width NEVER wraps - so nine real lines ran past the frame on one
+  -- line, worst case 166 characters, which on a 4:3 UIParent loses about 150px
+  -- off EACH end. The worst of them is the guild-cancel explanation, i.e. the
+  -- toast that most needs reading. 12pt raises the break-even from 87
+  -- characters to 116 and the second line catches the rest.
+  toast:SetSize(660, 44)
+  -- -110, not -170: Ask popup #1 sits at CENTER 0,140 and its DIALOG strata
+  -- draws over the toast's HIGH, so the overflow toast ("3 more games are
+  -- open") used to render behind the very popups it was describing.
+  toast:SetPoint("TOP", 0, -110)
   toast:SetFrameStrata("HIGH")
-  toast.text = toast:CreateFontString(nil, "OVERLAY", "GameFontHighlightLarge")
-  toast.text:SetPoint("CENTER")
+  local Font = PG.Theme and PG.Theme.FontTemplate
+  toast.text = toast:CreateFontString(nil, "OVERLAY", Font and Font("B") or "GameFontHighlight")
+  toast.text:SetPoint("TOPLEFT", 10, -6)
+  toast.text:SetPoint("TOPRIGHT", -10, -6)
+  toast.text:SetJustifyH("CENTER")
+  -- wrap, never truncate: these lines carry gold amounts, so two lines beat a
+  -- dropped tail
+  toast.text:SetWordWrap(true)
+  toast.text:SetMaxLines(2)
   if PG.Theme and PG.Theme.Shadow then
     PG.Theme.Shadow(toast.text) -- toast text always floats over the world
   end
@@ -1055,15 +1160,25 @@ end
 -- Returns a StatusBar with :Start(sec) / :Stop(). Purely visual: it fires no
 -- callbacks at zero; drive game logic from your own timers.
 function PG.UI.TimerBar(parent, w)
+  local M = (PG.Theme and PG.Theme.METRIC) or nil
+  local Font = PG.Theme and PG.Theme.FontTemplate
   local bar = CreateFrame("StatusBar", nil, parent)
-  bar:SetSize(w, 14)
+  -- 18, not 14: a 12pt countdown in a 14px track had 1.5px of air above and
+  -- below and read as cramped rather than as a deliberate inset.
+  bar:SetSize(w, (M and M.BAR_H) or 18)
   bar:SetStatusBarTexture("Interface\\TargetingFrame\\UI-StatusBar")
   bar:SetStatusBarColor(0.25, 0.7, 1)
   local bg = bar:CreateTexture(nil, "BACKGROUND")
   bg:SetAllPoints()
   bg:SetColorTexture(0, 0, 0, 0.6)
-  bar.text = bar:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  -- The countdown is centred, so it sits ON the fill for the first half of
+  -- every timer: 10pt white with no shadow was 2.32:1 on the plain fill and
+  -- 1.38:1 on the gold one. 12pt plus the standard over-art shadow, against a
+  -- darkened fill (Theme.TimerBar), is the whole fix.
+  bar.text = bar:CreateFontString(nil, "OVERLAY", Font and Font("B") or "GameFontHighlight")
   bar.text:SetPoint("CENTER")
+  bar.text:SetJustifyH("CENTER")
+  if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(bar.text) end
   bar:SetMinMaxValues(0, 1)
   bar:SetValue(0)
   local function onUpdate(self)
@@ -1072,7 +1187,9 @@ function PG.UI.TimerBar(parent, w)
       self:Stop()
     else
       self:SetValue(remaining / self.total)
-      self.text:SetText(tostring(math.ceil(remaining)))
+      -- "45s", matching PG.UI.Ask: two countdown widgets are frequently on
+      -- screen together and used to disagree about the unit
+      self.text:SetText(math.ceil(remaining) .. "s")
     end
   end
   function bar:Start(sec)
@@ -1084,20 +1201,10 @@ function PG.UI.TimerBar(parent, w)
   function bar:Stop()
     self:SetScript("OnUpdate", nil)
     self:SetValue(0)
-    self.text:SetText("")
+    self.text:SetText("0s")   -- land on zero; blanking it made it vanish
   end
-  -- Goblin bar skin when living inside a goblin-skinned window (SKIN.md
-  -- 2.4.1); every other theme keeps the plain look above. The bar and its
-  -- text never animate regardless of skin.
-  if PG.Theme and PG.Theme.TimerBar then
-    local host, theme = parent, nil
-    for _ = 1, 4 do
-      if not host then break end
-      theme = host.__pgTheme
-      if theme then break end
-      host = host.GetParent and host:GetParent() or nil
-    end
-    if theme == "goblin" then PG.Theme.TimerBar(bar) end
-  end
+  -- One bar skin, on every bar (it used to be gated on the goblin window). The
+  -- bar and its text never animate.
+  if PG.Theme and PG.Theme.TimerBar then PG.Theme.TimerBar(bar) end
   return bar
 end

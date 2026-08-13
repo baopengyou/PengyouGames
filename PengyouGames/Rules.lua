@@ -10,36 +10,79 @@ PG.Rules = {}
 local win, body, tabs, scroll
 local current
 
+-- Window geometry. 420x548 is the same rect the Ledger uses, so the two
+-- reference windows of the hub are one size and one set of insets.
+local WIN_W, WIN_H = 420, 548
+
 -- Rendering helpers -----------------------------------------------------------
 
--- Each page wears its own game's skin, so the Rules page for a game looks like
--- the game. Re-checked at 1.1.0 against what the six game files actually build:
--- Loot Goblins is the only goblin-skinned window in the suite; The Pull Book,
--- Rock Paper Scissors, Death Roll, The Gambler and Quiz all build faire ones.
--- So this one-liner is still exactly right for six pages and does not need to
--- become a table - but if a future game picks goblin, this is the line.
-local function themeOf(key)
-  return (key == "LG") and "goblin" or "faire"
-end
+-- There was a themeOf(key) here that returned "goblin" for Loot Goblins and
+-- "faire" for the other five, and a nine-line comment explaining the split. It
+-- never rendered: Theme.C has always ignored its argument and returned one
+-- frozen union table, and palette() below never branched on the name either.
+-- All six pages have always looked identical. Deleting it is documenting what
+-- already happened, not flattening a design.
+--
+-- What a page DOES get of its game's identity is real and is new: its accent
+-- mark on its tab, its accent colour in the rule under the page header, and
+-- its own name and tagline at the top of the page - which is the first time
+-- since the window shipped that a Rules page says which game it describes.
 
 local function mark(key)
   if PG.Theme and PG.Theme.Mark then return PG.Theme.Mark(key) end
   return ""
 end
 
+local function accent(key)
+  if PG.Theme and PG.Theme.Accent then return PG.Theme.Accent(key) end
+  return nil
+end
+
 local function shadow(fs)
   if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(fs) end
 end
 
--- Palette with literal fallbacks, so the page stays readable if the theme
--- layer is unavailable (same doctrine as the games).
-local function palette(themeName)
-  local c = (PG.Theme and PG.Theme.C) and PG.Theme.C(themeName) or nil
+local function fontOf(which)
+  if PG.Theme and PG.Theme.FontTemplate then return PG.Theme.FontTemplate(which) end
+  return "GameFontHighlight"
+end
+
+local function setFont(fs, which)
+  if PG.Theme and PG.Theme.SetFont then PG.Theme.SetFont(fs, which) end
+  return fs
+end
+
+-- The shared spacing grid, with the shipped literals as the fallback.
+local function metrics()
+  local M = PG.Theme and PG.Theme.METRIC
+  local top = ((M and M.TITLE_TOP) or -12)
+  local titleH = ((M and M.TITLE_H) or 24)
   return {
-    head = (c and c.CHGOLD) or { 1.00, 0.85, 0.46 },
-    body = (c and c.CHALK) or { 0.95, 0.93, 0.87 },
-    dim = (c and c.CHGRAY) or { 0.66, 0.66, 0.61 },
+    INSET   = (M and M.INSET) or 24,
+    FIRST   = top - titleH - ((M and M.TITLE_GAP) or 20),
+    SECTION = (M and M.SECTION) or 16,
+    RELATED = (M and M.RELATED) or 8,
+    LINE    = (M and M.LINE) or 4,
+    FOOTER  = (M and M.FOOTER) or 16,
+    BTN_H   = (M and M.BTN_H) or 22,
   }
+end
+
+-- Palette with literal fallbacks, so the page stays readable if the theme
+-- layer is unavailable (same doctrine as the games). One ramp, no argument.
+local function palette()
+  local R = PG.Theme and PG.Theme.ROLE
+  return {
+    head = (R and R.title) or { 1.00, 0.85, 0.46 },
+    body = (R and R.body) or { 0.95, 0.93, 0.87 },
+    dim = (R and R.detail) or { 0.80, 0.68, 0.42 },
+  }
+end
+
+-- The gold escape a selected tab's label is written with.
+local function SEL_CODE()
+  local c = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  return (c and c.chgold) or "|cffffd876"
 end
 
 -- The content ----------------------------------------------------------------
@@ -352,94 +395,193 @@ end
 
 -- Layout ---------------------------------------------------------------------
 
+-- The bullet marker is its own FontString one column to the left of the text,
+-- so a wrapped bullet hangs under its first line instead of wrapping flush
+-- under the dash. It used to be a literal "- " inside the wrapped string, which
+-- made every multi-line bullet read as an indented paragraph with a stray
+-- hyphen - and the "Each round" list on the Loot Goblins page is the densest
+-- list in the addon.
+local BULLET_MARK_X = 16
+local BULLET_TEXT_X = 28
+
 local function render(key)
   local page = PAGES[key]
   if not (page and body) then return end
   current = key
-  local pal = palette(themeOf(key))
+  local pal = palette()
+  local M = metrics()
+  local acc = accent(key)
 
   -- release the previous page's fontstrings back to the pool
   for i = 1, #body.lines do
     body.lines[i]:Hide()
     body.lines[i]:ClearAllPoints()
   end
+  -- the marker pool is SPARSE (bullets only), so it is swept by the line
+  -- index it shares with body.lines and every slot is nil-checked
+  for i = 1, #body.lines do
+    local mk = body.marks[i]
+    if mk then mk:Hide() end
+  end
+
+  -- The page header: the game's name, its accent rule and its tagline. Every
+  -- one of the three is new content on the page. The tagline used to be
+  -- anchored 4px ABOVE the scroll child's top edge, i.e. outside the
+  -- ScrollFrame's clip rect, so it has never once rendered - which left six
+  -- pages with nothing on them naming the game they describe.
+  local title = mark(acc and acc.mark or "book")
+  title = (title ~= "" and (title .. " ") or "") .. page.title
+  body.header:SetText(title)
+  body.header:SetTextColor(pal.head[1], pal.head[2], pal.head[3])
+  body.tagline:SetText(page.tagline)
+  body.tagline:SetTextColor(pal.dim[1], pal.dim[2], pal.dim[3])
+  local rc = (acc and acc.color) or pal.head
+  body.rule:SetColorTexture(rc[1], rc[2], rc[3], 0.9)
+
+  local headH = body.header:GetStringHeight()
+  local tagY = headH + M.LINE + 2 + M.RELATED
+  body.rule:ClearAllPoints()
+  body.rule:SetPoint("TOPLEFT", body, "TOPLEFT", 0, -(headH + M.LINE))
+  body.rule:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, -(headH + M.LINE))
+  body.tagline:ClearAllPoints()
+  body.tagline:SetPoint("TOPLEFT", body, "TOPLEFT", 0, -tagY)
+  body.tagline:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, -tagY)
+  -- measured AFTER the anchor pair: an unbound FontString reports one line
+  -- regardless of its text, so reading this first would put every block on the
+  -- page 12px too high the one time a tagline wraps
+  local tagH = body.tagline:GetStringHeight()
 
   local blocks = {}
   for i = 1, #page.blocks do blocks[i] = page.blocks[i] end
   local extra = scopeBlocks(key)
   for i = 1, #extra do blocks[#blocks + 1] = extra[i] end
 
-  local y = 0
+  local y = -(tagY + tagH + M.SECTION)
   local used = 0
+  local prevKind
   for i = 1, #blocks do
     local kind, text = blocks[i][1], blocks[i][2]
+    -- Gaps bind a block to what FOLLOWS it: a heading takes the section gap
+    -- above it and only the related gap below. The old loop added its extra
+    -- 4px AFTER anchoring the heading, so every heading in the window was
+    -- glued to the paragraph it was supposed to be separating from.
+    if i > 1 then
+      if kind == "h" then
+        y = y - M.SECTION
+      elseif kind == "b" and prevKind == "b" then
+        y = y - M.LINE
+      else
+        y = y - M.RELATED
+      end
+    end
     used = used + 1
     local fs = body.lines[used]
     if not fs then
-      fs = body:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+      fs = body:CreateFontString(nil, "OVERLAY", fontOf("B"))
       body.lines[used] = fs
     end
     fs:ClearAllPoints()
-    fs:SetPoint("TOPLEFT", body, "TOPLEFT", (kind == "b") and 16 or 0, y)
+    fs:SetPoint("TOPLEFT", body, "TOPLEFT", (kind == "b") and BULLET_TEXT_X or 0, y)
     fs:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, y)
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(true)
-    if kind == "h" then
-      fs:SetFontObject("GameFontNormal")
-      fs:SetText(text)
-      fs:SetTextColor(pal.head[1], pal.head[2], pal.head[3])
-      if PG.Theme and PG.Theme.SetHeader then PG.Theme.SetHeader(fs, 15) end
-      y = y - 4
-    else
-      fs:SetFontObject("GameFontHighlightSmall")
-      fs:SetText((kind == "b" and "- " or "") .. text)
-      fs:SetTextColor(pal.body[1], pal.body[2], pal.body[3])
-    end
+    -- One body size for the whole hub. Rules used to set its body at 10pt
+    -- while the Ledger and Settings set theirs at 12, and Rules carries by far
+    -- the most prose of the three.
+    setFont(fs, (kind == "h") and "T" or "B")
+    fs:SetText(text)
+    fs:SetTextColor((kind == "h") and pal.head[1] or pal.body[1],
+                    (kind == "h") and pal.head[2] or pal.body[2],
+                    (kind == "h") and pal.head[3] or pal.body[3])
     shadow(fs)
     fs:Show()
-    y = y - fs:GetStringHeight() - ((kind == "h") and 6 or 8)
+    if kind == "b" then
+      local mk = body.marks[used]
+      if not mk then
+        mk = body:CreateFontString(nil, "OVERLAY", fontOf("B"))
+        mk:SetWidth(BULLET_TEXT_X - BULLET_MARK_X)
+        mk:SetJustifyH("LEFT")
+        mk:SetWordWrap(false)
+        mk:SetMaxLines(1)
+        mk:SetText("-")
+        body.marks[used] = mk
+      end
+      setFont(mk, "B")
+      mk:SetTextColor(pal.dim[1], pal.dim[2], pal.dim[3])
+      shadow(mk)
+      mk:ClearAllPoints()
+      mk:SetPoint("TOPLEFT", body, "TOPLEFT", BULLET_MARK_X, y)
+      mk:Show()
+    end
+    y = y - fs:GetStringHeight()
+    prevKind = kind
   end
 
-  body:SetHeight(math.max(1, -y + 8))
+  body:SetHeight(math.max(1, -y + M.SECTION))
   if scroll then scroll:SetVerticalScroll(0) end
 
-  -- tab highlighting
+  -- Tab painting: ONE selection idiom, the scope picker's. The selected tab is
+  -- painted (accent tint + gold label), never dimmed - the file used to
+  -- brighten the selected tab to alpha 1 and dim the rest to 0.55 while the
+  -- Ledger, two clicks away, did the exact opposite and greyed its selected
+  -- tab out. The colour escape is what renders a gold label through the
+  -- disabled font object; keep it if this ever gets refactored.
+  local SEL = SEL_CODE()
   for k, btn in pairs(tabs) do
-    btn:SetAlpha(k == key and 1 or 0.55)
-  end
-  if win and win.title then
-    win.title:SetText(mark("book") ~= "" and (mark("book") .. " Rules") or "Rules")
-  end
-  if body.tagline then
-    body.tagline:SetText(page.title .. " - " .. page.tagline)
-    body.tagline:SetTextColor(pal.dim[1], pal.dim[2], pal.dim[3])
+    if k == key then
+      btn:SetEnabled(false)
+      btn:SetText(SEL .. btn.__pgLabel .. "|r")
+      if btn.tint then btn.tint:Show() end
+    else
+      btn:SetEnabled(true)
+      btn:SetText(btn.__pgLabel)
+      if btn.tint then btn.tint:Hide() end
+    end
+    btn:SetAlpha(1)
   end
 end
 
--- The tab strip, in launcher order. Six tabs no longer fit one row: at the
--- shipped 126px width plus a 4px gap that is 6 * 130 = 780px inside a 420px
--- window. The three options were narrower tabs, abbreviated labels, or a second
--- row - and the first two both break "Rock Paper Scissors", which is the whole
--- reason the tab is 126px wide in the first place. So: TWO ROWS OF THREE, tabs
--- unchanged at 126x22, row 1 the 1.0.0 games and row 2 the 1.1.0 games, which
--- is the same grouping the launcher grid uses.
+-- The tab strip, in launcher order. TWO ROWS OF THREE: six tabs have never fit
+-- one row at any legible width, and row 1 is the 1.0.0 games / row 2 the 1.1.0
+-- games, the same grouping the launcher grid uses.
 --
--- The arithmetic, so nobody has to re-measure it: x = 14 + col * 130 puts the
--- three columns at 14, 144 and 274, and the rightmost tab ends at 400, leaving
--- a 20px right margin in the 420px window. y = -38 - row * 26 (22 button + 4
--- gap) puts row 1 at -38..-60 and row 2 at -64..-86, which clears the scroll
--- frame's new top edge at -96.
+-- The arithmetic, derived rather than restated: three columns of TAB_W with
+-- TAB_GAP between them fill exactly the content column, so the strip's left
+-- edge is the page inset and its right edge is the page inset - the tabs used
+-- to start at x=14 while the scroll frame below them started at x=16 and the
+-- rightmost tab stopped at 400, three different left/right values on one page.
+--
+-- "Rock Paper" rather than "Rock Paper Scissors": the full name filled 101 of
+-- the old 126px tab (and 80% of it was one label while "Quiz" filled 20% of the
+-- same width). The full name is not lost - it is now the page header, in the
+-- largest text on the page, which is where a player looks to find out what
+-- they are reading about.
 local TAB_ORDER = {
-  { "LG", "Loot Goblins" }, { "PB", "Pull Book" }, { "RPS", "Rock Paper Scissors" },
+  { "LG", "Loot Goblins" }, { "PB", "Pull Book" }, { "RPS", "Rock Paper" },
   { "DR", "Death Roll" }, { "GB", "The Gambler" }, { "QZ", "Quiz" },
 }
 
+-- UIPanelScrollFrameTemplate anchors its bar OUTSIDE the frame at x=+6, so a
+-- -32 right inset left the bar's right edge under the window's border art.
+local SCROLLBAR_RESERVE = 38
+
 local function build()
-  -- 480 -> 506: the second tab row costs exactly 26px and the scroll top drops
-  -- by exactly 26, so the viewport is unchanged at 394px and no body content is
-  -- lost. Only the point and the per-window scale are persisted, never a size,
-  -- so this is safe for a user who already has a Rules window position saved.
-  win = PG.UI.Window("rules", "Rules", 420, 506, "neutral")
+  -- 420x548: the Ledger's rect. The extra height over the shipped 506 is the
+  -- 20px title gap the tab strip now takes plus the section gap under it, so
+  -- the viewport is unchanged. Only the point and the per-window scale are
+  -- persisted, never a size, so this is safe for an existing user.
+  win = PG.UI.Window("rules", "Rules", WIN_W, WIN_H, "PG")
+
+  local M = metrics()
+  local CONTENT_W = WIN_W - M.INSET * 2
+  local TAB_GAP = 12
+  local TAB_W = math.floor((CONTENT_W - TAB_GAP * 2) / 3)
+  local TAB_PITCH = M.BTN_H + M.LINE
+
+  local bookMark = mark("book")
+  if win.title then
+    win.title:SetText(bookMark ~= "" and (bookMark .. " Rules") or "Rules")
+  end
 
   tabs = {}
   for i = 1, #TAB_ORDER do
@@ -447,25 +589,55 @@ local function build()
     local col = (i - 1) % 3
     -- math.floor, not an integer-division operator: WoW Lua is 5.1 and has none
     local row = math.floor((i - 1) / 3)
-    local b = PG.UI.Button(win, label, 126, 22, function() render(key) end)
-    b:SetPoint("TOPLEFT", 14 + col * 130, -38 - row * 26)
+    local acc = accent(key)
+    local glyph = mark(acc and acc.mark or "book")
+    local full = (glyph ~= "" and (glyph .. " ") or "") .. label
+    local b = PG.UI.Button(win, full, TAB_W, M.BTN_H, function() render(key) end)
+    b:SetPoint("TOPLEFT", M.INSET + col * (TAB_W + TAB_GAP), M.FIRST - row * TAB_PITCH)
+    b.__pgLabel = full
+    -- the selected tab's paint, in the game's own accent
+    local ac = (acc and acc.color) or { 0.45, 0.32, 0.68 }
+    b.tint = b:CreateTexture(nil, "OVERLAY")
+    b.tint:SetAllPoints()
+    b.tint:SetColorTexture(ac[1], ac[2], ac[3], 0.16)
+    b.tint:SetBlendMode("ADD")
+    b.tint:Hide()
     tabs[key] = b
   end
 
-  -- scroll area
+  -- scroll area. Both insets are derived: the left is the page inset, the right
+  -- is the page inset plus the scrollbar's own width.
+  local stripH = TAB_PITCH * 2 - M.LINE
   scroll = CreateFrame("ScrollFrame", nil, win, "UIPanelScrollFrameTemplate")
-  scroll:SetPoint("TOPLEFT", 16, -96)
-  scroll:SetPoint("BOTTOMRIGHT", -32, 16)
+  scroll:SetPoint("TOPLEFT", M.INSET, M.FIRST - stripH - M.SECTION)
+  scroll:SetPoint("BOTTOMRIGHT", -SCROLLBAR_RESERVE, M.FOOTER)
 
   body = CreateFrame("Frame", nil, scroll)
-  body:SetSize(360, 10)
+  body:SetSize(WIN_W - M.INSET - SCROLLBAR_RESERVE, 10)
   body.lines = {}
+  body.marks = {}
   scroll:SetScrollChild(body)
 
-  -- tagline sits above the blocks, inside the scroll child
-  body.tagline = body:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  body.tagline:SetPoint("BOTTOMLEFT", body, "TOPLEFT", 0, 4)
-  body.tagline:SetJustifyH("LEFT")
+  -- The page header block, INSIDE the scroll child's clip rect this time. The
+  -- name and tagline are centred as one unit of chrome over the left-aligned
+  -- prose below them; the 2px rule between them is the game's accent colour.
+  body.header = body:CreateFontString(nil, "OVERLAY", fontOf("D2"))
+  setFont(body.header, "D2")
+  body.header:SetPoint("TOPLEFT", body, "TOPLEFT", 0, 0)
+  body.header:SetPoint("TOPRIGHT", body, "TOPRIGHT", 0, 0)
+  body.header:SetJustifyH("CENTER")
+  body.header:SetWordWrap(false)
+  body.header:SetMaxLines(1)
+  shadow(body.header)
+
+  body.rule = body:CreateTexture(nil, "ARTWORK")
+  body.rule:SetHeight(2)
+
+  body.tagline = body:CreateFontString(nil, "OVERLAY", fontOf("S"))
+  body.tagline:SetJustifyH("CENTER")
+  body.tagline:SetWordWrap(true)
+  body.tagline:SetMaxLines(2)
+  shadow(body.tagline)
 end
 
 -- key (optional): "LG" | "PB" | "RPS" | "DR" | "GB" | "QZ". Anything else -

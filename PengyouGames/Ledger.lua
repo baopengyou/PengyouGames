@@ -644,18 +644,49 @@ end
 
 local ensureWindow
 
+-- 420x548: the same rect the Rules window uses, so the two list-bearing hub
+-- windows are one size, one inset and one rhythm.
+local WIN_W, WIN_H = 420, 548
+
 local win, tabTonightBtn, tabSettleBtn, confirm
-local rows, dismissBtns = {}, {}
+local rows, values, dismissBtns = {}, {}, {}
+local emptyFS
 local dismissMax = 0 -- dismissBtns is sparse (headers only): '#' would lie
 local activeTab = "tonight"
-local MAX_LINES = 15
-local ROW_W, HEAD_W = 356, 326
+
+-- EVERY ONE OF THESE IS DERIVED. MAX_LINES used to be the literal 15, which is
+-- what hid the second session of the night: a 40-player game is 42 display
+-- items, so a second session's header - and therefore its [x], the only route
+-- to PG.Ledger.Dismiss - simply never rendered, and the only way out was
+-- "Clear tonight", which wipes everything. The sheet meanwhile stretched to
+-- fill the window while the cap stayed 15, leaving a slab of empty parchment
+-- under the last row. ensureWindow computes all four from the window it just
+-- built; the literals here are only what a Refresh before the first build
+-- would see, and that path returns early anyway.
+local INSET      = 24
+local ROWS_TOP   = -102 -- first row's TOPLEFT y, 8px inside the sheet
+local ROW_PITCH  = 20   -- 12pt line + 8 leading: the one well-tuned rhythm here
+local ROW_LINE_H = 14   -- a 12pt line including its descenders
+local SHEET_BOT  = 54   -- the sheet's BOTTOMRIGHT y offset (footer + its gap)
+local AMT_W      = 100  -- the money column: "+4,000,000g" with its coin glyph
+local AMT_GAP    = 8
+local ROW_INDENT = 16   -- a real hanging indent, not three proportional spaces
+local MAX_LINES  = 15
+local ROW_W      = WIN_W - INSET * 2
+local HEAD_W     = ROW_W - 32 -- clears the header's own dismiss button
+local EMPTY_Y    = ROWS_TOP - 60 -- the empty state sits mid-sheet, not at row 1
 
 -- Bright defaults (today's look). When the theme layer is present the init
--- block swaps them for the dark-on-parchment neutral palette (SKIN.md 1.1/2.9)
--- and sets INK, matching the parchment sheet the rows then render on.
+-- block swaps them for the parchment palette and sets INK, matching the
+-- parchment sheet the rows then render on. The sheet and its ink are the one
+-- sanctioned dark-on-light surface in the addon (with the ticket-stub card
+-- face); nothing else in this file may reach for a parchment colour.
 -- Presentation only; every value is a plain escape-code string.
 local GREEN, RED, GRAY, GOLD = "|cff40ff40", "|cffff5050", "|cffaaaaaa", "|cffffd200"
+-- The empty state is the only line that is ever alone on screen, so it does not
+-- take GRAY: on the parchment sheet GRAY resolves to FADE (#6b5c42), which is
+-- ~3.5:1 and was the lowest-contrast text in the window. It takes AMBER.
+local EMPTY = "|cffaaaaaa"
 local INK -- floats; nil -> rows keep the plain white look
 
 local function mark(key)
@@ -668,31 +699,87 @@ local function tmoney(g)
   return PG.Money(g)
 end
 
+local function fontOf(which)
+  if PG.Theme and PG.Theme.FontTemplate then return PG.Theme.FontTemplate(which) end
+  return "GameFontHighlight"
+end
+
+local function inkify(fs)
+  if INK then fs:SetTextColor(INK[1], INK[2], INK[3]) end -- ink on parchment
+  return fs
+end
+
+-- The label column. Anchored per refresh rather than at creation, because the
+-- indent is per item now (a session's player rows hang under their header).
 local function rowAt(i)
   if not rows[i] then
-    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-    fs:SetPoint("TOPLEFT", 22, -94 - (i - 1) * 20)
-    fs:SetWidth(ROW_W)
+    local fs = win:CreateFontString(nil, "OVERLAY", fontOf("B"))
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(false)
-    if INK then fs:SetTextColor(INK[1], INK[2], INK[3]) end -- ink on parchment
+    fs:SetMaxLines(1)
+    inkify(fs)
     rows[i] = fs
   end
   return rows[i]
 end
 
+-- THE MONEY COLUMN. Money is right-aligned in its own column and the NAME is
+-- what truncates now. Before this, a settle line was one no-wrap string ending
+-- in the amount - "Name-Realm pays Name-Realm 1,250g" - so two cross-realm
+-- names (the common case in a pug raid, not the edge case) pushed the line past
+-- its width and the ellipsis ate the number the player opened the window for.
+-- A line that says who pays whom and refuses to say how much is the worst
+-- possible failure for this window.
+local function valueAt(i)
+  if not values[i] then
+    local fs = win:CreateFontString(nil, "OVERLAY", fontOf("B"))
+    fs:SetWidth(AMT_W)
+    fs:SetJustifyH("RIGHT")
+    fs:SetWordWrap(false)
+    fs:SetMaxLines(1)
+    inkify(fs)
+    values[i] = fs
+  end
+  return values[i]
+end
+
 -- One [x] per visible session header. The pool is indexed by LINE, so a button
 -- is only ever created for a line that has actually shown a header.
+--
+-- UIPanelCloseButton at 24x24, not an 18x18 UIPanelButtonTemplate labelled with
+-- a lowercase "x": that template's nine-slice art is drawn for >=22px and
+-- squashed at 18, and every other dismiss in the addon is a close button.
+-- Closing something is one gesture with one shape.
 local function dismissAt(i)
   if not dismissBtns[i] then
-    local b = PG.UI.Button(win, "x", 18, 18, function(self)
+    local b = CreateFrame("Button", nil, win, "UIPanelCloseButton")
+    b:SetSize(24, 24)
+    -- the template ships an OnClick that hides its parent; ours dismisses one
+    -- session and must replace it, or the button would close the whole window
+    b:SetScript("OnClick", function(self)
       if self.__pgId then PG.Ledger.Dismiss(self.__pgId) end
     end)
-    b:SetPoint("TOPRIGHT", -22, -94 - (i - 1) * 20 + 2)
     dismissBtns[i] = b
     if i > dismissMax then dismissMax = i end
   end
   return dismissBtns[i]
+end
+
+-- The empty state gets its own centred line across the sheet instead of being
+-- written into roster row 1, where it inherited the row inset and the left
+-- justification of a list and read as "here is item zero" rather than "there
+-- is nothing here". It is also the one time a line is the only thing on
+-- screen, so it takes AMBER rather than the ~3.5:1 FADE it used to have.
+local function emptyAt()
+  if not emptyFS then
+    emptyFS = win:CreateFontString(nil, "OVERLAY", fontOf("B"))
+    emptyFS:SetPoint("TOPLEFT", INSET, EMPTY_Y)
+    emptyFS:SetPoint("TOPRIGHT", -INSET, EMPTY_Y)
+    emptyFS:SetJustifyH("CENTER")
+    emptyFS:SetWordWrap(true)
+    emptyFS:SetMaxLines(2)
+  end
+  return emptyFS
 end
 
 local function netText(net)
@@ -700,9 +787,49 @@ local function netText(net)
   return color .. ((net > 0 and "+" or "") .. tmoney(net)) .. "|r"
 end
 
+-- ONE selection idiom for the whole addon: the selected tab is PAINTED, never
+-- forbidden. This window used to grey its selected tab out with SetEnabled
+-- while the Rules window, two clicks away, brightened its selected tab and
+-- dimmed the rest - two opposite answers to one question. The scope picker's
+-- reasoning wins everywhere: a disabled face plus the accent tint plus a gold
+-- label, so "selected" can never be read as "forbidden". The colour escape is
+-- load-bearing; it is what renders gold through the disabled font object.
+local function paintTabs()
+  if not (tabTonightBtn and tabSettleBtn) then return end
+  local c = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local sel = (c and c.chgold) or "|cffffd876"
+  local pair = { { tabTonightBtn, "tonight" }, { tabSettleBtn, "settle" } }
+  for i = 1, #pair do
+    local b, tab = pair[i][1], pair[i][2]
+    if activeTab == tab then
+      b:SetEnabled(false)
+      b:SetText(sel .. b.__pgLabel .. "|r")
+      if b.tint then b.tint:Show() end
+    else
+      b:SetEnabled(true)
+      b:SetText(b.__pgLabel)
+      if b.tint then b.tint:Hide() end
+    end
+    b:SetAlpha(1)
+  end
+end
+
 -- "Loot Goblins - Grizzle - Party - 21:34". The audience is spelled out
 -- because "who was this game with" is the first question a disputed row
 -- raises; imported pre-0.6.0 rows say so instead of inventing provenance.
+--
+-- THE NAME POLICY, stated so it stops reading as an accident: a header names
+-- the host with shortName because the host here is PROVENANCE - context for the
+-- session - while every row and every settle line carries the full Name-Realm
+-- because those name a COUNTERPARTY you are about to trade gold with, and two
+-- Grizzles on two realms settling different amounts is a wrong-person-paid bug.
+-- Full names in the header instead would push the worst real header
+-- ("Loot Goblins - Name-BlackwaterRaiders - Public - 23:59", ~347px) past the
+-- 340px this line has once its dismiss button is reserved, i.e. it would trade
+-- a cosmetic inconsistency for a real truncation.
+--
+-- The line is BOUND (HEAD_W, wrap off, one line), so meta.label's 48-character
+-- allowance can only ever cost an ellipsis here, never an overflow.
 local function headerText(s)
   if s.game == "?" then return GOLD .. "Earlier games (imported)|r" end
   local text = (s.label or GAME_LABEL[s.game] or s.game)
@@ -717,20 +844,23 @@ end
 
 -- Display items for the Tonight tab: one header per session (dismissable),
 -- then that session's rows, net descending.
+--
+-- An item is { text = <label column>, value = <money column>, indent = <px>,
+-- head = true, id = <session id> }. The empty case returns NOTHING and lets
+-- Refresh show the centred empty state; it used to be items[1], which also
+-- meant the settle tab's section glyph was prepended to the empty message and
+-- a section marker sometimes rendered as a bullet on a sentence.
 local function tonightItems()
   local items = {}
   local sessions = PG.Ledger.Sessions()
-  if not sessions[1] then
-    items[1] = { text = GRAY .. "No games recorded tonight.|r" }
-    return items
-  end
+  if not sessions[1] then return items end
   local me = PG.FullName("player")
   local mine
   for _, row in ipairs(PG.Ledger.Tonight()) do
     if row.name == me then mine = row.net end
   end
   if mine then
-    items[#items + 1] = { text = "Tonight you are at " .. netText(mine) }
+    items[#items + 1] = { text = "Tonight you are at", value = netText(mine) }
   end
   for _, s in ipairs(sessions) do
     items[#items + 1] = { head = true, id = s.id, text = headerText(s) }
@@ -743,7 +873,9 @@ local function tonightItems()
       return a.name < b.name
     end)
     for _, r in ipairs(list) do
-      items[#items + 1] = { text = "   " .. r.name .. "  " .. netText(r.net) }
+      -- a real anchor offset, not three literal spaces: the old indent was
+      -- three PROPORTIONAL spaces, so it changed size with the font
+      items[#items + 1] = { text = r.name, value = netText(r.net), indent = ROW_INDENT }
     end
   end
   return items
@@ -755,25 +887,26 @@ local function settleItems()
   for _, t in ipairs(PG.Ledger.Settlement()) do
     local line
     if t.from == me then
-      line = GOLD .. "YOU pay " .. t.to .. " " .. tmoney(t.amount) .. "|r"
+      line = GOLD .. "YOU pay " .. t.to .. "|r"
     elseif t.to == me then
-      line = GOLD .. t.from .. " pays YOU " .. tmoney(t.amount) .. "|r"
+      line = GOLD .. t.from .. " pays YOU|r"
     else
-      line = t.from .. " pays " .. t.to .. " " .. tmoney(t.amount)
+      line = t.from .. " pays " .. t.to
     end
-    items[#items + 1] = { text = line }
+    items[#items + 1] = { text = line, value = tmoney(t.amount) }
   end
-  if not items[1] then items[1] = { text = GRAY .. "All square - nothing to settle.|r" } end
-  -- treasure-sack section glyph heads the settle list: markup, zero frames
-  local glyph = mark("sack")
-  if glyph ~= "" then items[1].text = glyph .. " " .. items[1].text end
+  -- treasure-sack section glyph heads the settle list: markup, zero frames.
+  -- It can only ever head a real transfer now, never the empty state.
+  if items[1] then
+    local glyph = mark("sack")
+    if glyph ~= "" then items[1].text = glyph .. " " .. items[1].text end
+  end
   return items
 end
 
 Refresh = function()
   if not win then return end
-  tabTonightBtn:SetEnabled(activeTab ~= "tonight")
-  tabSettleBtn:SetEnabled(activeTab ~= "settle")
+  paintTabs()
   local items = activeTab == "tonight" and tonightItems() or settleItems()
   local shown = math.min(#items, MAX_LINES)
   if #items > MAX_LINES then
@@ -790,18 +923,51 @@ Refresh = function()
   end
   for i = 1, shown do
     local item = items[i]
+    local y = ROWS_TOP - (i - 1) * ROW_PITCH
+    local indent = item.indent or 0
     local fs = rowAt(i)
-    fs:SetWidth(item.head and HEAD_W or ROW_W)
+    fs:ClearAllPoints()
+    fs:SetPoint("TOPLEFT", INSET + indent, y)
+    if item.head then
+      fs:SetWidth(HEAD_W - indent)
+    elseif item.value then
+      fs:SetWidth(ROW_W - indent - AMT_W - AMT_GAP)
+    else
+      fs:SetWidth(ROW_W - indent)
+    end
     fs:SetText(item.text)
     fs:Show()
+    -- one value FontString per shown line, always, so the pool stays dense and
+    -- the hide sweep below can trust '#values'
+    local v = valueAt(i)
+    v:ClearAllPoints()
+    v:SetPoint("TOPRIGHT", -INSET, y)
+    v:SetText(item.value or "")
+    v:Show()
     if item.head then
       local b = dismissAt(i)
       b.__pgId = item.id
+      -- centred on the header's own line: the row is ROW_LINE_H tall and the
+      -- button is 24, so it rides (24 - ROW_LINE_H) / 2 above the row's top
+      b:ClearAllPoints()
+      b:SetPoint("TOPRIGHT", -(INSET - 4), y + math.floor((24 - ROW_LINE_H) / 2))
       b:Show()
     end
   end
   for i = shown + 1, #rows do
     rows[i]:Hide()
+  end
+  for i = shown + 1, #values do
+    values[i]:Hide()
+  end
+  local empty = emptyAt()
+  if shown == 0 then
+    empty:SetText(EMPTY .. ((activeTab == "tonight")
+      and "No games recorded tonight."
+      or "All square - nothing to settle.") .. "|r")
+    empty:Show()
+  else
+    empty:Hide()
   end
 end
 
@@ -817,31 +983,40 @@ local function buildConfirm()
     insets = { left = 4, right = 4, top = 4, bottom = 4 },
   })
   confirm:SetBackdropColor(0, 0, 0, 0.9)
-  local text = confirm:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  local text = confirm:CreateFontString(nil, "OVERLAY", fontOf("B"))
   text:SetPoint("TOPLEFT", 16, -16)
   text:SetPoint("TOPRIGHT", -16, -16)
+  -- one self-contained sentence on a symmetric popup: centred, like the Ask
+  text:SetJustifyH("CENTER")
+  text:SetWordWrap(true)
+  text:SetMaxLines(3)
   text:SetText("Clear tonight's ledger? This only affects what you see.")
-  local yes = PG.UI.Button(confirm, "Clear", 100, 22, function()
+  local yes = PG.UI.Button(confirm, "Clear", 105, 22, function()
     PG.Ledger.ClearTonight()
     confirm:Hide()
     Refresh()
   end)
-  yes:SetPoint("BOTTOMLEFT", 20, 14)
-  local no = PG.UI.Button(confirm, "Cancel", 100, 22, function() confirm:Hide() end)
-  no:SetPoint("BOTTOMRIGHT", -20, 14)
-  -- neutral skin + parchment inset behind the warning text (SKIN.md 2.9);
-  -- the plain dark look above stays the fallback. No animation beyond Pop.
+  yes:SetPoint("BOTTOMLEFT", 20, 16)
+  local no = PG.UI.Button(confirm, "Cancel", 105, 22, function() confirm:Hide() end)
+  no:SetPoint("BOTTOMRIGHT", -20, 16)
+  -- the one skin + a parchment inset behind the warning text; the plain dark
+  -- look above stays the fallback. No animation beyond Pop.
   if PG.Theme and PG.Theme.Skin then
-    PG.Theme.Skin(confirm, "neutral")
+    PG.Theme.Skin(confirm, "PG")
     if PG.Theme.Tex then
       local inset = confirm:CreateTexture(nil, "ARTWORK", nil, -8)
       inset:SetPoint("TOPLEFT", 8, -8)
-      inset:SetPoint("BOTTOMRIGHT", -8, 40)
+      inset:SetPoint("BOTTOMRIGHT", -8, 44)
       PG.Theme.Tex(inset, "parchment") -- fail -> solid PARCH (applied by Tex)
     end
-    local c = PG.Theme.C("neutral")
+    local c = PG.Theme.C()
     text:SetTextColor(c.INK[1], c.INK[2], c.INK[3])
-    yes:SetText(c.loss .. "Clear|r") -- the destructive action reads as LOSS red
+    -- CHRED, not LOSS. LOSS (#8f1600) is a parchment colour and this label sits
+    -- on the dark UIPanelButtonTemplate face, where it measured ~1.8:1 -
+    -- effectively unreadable, on the one button in the addon that destroys
+    -- data. The launcher already uses the bright CHRED for the same semantic
+    -- on the same button art.
+    yes:SetText(c.chred .. "Clear|r")
   end
   PG.Safety.RegisterWindow(confirm)
   confirm:Hide()
@@ -849,36 +1024,75 @@ end
 
 ensureWindow = function()
   if win then return end
-  win = PG.UI.Window("ledger", "Pengyou Ledger", 400, 440, "neutral")
-  -- parchment sheet under the rows area (SKIN.md 2.9); the asset chain in
-  -- Theme.Tex ends in solid PARCH, so the ink rows always sit on parchment
+  win = PG.UI.Window("ledger", "Pengyou Ledger", WIN_W, WIN_H, "PG")
+
+  local M = (PG.Theme and PG.Theme.METRIC) or nil
+  INSET = (M and M.INSET) or INSET
+  ROW_PITCH = (M and M.ROW_PITCH) or ROW_PITCH
+  local FOOTER = (M and M.FOOTER) or 16
+  local SECTION = (M and M.SECTION) or 16
+  local BTN_H = (M and M.BTN_H) or 22
+  local BTN_W = (M and M.BTN_W) or 105
+  local first = ((M and M.TITLE_TOP) or -12) - ((M and M.TITLE_H) or 24)
+                - ((M and M.TITLE_GAP) or 20)
+  local TAB_GAP = 12
+  local TAB_W = math.floor((WIN_W - INSET * 2 - TAB_GAP * 2) / 3) -- Rules' tab
+
+  -- the sheet's bottom clears the footer button and its own section gap
+  SHEET_BOT = FOOTER + BTN_H + SECTION
+  local sheetTop = first - BTN_H - SECTION
+  ROWS_TOP = sheetTop - 8
+  ROW_W = WIN_W - INSET * 2
+  HEAD_W = ROW_W - 32
+  -- DERIVED, and this is the whole point: the band between the first row and
+  -- the bottom of the sheet, divided by the row pitch. It follows the window
+  -- instead of being a literal that stopped matching it.
+  local band = (WIN_H - SHEET_BOT) + ROWS_TOP
+  MAX_LINES = math.max(1, math.floor((band - ROW_LINE_H) / ROW_PITCH) + 1)
+  EMPTY_Y = ROWS_TOP - math.floor(band / 2)
+
+  -- parchment sheet under the rows area; the asset chain in Theme.Tex ends in
+  -- solid PARCH, so the ink rows always sit on parchment. This and the confirm
+  -- dialog's inset are the addon's only sanctioned parchment surfaces.
   if PG.Theme and PG.Theme.Tex then
     local sheet = win:CreateTexture(nil, "ARTWORK", nil, -8)
-    sheet:SetPoint("TOPLEFT", 16, -76)
-    -- bottom inset 48 (not 56): row 15's full glyph height stays on parchment
-    sheet:SetPoint("BOTTOMRIGHT", -16, 48)
+    sheet:SetPoint("TOPLEFT", 16, sheetTop)
+    sheet:SetPoint("BOTTOMRIGHT", -16, SHEET_BOT)
     PG.Theme.Tex(sheet, "sheet")
   end
-  tabTonightBtn = PG.UI.Button(win, "Tonight", 110, 24, function()
+
+  local function tab(label, x, onClick)
+    local b = PG.UI.Button(win, label, TAB_W, BTN_H, onClick)
+    b:SetPoint("TOPLEFT", x, first)
+    b.__pgLabel = label
+    local c = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+    local t = (c and c.VIOLET) or { 0.45, 0.32, 0.68 }
+    b.tint = b:CreateTexture(nil, "OVERLAY")
+    b.tint:SetAllPoints()
+    b.tint:SetColorTexture(t[1], t[2], t[3], 0.16)
+    b.tint:SetBlendMode("ADD")
+    b.tint:Hide()
+    return b
+  end
+
+  tabTonightBtn = tab("Tonight", INSET, function()
     activeTab = "tonight"
     Refresh()
   end)
-  tabTonightBtn:SetPoint("TOPLEFT", 20, -48)
-  tabSettleBtn = PG.UI.Button(win, "Settle Up", 110, 24, function()
+  tabSettleBtn = tab("Settle Up", INSET + TAB_W + TAB_GAP, function()
     activeTab = "settle"
     Refresh()
   end)
-  tabSettleBtn:SetPoint("LEFT", tabTonightBtn, "RIGHT", 8, 0)
   -- page-turn garnish on manual tab switches (gated inside Theme.Sound)
   if PG.Theme and PG.Theme.Sound then
     tabTonightBtn:HookScript("OnClick", function() PG.Theme.Sound("page") end)
     tabSettleBtn:HookScript("OnClick", function() PG.Theme.Sound("page") end)
   end
-  local clearBtn = PG.UI.Button(win, "Clear tonight", 120, 22, function()
+  local clearBtn = PG.UI.Button(win, "Clear tonight", BTN_W, BTN_H, function()
     if not confirm then buildConfirm() end
     confirm:Show()
   end)
-  clearBtn:SetPoint("BOTTOMLEFT", 20, 16)
+  clearBtn:SetPoint("BOTTOMLEFT", INSET, FOOTER)
 end
 
 -- Opens (and refreshes) the ledger window.
@@ -893,11 +1107,15 @@ function PG.Ledger.Show()
 end
 
 PG.RegisterInit(function()
-  -- swap to the dark-on-parchment neutral palette (SKIN.md 1.1) when the
-  -- theme layer is present; without it the bright defaults above remain
+  -- Swap to the dark-on-parchment palette when the theme layer is present;
+  -- without it the bright defaults above remain. THESE STAY PARCHMENT COLOURS:
+  -- the rows sit on the parchment sheet, which is the one sanctioned
+  -- dark-on-light surface. EMPTY is the exception - FADE on parchment is
+  -- ~3.5:1, and the empty state is the one line that is ever alone on screen.
   if PG.Theme and PG.Theme.C then
-    local c = PG.Theme.C("neutral")
+    local c = PG.Theme.C()
     GREEN, RED, GRAY, GOLD = c.win, c.loss, c.fade, c.amber
+    EMPTY = c.amber
     INK = c.INK
   end
   -- migrate the saved ledger to ver 2 once, at load, before anything reads it

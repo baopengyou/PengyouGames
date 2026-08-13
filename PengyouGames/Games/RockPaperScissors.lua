@@ -23,7 +23,19 @@ local REVEAL_SECS = 6       -- pause between RESULT and the next ROUND
 local VOID_PAUSE_SECS = 3   -- pause between VOID and the replayed round
 local BEGIN_PAUSE_SECS = 2  -- pause between BEGIN and round 1
 local MIN_REOPEN_SECS = 3   -- floor for the timer when re-opening a frozen round
-local MAX_ROWS = 14
+-- Window layout, on the shared spacing grid (PG.Theme.METRIC). These mirror
+-- METRIC.INSET / ROW_PITCH / ROW_H as literals because file scope may not read
+-- another module's tables; every offset in this file is a multiple of GRID = 4.
+--
+-- The standings band runs from ROWS_TOP downwards at ROW_PITCH, and its last
+-- row must clear ui.mine (whose top edge is MINE_TOP) by one row plus a 12px
+-- gap. MAX_ROWS is DERIVED from that band rather than hand-set (PLAN 2.4 / F5).
+local INSET = 24            -- METRIC.INSET: side inset AND standings row inset
+local ROW_PITCH = 20        -- METRIC.ROW_PITCH: 12px line + 8 leading
+local ROW_H = 12            -- METRIC.ROW_H
+local ROWS_TOP = 248        -- first standings row, 8px under the gain line
+local MINE_TOP = 500        -- 560 window - 46 bottom anchor - 14 line
+local MAX_ROWS = math.floor((MINE_TOP - ROW_H - 12 - ROWS_TOP) / ROW_PITCH) + 1
 local MAX_ROUNDS = 9
 local ROSTER_CAP = 40
 local SYNC_COOLDOWN = 10    -- min secs between SYNCQ handling per sender (and per client send)
@@ -71,10 +83,13 @@ local VALID_THROW = { R = true, P = true, S = true }
 -- through PG.Theme so a pruned file has one central place to fix.
 local CARD_ICON = { R = "rps_rock", P = "rps_paper", S = "rps_scissors" }
 -- podium colors (literal, final standings places 1/2/3)
-local PODIUM = { "|cffffd700", "|cffc0c0c0", "|cffcd7f32" }
+-- gold / silver / bronze, the SAME three the reveal stage uses for the podium
+-- (Theme.ROLE gold/silver/bronze = CHGOLD/CHGRAY/BRASS). The window and the
+-- podium describe one standings list, so they get one ramp.
+local PODIUM = { "|cffffd876", "|cffa8a89c", "|cffccad6b" }
 local WHITE = "|cffffffff"
 
--- Faire palette, literal spec values; refreshed from PG.Theme.C at init when
+-- The board palette, literal spec values; refreshed from PG.Theme.C at init when
 -- the theme layer is present (the values are identical). Presentation only.
 local P = {
   chgold = "|cffffd876", chgreen = "|cff7deda4", chred = "|cffff8a70",
@@ -1400,7 +1415,7 @@ local function raiseInvite(rec)
     -- has and row 6's eviction scan can find no victim at all. The identity
     -- guard stops a late callback resurrecting the field on an evicted record.
     function() if sessions[rec.key] == rec then rec.askKey = nil end end,
-    "faire")
+    "RPS")
   if ok then
     rec.askKey = askKey
     if rec.scope == "guild" then guildBudgetSpend(rec.host) end
@@ -1857,7 +1872,7 @@ onTick = function()
 end
 
 -------------------------------------------------------------------------------
--- FX (faire carnival garnish). Pure decoration behind runFX: text state is
+-- FX (carnival garnish). Pure decoration behind runFX: text state is
 -- always final BEFORE any of this plays, groups register into the Theme
 -- OnHide contract via Banner/Stamp/Pulse/Reveal, and nothing here ever
 -- re-shows a Safety-hidden frame (Theme.After is generation-checked and
@@ -1874,7 +1889,7 @@ end
 fxBegin = function()
   local S = mySession()
   if not (win and win:IsShown() and S) then return end
-  Theme.Banner(win, "BEST OF " .. S.rounds, "faire")
+  Theme.Banner(win, "BEST OF " .. S.rounds, "RPS")
   Theme.Sound("stamp")
 end
 
@@ -1991,7 +2006,7 @@ fxResult = function()
   end
   local sess = S
   Theme.Reveal({
-    theme = "faire",
+    game = "RPS",
     anchor = { mode = "window", host = win },
     title = "ROUND " .. lr.r,
     subtitle = "Rock " .. lr.nR .. " - Paper " .. lr.nP .. " - Scissors " .. lr.nS
@@ -2066,7 +2081,7 @@ fxEnd = function()
     end
   end
   Theme.RevealQueue({
-    theme = "faire",
+    game = "RPS",
     anchor = { mode = "window", host = win },
     variant = "podium",
     title = "FINAL RESULTS",
@@ -2092,11 +2107,13 @@ end
 -- Game window
 -------------------------------------------------------------------------------
 
+-- The standings row: LEFT, always (a ragged name column is unscannable), at
+-- the same inset as the status line above it and the full derived width.
 rowAt = function(i)
   if not rows[i] then
-    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fs:SetPoint("TOPLEFT", 26, -244 - (i - 1) * 17)
-    fs:SetWidth(368)
+    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") -- S
+    fs:SetPoint("TOPLEFT", INSET, -ROWS_TOP - (i - 1) * ROW_PITCH)
+    fs:SetWidth(420 - 2 * INSET)
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(false)
     fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
@@ -2108,19 +2125,14 @@ end
 
 -- Icon above the card label, via the Theme asset table (decoration only:
 -- Theme.Tex returning false means only the solid fallback applied, so we hide
--- the texture and the centered label alone carries the meaning - the same
--- pattern as PullBook's market emblems. No theme layer -> no icon, same
--- centered-label layout; a missing icon can never break the layout.
+-- the texture - the same pattern as PullBook's market emblems).
+--
+-- The icon slot is RESERVED whether or not the art loads and the label is
+-- pinned at BOTTOM+9 unconditionally: the label used to move to the middle of
+-- the card when an atlas missed, so the same three buttons had two different
+-- label positions depending on the client's asset state (T3-12). PullBook's
+-- poster already applies this discipline.
 local function addCardIcon(btn, key)
-  local ok, tex = pcall(btn.CreateTexture, btn, nil, "ARTWORK")
-  if not (ok and tex) then return end
-  tex:SetSize(26, 26)
-  tex:SetPoint("TOP", 0, -7)
-  if not (Theme and Theme.Tex(tex, key)) then
-    tex:Hide()
-    return
-  end
-  -- icon rendered: drop the label to the bottom so both read
   local fs = btn.text
   if not fs then
     local okF, got = pcall(btn.GetFontString, btn)
@@ -2130,6 +2142,11 @@ local function addCardIcon(btn, key)
     pcall(fs.ClearAllPoints, fs)
     pcall(fs.SetPoint, fs, "BOTTOM", btn, "BOTTOM", 0, 9)
   end
+  local ok, tex = pcall(btn.CreateTexture, btn, nil, "ARTWORK")
+  if not (ok and tex) then return end
+  tex:SetSize(26, 26)
+  tex:SetPoint("TOP", 0, -7)
+  if not (Theme and Theme.Tex(tex, key)) then tex:Hide() end
 end
 
 local function chalk(fs)
@@ -2139,38 +2156,48 @@ end
 
 local function ensureWindow()
   if win then return end
-  win = PG.UI.Window("rps", "Rock Paper Scissors", 420, 560, "faire")
+  win = PG.UI.Window("rps", "Rock Paper Scissors", 420, 560, "RPS")
   -- Core re-shows Safety-hidden windows whose __pgResume() returns true once
   -- every safety flag clears, so a combat/safety hide resumes on its own
   -- whenever a session exists (even a finished one showing final standings)
   win.__pgResume = function() return mySession() ~= nil end
 
-  -- the audience, under the title (SCOPE.md 5.4): "who is this game with" is the
-  -- first question a wide-scope session raises
-  ui.scope = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.scope:SetPoint("TOP", 0, -34)
+  -- the audience, under the title (SCOPE.md 5.4): "who is this game with" is
+  -- the first question a wide-scope session raises. Centred with an explicit
+  -- width pair, not "TOP with no width" - the accidental-centring idiom is the
+  -- same mechanism as every unbounded spill in these files.
+  ui.scope = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")  -- S
+  ui.scope:SetPoint("TOPLEFT", INSET, -34)                        -- METRIC.AUD_Y
+  ui.scope:SetPoint("TOPRIGHT", -INSET, -34)
+  ui.scope:SetJustifyH("CENTER")
+  ui.scope:SetWordWrap(false)
+  ui.scope:SetMaxLines(1)
   ui.scope:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(ui.scope) end
 
-  ui.info = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.info:SetPoint("TOPLEFT", 24, -44)
-  ui.info:SetPoint("TOPRIGHT", -24, -44)
+  -- -52, not -44: the audience line above occupies -34..-46, so the two used
+  -- to share a 2px band whenever the info block's first line ran long (A4).
+  -- Death Roll's 6px clearance for the identical stacking is the one adopted.
+  ui.info = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")        -- B
+  ui.info:SetPoint("TOPLEFT", INSET, -52)
+  ui.info:SetPoint("TOPRIGHT", -INSET, -52)
   ui.info:SetHeight(32)
-  ui.info:SetJustifyH("LEFT")
+  ui.info:SetJustifyH("LEFT")   -- multi-line body copy stays LEFT (PLAN 4)
   ui.info:SetJustifyV("TOP")
   ui.info:SetWordWrap(true)
   ui.info:SetMaxLines(2)
   ui.info:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   if Theme then Theme.Shadow(ui.info) end
 
-  ui.bar = PG.UI.TimerBar(win, 372)
-  ui.bar:SetPoint("TOPLEFT", 24, -84)
+  ui.bar = PG.UI.TimerBar(win, 420 - 2 * INSET)   -- METRIC.BAR_Y / BAR_H
+  ui.bar:SetPoint("TOPLEFT", INSET, -84)
 
-  -- three big throw cards in a row; first click locks
+  -- three big throw cards in a row, on the window's own 24px inset: they used
+  -- to sit at 18, a third inset inside one window (E8). 24 + 3x120 + 2x6 = 396
   local defs = {
-    { c = "R", label = "ROCK", x = 18 },
-    { c = "P", label = "PAPER", x = 150 },
-    { c = "S", label = "SCISSORS", x = 282 },
+    { c = "R", label = "ROCK", x = INSET },
+    { c = "P", label = "PAPER", x = INSET + 126 },
+    { c = "S", label = "SCISSORS", x = INSET + 252 },
   }
   for i = 1, #defs do
     local d = defs[i]
@@ -2182,44 +2209,82 @@ local function ensureWindow()
     cardBtns[d.c] = b
   end
 
-  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  ui.status:SetPoint("TOPLEFT", 24, -182)
-  ui.status:SetPoint("TOPRIGHT", -24, -182)
+  -- the status line ticks ("...45s" -> "...44s"), so it is LEFT with a width
+  -- pair: centred, it would shuffle sideways once per second (PLAN 4)
+  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")      -- B
+  ui.status:SetPoint("TOPLEFT", INSET, -180)
+  ui.status:SetPoint("TOPRIGHT", -INSET, -180)
   ui.status:SetJustifyH("LEFT")
   ui.status:SetWordWrap(false)
   chalk(ui.status)
 
-  ui.reveal = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  ui.reveal:SetPoint("TOPLEFT", 24, -204)
-  ui.reveal:SetPoint("TOPRIGHT", -24, -204)
+  -- The round-by-round line and the final headline are two different things
+  -- sharing one slot: the round line is prose and stays LEFT, the headline is
+  -- a headline and reads as one only when it is centred and in the display
+  -- face. One fontstring could not be both without flipping justification at
+  -- runtime (T3-4 / F18), so there are two, and RefreshUI shows one.
+  ui.reveal = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") -- S
+  ui.reveal:SetPoint("TOPLEFT", INSET, -202)
+  ui.reveal:SetPoint("TOPRIGHT", -INSET, -202)
   ui.reveal:SetJustifyH("LEFT")
   ui.reveal:SetWordWrap(false)
   chalk(ui.reveal)
 
-  ui.gain = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  ui.gain:SetPoint("TOPLEFT", 24, -222)
-  ui.gain:SetPoint("TOPRIGHT", -24, -222)
-  ui.gain:SetJustifyH("LEFT")
+  ui.headline = win:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")  -- D2
+  ui.headline:SetPoint("TOPLEFT", INSET, -202)
+  ui.headline:SetPoint("TOPRIGHT", -INSET, -202)
+  ui.headline:SetJustifyH("CENTER")
+  ui.headline:SetWordWrap(false)
+  ui.headline:SetMaxLines(1)
+  if Theme then Theme.SetFont(ui.headline, "D2") end
+  ui.headline:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
+  if Theme then Theme.Shadow(ui.headline) end
+  ui.headline:Hide()
+
+  -- short, self-contained, celebratory, and alone on its line: centred
+  ui.gain = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")   -- S
+  ui.gain:SetPoint("TOPLEFT", INSET, -228)
+  ui.gain:SetPoint("TOPRIGHT", -INSET, -228)
+  ui.gain:SetJustifyH("CENTER")
   ui.gain:SetWordWrap(false)
+  ui.gain:SetMaxLines(1)
   chalk(ui.gain)
 
-  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.mine:SetPoint("BOTTOMLEFT", 24, 46)
-  ui.mine:SetPoint("BOTTOMRIGHT", -24, 46)
-  ui.mine:SetJustifyH("LEFT")
+  -- The empty state is not list item zero: its own centred line in the first
+  -- free standings slot, never written into rowAt(1) with the row's LEFT
+  -- justification (T3-2 / F7).
+  ui.empty = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")  -- S
+  ui.empty:SetPoint("TOPLEFT", INSET, -ROWS_TOP)
+  ui.empty:SetPoint("TOPRIGHT", -INSET, -ROWS_TOP)
+  ui.empty:SetJustifyH("CENTER")
+  ui.empty:SetWordWrap(false)
+  ui.empty:SetMaxLines(1)
+  ui.empty:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
+  if Theme then Theme.Shadow(ui.empty) end
+  ui.empty:Hide()
+
+  -- one short sentence about YOU, alone above a centred button row: centred
+  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")        -- B
+  ui.mine:SetPoint("BOTTOMLEFT", INSET, 46)
+  ui.mine:SetPoint("BOTTOMRIGHT", -INSET, 46)
+  ui.mine:SetJustifyH("CENTER")
   ui.mine:SetWordWrap(false)
+  ui.mine:SetMaxLines(1)
   chalk(ui.mine)
 
   ui.startBtn = PG.UI.Button(win, "Start now", 105, 22, function()
     local S = mySession()
     if S and S.isHost and S.phase == "join" then hostCloseJoin() end
   end)
-  ui.startBtn:SetPoint("BOTTOMLEFT", 20, 16)
+  -- Footer: 105x22 at the shared 24 inset and 16 bottom margin. The old 20
+  -- left 1px between "Cancel game" and the frame-level +10 resize grip, so at
+  -- fractional scales the button's right edge became a resize handle (A12).
+  ui.startBtn:SetPoint("BOTTOMLEFT", INSET, 16)
   ui.cancelBtn = PG.UI.Button(win, "Cancel game", 105, 22, function()
     local S = mySession()
     if S and S.isHost and live() then hostCancel("host") end
   end)
-  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -20, 16)
+  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -INSET, 16)
   ui.withdrawBtn = PG.UI.Button(win, "Withdraw", 105, 22, function()
     local S = mySession()
     if S and not S.isHost and S.phase == "join" and S.joinAccepted then
@@ -2231,7 +2296,7 @@ local function ensureWindow()
       applyLeft(myName())
     end
   end)
-  ui.withdrawBtn:SetPoint("BOTTOMLEFT", 20, 16) -- shares the host-only Start slot
+  ui.withdrawBtn:SetPoint("BOTTOMLEFT", INSET, 16) -- shares the host-only Start slot
   ui.againBtn = PG.UI.Button(win, "Play again", 105, 22, function()
     local S = mySession()
     if S and S.isHost and S.phase == "done" and S.ended then
@@ -2331,11 +2396,20 @@ RefreshUI = function()
 
   -- reveal + personal gain lines (persist through the pause after a RESULT)
   local lr = S.lastResult
+  ui.headline:Hide()
+  ui.reveal:Show()
   if isJoin then
     ui.reveal:SetText("")
     ui.gain:SetText("")
   elseif isDone and S.ended then
-    ui.reveal:SetText(P.chgold .. "Final standings - best of " .. S.rounds .. "|r")
+    -- the final result is a headline, so it renders as one: centred, display
+    -- face, in the headline slot, with the round line stood down
+    ui.reveal:SetText("")
+    ui.reveal:Hide()
+    -- bounded by its own anchor pair, wrap off, one line: an overlong headline
+    -- ellipsizes on the window instead of spilling through the border art
+    ui.headline:SetText("Final standings - best of " .. S.rounds)
+    ui.headline:Show()
     local mineLine = ""
     if not S.spectator and S.standings then
       for i = 1, #S.standings do
@@ -2365,6 +2439,7 @@ RefreshUI = function()
 
   -- roster / standings rows
   local lines = {}
+  local emptyMsg = nil
   if S.spectator and not isJoin then
     lines[1] = P.chgray .. "Out of sync - standings unavailable this game.|r"
   elseif isJoin then
@@ -2372,7 +2447,9 @@ RefreshUI = function()
       lines[#lines + 1] = name
         .. (name == me and (P.chgold .. " (you)|r") or "")
     end
-    if not lines[1] then lines[1] = P.chgray .. "Nobody has joined yet.|r" end
+    -- one string, one treatment, in every game (F7): centred in the first free
+    -- standings slot, never written into row 1 as though it were a player
+    if not lines[1] then emptyMsg = "Nobody has joined yet." end
   else
     local standings = (isDone and S.standings) or computeStandings()
     for i = 1, #standings do
@@ -2392,6 +2469,20 @@ RefreshUI = function()
   if refereed then
     table.insert(lines, 1, P.chgray .. shortOf(S.host) .. " (running the game)|r")
   end
+  -- The local player's row is the one row the collapse may not eat: when it
+  -- falls past the cut it is lifted into the last visible slot, the same rule
+  -- Death Roll and the reveal stage already apply. Without it you can be
+  -- player 20 of 40 and simply not appear in your own standings (F6).
+  if #lines > MAX_ROWS and me then
+    local mineAt
+    for i = MAX_ROWS, #lines do
+      if lines[i]:find(me, 1, true) then
+        mineAt = i
+        break
+      end
+    end
+    if mineAt then table.insert(lines, MAX_ROWS - 1, table.remove(lines, mineAt)) end
+  end
   local shown = math.min(#lines, MAX_ROWS)
   if #lines > MAX_ROWS then
     lines[MAX_ROWS] = P.chgray .. "... and " .. (#lines - MAX_ROWS + 1) .. " more|r"
@@ -2401,6 +2492,16 @@ RefreshUI = function()
     rowAt(i):Show()
   end
   for i = shown + 1, #rows do rows[i]:Hide() end
+  -- the empty line lands in the first slot the roster did not use, so a
+  -- refereed game shows "(running the game)" and then the message under it
+  if emptyMsg then
+    local y = -ROWS_TOP - shown * ROW_PITCH
+    ui.empty:ClearAllPoints()
+    ui.empty:SetPoint("TOPLEFT", INSET, y)
+    ui.empty:SetPoint("TOPRIGHT", -INSET, y)
+    ui.empty:SetText(emptyMsg)
+  end
+  ui.empty:SetShown(emptyMsg ~= nil)
 
   -- bottom line: your total, or your medal tally after the final reveal
   if refereed then
@@ -2476,14 +2577,14 @@ end
 -------------------------------------------------------------------------------
 
 local function makeField(parent, label, y, default, maxLetters)
-  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  fs:SetPoint("TOPLEFT", 20, y)
+  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontNormal")        -- T
+  fs:SetPoint("TOPLEFT", INSET, y)
   fs:SetText(label)
   fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3]) -- chalk on the board
   if Theme then Theme.Shadow(fs) end
   local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
   eb:SetSize(70, 20)
-  eb:SetPoint("TOPRIGHT", -24, y + 2)
+  eb:SetPoint("TOPRIGHT", -INSET, y + 2)
   eb:SetAutoFocus(false)
   eb:SetNumeric(true)
   eb:SetMaxLetters(maxLetters or 3)
@@ -2537,19 +2638,26 @@ local function ensureDialog()
   if dialog then return end
   -- SCOPE.md 5.3 sizes this at 320x290 for the picker; CONCURRENCY.md 6.4 adds
   -- the required explanatory line under it, which is the extra 30px.
-  dialog = PG.UI.Window("rpsdialog", "Start Rock Paper Scissors", 320, 320, "faire")
-  local hint = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  hint:SetPoint("TOPLEFT", 20, -40)
-  hint:SetPoint("TOPRIGHT", -20, -40)
-  hint:SetJustifyH("LEFT")
+  -- 320x320 -> 320x340: the audience block is 58 tall now (its hint used to
+  -- render outside the rect it declared), and the note under it has to clear
+  -- the button row.
+  dialog = PG.UI.Window("rpsdialog", "Start Rock Paper Scissors", 320, 340, "RPS")
+  local hint = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall") -- S
+  hint:SetPoint("TOPLEFT", INSET, -44)
+  hint:SetPoint("TOPRIGHT", -INSET, -44)
+  hint:SetJustifyH("LEFT")   -- body copy, like the four other dialog hints
+  hint:SetJustifyV("TOP")
+  hint:SetHeight(28)
   hint:SetWordWrap(true)
+  hint:SetMaxLines(2)
   hint:SetText("Points only, no gold. One point per player you beat each round.")
   hint:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(hint) end
+  -- one 32px field pitch
   dlgInputs = {
-    rounds = makeField(dialog, "Best of (rounds)", -78, 3, 1),
-    joinSecs = makeField(dialog, "Join window (sec)", -108, 30, 3),
-    roundSecs = makeField(dialog, "Round timer (sec)", -138, 15, 2),
+    rounds = makeField(dialog, "Best of (rounds)", -80, 3, 1),
+    joinSecs = makeField(dialog, "Join window (sec)", -112, 30, 3),
+    roundSecs = makeField(dialog, "Round timer (sec)", -144, 15, 2),
   }
   -- The audience picker: a segmented control, never a dropdown (SCOPE.md 5.1).
   -- Every segment stays visible; an unavailable one greys out with its reason,
@@ -2560,14 +2668,22 @@ local function ensureDialog()
     reasons = scopeNote,
     onChange = function() refreshDialog() end,
   })
-  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -170)
+  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -176)
+  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -176)
 
-  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  dlgNote:SetPoint("TOPLEFT", 20, -228)
-  dlgNote:SetPoint("TOPRIGHT", -20, -228)
+  -- anchored to the picker's bottom, not to an absolute offset: the picker
+  -- grew 44 -> 58 and every dialog in the suite was one copy edit away from
+  -- the note and the picker hint sharing a band (T1-8). Two wrapped lines of
+  -- explanation: LEFT, top-aligned in its box so a one-line note does not
+  -- float (F14).
+  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")   -- S
+  dlgNote:SetPoint("TOPLEFT", dlgScope, "BOTTOMLEFT", INSET, -8)
+  dlgNote:SetPoint("TOPRIGHT", dlgScope, "BOTTOMRIGHT", -INSET, -8)
   dlgNote:SetJustifyH("LEFT")
+  dlgNote:SetJustifyV("TOP")
   dlgNote:SetWordWrap(true)
-  dlgNote:SetHeight(32)
+  dlgNote:SetHeight(40)
+  dlgNote:SetMaxLines(3)
   dlgNote:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   if Theme then Theme.Shadow(dlgNote) end
 
@@ -2618,11 +2734,11 @@ function PG.RPS.OpenDialog()
 end
 
 PG.RegisterInit(function()
-  -- capture the faire palette from the theme layer; the literal defaults
+  -- capture the one palette from the theme layer; the literal defaults
   -- above are the same values, so this is a formality, not a branch
   if PG.Theme and PG.Theme.C then
     Theme = PG.Theme
-    local c = Theme.C("faire")
+    local c = Theme.C()
     for k in pairs(P) do
       if c[k] ~= nil then P[k] = c[k] end
     end

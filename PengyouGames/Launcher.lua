@@ -259,7 +259,9 @@ local function buildOpenRows()
     else
       row:SetPoint("TOP", rowFrames[i - 1], "BOTTOM", 0, 0)
     end
-    row.label = row:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    -- S role. GameFontNormalSmall defaults to GOLD and nothing here recoloured it,
+    -- so these rows rendered gold while every other list in the addon is chalk.
+    row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
     row.label:SetPoint("LEFT", 0, 0)
     -- 240 + the 58px Join button = 298, leaving 14px of slack inside FULL_W.
     -- The longest realistic row text is "Grizzlebottom - Death Roll - Party".
@@ -366,14 +368,16 @@ end
 -- grouping the Rules tab strip uses, so the two windows teach the same map.
 -- Each row is { module code, theme mark key, button label }. The label is
 -- written out verbatim rather than derived from GAME_NAME because these strings
--- shipped in 1.0.0 and users read them as the names of the buttons.
+-- shipped in 1.0.0 and users read them as the names of the buttons. The trailing
+-- ellipsis is gone: PG.UI.Button now binds every label to w-8 and truncates, so the
+-- three dots were spending ~12px to say nothing and pushed the longest label over.
 local GRID = {
-  { "LG", "coin", "Loot Goblins..." },
-  { "PB", "ticket", "Pull Book..." },
-  { "RPS", "dice", "Rock Paper Scissors..." },
-  { "DR", "skull", "Death Roll..." },
-  { "GB", "greedcoin", "The Gambler..." },
-  { "QZ", "quiz", "Quiz..." },
+  { "LG", "coin", "Loot Goblins" },
+  { "PB", "ticket", "Pull Book" },
+  { "RPS", "dice", "Rock Paper Scissors" },
+  { "DR", "skull", "Death Roll" },
+  { "GB", "greedcoin", "The Gambler" },
+  { "QZ", "quiz", "Quiz" },
 }
 
 local function build()

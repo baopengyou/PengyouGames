@@ -2215,7 +2215,7 @@ local function raiseInvite(rec)
     acceptLabel, "Pass", math.max(1, rec.expires - GetTime()),
     function() clientAccept(rec) end,
     function() if sessions[rec.key] == rec then rec.askKey = nil end end,
-    "faire")
+    "QZ")
   if ok then
     rec.askKey = askKey
     if rec.scope == "guild" and PG.UI.GuildAskSpend then
@@ -2727,7 +2727,7 @@ end
 FX.begin = function()
   local S = mySession()
   if not (win and win:IsShown() and S) then return end
-  Theme.Banner(win, S.rounds .. " QUESTIONS", "faire")
+  Theme.Banner(win, S.rounds .. " QUESTIONS", "QZ")
   Theme.Sound("stamp")
 end
 
@@ -2826,7 +2826,7 @@ FX.result = function()
   local sess = S
   local modeName = (S.qView and MODE_NAME[S.qView.m]) or "Quiz"
   Theme.Reveal({
-    theme = "faire",
+    game = "QZ",
     anchor = { mode = "window", host = win },
     title = "QUESTION " .. lr.r,
     subtitle = modeName .. " - " .. lr.nCorrect .. " of "
@@ -2880,7 +2880,7 @@ FX.podium = function()
     end
   end
   Theme.RevealQueue({
-    theme = "faire",
+    game = "QZ",
     anchor = { mode = "window", host = win },
     variant = "podium",
     title = "FINAL RESULTS",
@@ -2900,13 +2900,45 @@ end
 -- Game window
 -------------------------------------------------------------------------------
 
+-- This window's own layout, on the shared 4px grid (Theme.METRIC.GRID). The
+-- answer block chains off the question block, so only these two are absolute.
+local WIN_W, WIN_H = 420, 620
+local ROSTER_Y = -380
+local PROMPT_Y, PROMPT_H = -108, 44
+local STMT_Y, STMT_H, STMT_GAP = -156, 24, 4
+local PROMPT_BOTTOM = PROMPT_Y - PROMPT_H                      -- -152
+local STMT_BOTTOM = STMT_Y - 3 * STMT_H - 2 * STMT_GAP         -- -236
+
+-- The shared ramp and grid, read at call time. The literals are only what a
+-- client with no theme layer would see; this file never carries its own copy of
+-- a shared number (Widgets.lua reads METRIC the same way).
+local FONT_FALLBACK = {
+  D1 = "GameFontNormalHuge", D2 = "GameFontNormalLarge", T = "GameFontNormal",
+  B = "GameFontHighlight", S = "GameFontHighlightSmall",
+}
+local METRIC_FALLBACK = {
+  INSET = 24, ROW_PITCH = 20, AUD_Y = -34, FOOTER = 16, BTN_W = 105, BTN_H = 22,
+}
+local function ft(role)
+  if Theme and Theme.FontTemplate then return Theme.FontTemplate(role) end
+  return FONT_FALLBACK[role] or "GameFontHighlight"
+end
+local function mt(key)
+  local M = Theme and Theme.METRIC
+  local v = M and M[key]
+  if type(v) == "number" then return v end
+  return METRIC_FALLBACK[key]
+end
+
 rowAt = function(i)
   if not rows[i] then
-    local fs = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    fs:SetPoint("TOPLEFT", 26, -408 - (i - 1) * 17)
-    fs:SetWidth(368)
+    local inset = mt("INSET")
+    local fs = win:CreateFontString(nil, "OVERLAY", ft("S"))
+    fs:SetPoint("TOPLEFT", inset, ROSTER_Y - (i - 1) * mt("ROW_PITCH"))
+    fs:SetWidth(WIN_W - 2 * inset)
     fs:SetJustifyH("LEFT")
     fs:SetWordWrap(false)
+    fs:SetMaxLines(1)
     fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
     if Theme then Theme.Shadow(fs) end
     rows[i] = fs
@@ -2919,10 +2951,11 @@ local function chalk(fs)
   if Theme then Theme.Shadow(fs) end
 end
 
-local function wrapped(parent, y, h, lines, font, color)
-  local fs = parent:CreateFontString(nil, "OVERLAY", font or "GameFontHighlightSmall")
-  fs:SetPoint("TOPLEFT", 24, y)
-  fs:SetPoint("TOPRIGHT", -24, y)
+local function wrapped(parent, y, h, lines, role, color)
+  local inset = mt("INSET")
+  local fs = parent:CreateFontString(nil, "OVERLAY", ft(role or "S"))
+  fs:SetPoint("TOPLEFT", inset, y)
+  fs:SetPoint("TOPRIGHT", -inset, y)
   fs:SetHeight(h)
   fs:SetJustifyH("LEFT")
   -- critique-1 C4: without an explicit TOP the prompt renders vertically
@@ -2938,35 +2971,44 @@ end
 
 local function ensureWindow()
   if win then return end
-  win = PG.UI.Window("qz", "Quiz", 420, 620, "faire")
+  win = PG.UI.Window("qz", "Quiz", WIN_W, WIN_H, "QZ")
   win.__pgResume = function() return mySession() ~= nil end
 
+  local inset = mt("INSET")
+
   -- the audience, under the title (SCOPE.md 5.4)
-  ui.scope = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.scope:SetPoint("TOP", 0, -34)
+  ui.scope = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.scope:SetPoint("TOPLEFT", inset, mt("AUD_Y"))
+  ui.scope:SetPoint("TOPRIGHT", -inset, mt("AUD_Y"))
+  ui.scope:SetJustifyH("CENTER")
+  ui.scope:SetWordWrap(false)
+  ui.scope:SetMaxLines(1)
   ui.scope:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(ui.scope) end
 
-  ui.info = wrapped(win, -44, 32, 2, "GameFontNormal", P.CHGOLD)
+  -- -52, not -44: the audience line above it is 12px tall from -34, so the two
+  -- shared a 2px band in every state where the info block ran long.
+  ui.info = wrapped(win, -52, 28, 2, "B", P.CHGOLD)
 
-  ui.bar = PG.UI.TimerBar(win, 372)
-  ui.bar:SetPoint("TOPLEFT", 24, -84)
+  ui.bar = PG.UI.TimerBar(win, WIN_W - 2 * inset)
+  ui.bar:SetPoint("TOPLEFT", inset, -84)
 
-  -- The prompt box ends at -160; the first statement starts at -162, so the two
-  -- can never overlap whatever the prompt's line count turns out to be.
-  ui.prompt = wrapped(win, -104, 56, 3, "GameFontNormal", P.CHGOLD)
+  -- The prompt box ends at PROMPT_BOTTOM and the first statement starts 4px
+  -- below it, so the two can never overlap whatever the prompt's line count
+  -- turns out to be.
+  ui.prompt = wrapped(win, PROMPT_Y, PROMPT_H, 3, "B", P.CHGOLD)
   ui.stmt = {}
   for i = 1, 3 do
-    ui.stmt[i] = wrapped(win, -162 - (i - 1) * 30, 28, 2, "GameFontHighlightSmall")
+    ui.stmt[i] = wrapped(win, STMT_Y - (i - 1) * (STMT_H + STMT_GAP), STMT_H, 2, "S")
   end
-  ui.hint = wrapped(win, -256, 14, 1, "GameFontHighlightSmall", P.CHGRAY)
+  ui.hint = wrapped(win, STMT_BOTTOM - 4, 14, 1, "S", P.CHGRAY)
 
   -- THE EDIT BOX. SetAutoFocus(false) is not polish: an autofocused box eats
   -- every keystroke including movement keys, and this window can be hidden out
   -- from under a focused box by the Safety machinery at any moment.
   ui.entry = CreateFrame("EditBox", nil, win, "InputBoxTemplate")
   ui.entry:SetSize(280, 22)
-  ui.entry:SetPoint("TOPLEFT", 24, -278)
+  ui.entry:SetPoint("TOPLEFT", inset, STMT_BOTTOM - 24)   -- layoutAnswer re-anchors
   ui.entry:SetAutoFocus(false)
   ui.entry:SetMaxLetters(ANS_MAX)
   ui.entry:SetTextInsets(4, 4, 0, 0)
@@ -2995,7 +3037,7 @@ local function ensureWindow()
   ui.submit = PG.UI.Button(win, "Submit", 76, 22, function()
     if ui.entry then doSubmit(ui.entry:GetText()) end
   end)
-  ui.submit:SetPoint("TOPRIGHT", -24, -278)
+  ui.submit:SetPoint("TOPRIGHT", -inset, STMT_BOTTOM - 24)
 
   -- Mode L wires the same doSubmit the typing path uses, so there is one lock
   -- and one code path. The box stays usable in mode L (typing "b" works); the
@@ -3004,38 +3046,57 @@ local function ensureWindow()
   for i = 1, 3 do
     local letter = SLOT_LETTER[i]
     local b = PG.UI.Button(win, letter, 60, 22, function() doSubmit(letter) end)
-    b:SetPoint("TOPLEFT", 24 + (i - 1) * 68, -306)
+    b:SetPoint("TOPLEFT", inset + (i - 1) * 68, STMT_BOTTOM - 52)
     ui.abc[i] = b
   end
 
-  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  ui.status:SetPoint("TOPLEFT", 24, -334)
-  ui.status:SetPoint("TOPRIGHT", -24, -334)
+  ui.status = win:CreateFontString(nil, "OVERLAY", ft("B"))
+  ui.status:SetPoint("TOPLEFT", inset, -316)
+  ui.status:SetPoint("TOPRIGHT", -inset, -316)
   ui.status:SetJustifyH("LEFT")
   ui.status:SetWordWrap(false)
+  ui.status:SetMaxLines(1)
   chalk(ui.status)
 
-  ui.reveal = wrapped(win, -354, 28, 2, "GameFontHighlightSmall")
-  ui.gain = win:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  ui.gain:SetPoint("TOPLEFT", 24, -386)
-  ui.gain:SetPoint("TOPRIGHT", -24, -386)
-  ui.gain:SetJustifyH("LEFT")
+  ui.reveal = wrapped(win, -336, 24, 2, "S")
+  -- short, self-contained, celebratory, and alone on its line: centred (PLAN 4)
+  ui.gain = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.gain:SetPoint("TOPLEFT", inset, -364)
+  ui.gain:SetPoint("TOPRIGHT", -inset, -364)
+  ui.gain:SetJustifyH("CENTER")
   ui.gain:SetWordWrap(false)
+  ui.gain:SetMaxLines(1)
   chalk(ui.gain)
 
-  ui.mine = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.mine:SetPoint("BOTTOMLEFT", 24, 46)
-  ui.mine:SetPoint("BOTTOMRIGHT", -24, 46)
-  ui.mine:SetJustifyH("LEFT")
+  -- The empty state is NOT list item zero: its own centred line across the
+  -- standings band instead of row 1's left inset (PLAN 4).
+  ui.empty = win:CreateFontString(nil, "OVERLAY", ft("S"))
+  ui.empty:SetPoint("TOPLEFT", inset, ROSTER_Y)
+  ui.empty:SetPoint("TOPRIGHT", -inset, ROSTER_Y)
+  ui.empty:SetJustifyH("CENTER")
+  ui.empty:SetWordWrap(false)
+  ui.empty:SetMaxLines(1)
+  ui.empty:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
+  if Theme then Theme.Shadow(ui.empty) end
+
+  -- one short sentence about you, alone above a centred button row: centred
+  ui.mine = win:CreateFontString(nil, "OVERLAY", ft("B"))
+  ui.mine:SetPoint("BOTTOMLEFT", inset, 46)
+  ui.mine:SetPoint("BOTTOMRIGHT", -inset, 46)
+  ui.mine:SetJustifyH("CENTER")
   ui.mine:SetWordWrap(false)
+  ui.mine:SetMaxLines(1)
   chalk(ui.mine)
 
-  ui.startBtn = PG.UI.Button(win, "Start now", 105, 22, function()
+  local btnW, btnH, foot = mt("BTN_W"), mt("BTN_H"), mt("FOOTER")
+  ui.startBtn = PG.UI.Button(win, "Start now", btnW, btnH, function()
     local S = mySession()
     if S and S.isHost and S.phase == "join" then hostCloseJoin() end
   end)
-  ui.startBtn:SetPoint("BOTTOMLEFT", 20, 16)
-  ui.withdrawBtn = PG.UI.Button(win, "Withdraw", 105, 22, function()
+  -- the shared footer inset, which is also what opens the 1px clearance
+  -- between the right-hand button and the resize grip to 5px
+  ui.startBtn:SetPoint("BOTTOMLEFT", inset, foot)
+  ui.withdrawBtn = PG.UI.Button(win, "Withdraw", btnW, btnH, function()
     local S = mySession()
     if S and not S.isHost and S.phase == "join" and S.joinAccepted then
       if Theme then Theme.Sound("coincancel") end
@@ -3044,30 +3105,69 @@ local function ensureWindow()
       applyLeft(myName())
     end
   end)
-  ui.withdrawBtn:SetPoint("BOTTOMLEFT", 20, 16) -- shares the host-only Start slot
-  ui.revealBtn = PG.UI.Button(win, "Reveal now", 105, 22, function()
+  ui.withdrawBtn:SetPoint("BOTTOMLEFT", inset, foot) -- shares the Start slot
+  ui.revealBtn = PG.UI.Button(win, "Reveal now", btnW, btnH, function()
     hostRevealNow()
   end)
-  ui.revealBtn:SetPoint("BOTTOMRIGHT", -20, 16)
-  ui.cancelBtn = PG.UI.Button(win, "Cancel game", 105, 22, function()
+  ui.revealBtn:SetPoint("BOTTOMRIGHT", -inset, foot)
+  ui.cancelBtn = PG.UI.Button(win, "Cancel game", btnW, btnH, function()
     local S = mySession()
     if S and S.isHost and live() then hostCancel("host") end
   end)
-  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -20, 16) -- shares the Reveal-now slot
-  ui.againBtn = PG.UI.Button(win, "Play again", 105, 22, function()
+  ui.cancelBtn:SetPoint("BOTTOMRIGHT", -inset, foot) -- shares the Reveal-now slot
+  ui.againBtn = PG.UI.Button(win, "Play again", btnW, btnH, function()
     local S = mySession()
     if S and S.isHost and S.phase == "done" and S.ended then
       hostOpen(S.rounds, S.joinSecs, S.answerSecs, S.modes, S.hints, S.scope)
     end
   end)
-  ui.againBtn:SetPoint("BOTTOM", 0, 16)
+  ui.againBtn:SetPoint("BOTTOM", 0, foot)
 
   if Theme then
     win.__pgBannerSlot = rowAt(1) -- banners slide in over the standings area
   end
 end
 
+-- THE ANSWER BLOCK FOLLOWS THE QUESTION.
+--
+-- The three statement lines exist only in mode "L", and their 84px used to stay
+-- reserved in every other mode: the window showed the question, then an empty
+-- band the height of a paragraph, then the box you type into. The hint, the
+-- entry row and the letter buttons now hang off whichever bottom the question
+-- block actually has. Everything below (status, reveal, gain, standings) keeps
+-- its absolute slot on purpose - the standings must not jump 100px between one
+-- question and the next.
+--
+-- Re-anchored only when the shape changes, so the 1s refresh does no work.
+local function layoutAnswer(isL)
+  if ui.__answerL == isL then return end
+  ui.__answerL = isL
+  local inset = mt("INSET")
+  local y = isL and STMT_BOTTOM or PROMPT_BOTTOM
+  ui.hint:ClearAllPoints()
+  ui.hint:SetPoint("TOPLEFT", inset, y - 4)
+  ui.hint:SetPoint("TOPRIGHT", -inset, y - 4)
+  ui.entry:ClearAllPoints()
+  ui.entry:SetPoint("TOPLEFT", inset, y - 24)
+  ui.submit:ClearAllPoints()
+  ui.submit:SetPoint("TOPRIGHT", -inset, y - 24)
+  for i = 1, 3 do
+    ui.abc[i]:ClearAllPoints()
+    ui.abc[i]:SetPoint("TOPLEFT", inset + (i - 1) * 68, y - 52)
+  end
+end
+
 local SCOPE_HEADER = { group = "Party", guild = "Guild", public = "Public - realm-wide" }
+
+-- An answer may be ANS_MAX (64) characters; the status line is one line wide.
+-- Truncate the ANSWER, never the state cue after it - "Locked:" with a clipped
+-- word and no "waiting for the reveal" is the half of the line that matters.
+local ANS_SHOWN = 24
+local function shortAnswer(a)
+  a = tostring(a or "")
+  if #a > ANS_SHOWN then return a:sub(1, ANS_SHOWN) .. "..." end
+  return a
+end
 
 RefreshUI = function()
   local S = mySession()
@@ -3132,6 +3232,7 @@ RefreshUI = function()
       ui.stmt[i]:Hide()
     end
   end
+  layoutAnswer(isL)   -- the answer block follows whichever bottom the question has
 
   -- the halfway hint, computed locally, with a single sound the first time
   local hintText = ""
@@ -3178,16 +3279,18 @@ RefreshUI = function()
     elseif S.spectator then
       status = "Spectating - your roster is out of sync."
     elseif S.dataBad then
-      status = "Your question pack does not match the host's - watching this one."
+      -- one word shorter: the long form measured about 5px past the status
+      -- line and lost its own last word, which reads as a rendering fault
+      status = "Your question pack does not match the host's - watching."
     elseif S.qOpen then
       if S.isHost then
         -- only the host sees the live count; a client knows just its own lock
         status = (S.answerCount or 0) .. "/" .. #S.roster .. " answered"
         if S.seated and S.myLocked then
-          status = status .. " - you locked " .. (S.myAnswer or "")
+          status = status .. " - you locked " .. shortAnswer(S.myAnswer)
         end
       elseif S.myLocked then
-        status = "Locked: " .. (S.myAnswer or "") .. " - waiting for the reveal"
+        status = "Locked: " .. shortAnswer(S.myAnswer) .. " - waiting for the reveal"
       elseif S.syncHoldR == S.r and inRoster then
         status = "Resynced - you are back in from the next question."
       elseif inRoster then
@@ -3244,15 +3347,17 @@ RefreshUI = function()
     ui.gain:SetText(gainLine)
   end
 
-  -- roster / standings rows
-  local lines = {}
+  -- roster / standings rows. emptyText goes to the centred ui.empty, never into
+  -- row 1: an empty state is not list item zero. One string across all six
+  -- games (PLAN 4).
+  local lines, emptyText = {}, nil
   if S.spectator and not isJoin then
-    lines[1] = P.chgray .. "Out of sync - standings unavailable this game.|r"
+    emptyText = "Out of sync - standings unavailable this game."
   elseif isJoin then
     for _, name in ipairs(S.roster) do
       lines[#lines + 1] = name .. (name == me and (P.chgold .. " (you)|r") or "")
     end
-    if not lines[1] then lines[1] = P.chgray .. "Nobody has joined yet.|r" end
+    if not lines[1] then emptyText = "Nobody has joined yet." end
   else
     local standings = (isDone and S.standings) or computeStandings()
     for i = 1, #standings do
@@ -3271,6 +3376,28 @@ RefreshUI = function()
   -- seat, answers nothing and wins no medal.
   if refereed then
     table.insert(lines, 1, P.chgray .. shortOf(S.host) .. " (running the game)|r")
+    -- the referee line occupies the band, so the notice is no longer the only
+    -- thing on screen and goes back into the list where it reads as one
+    if emptyText then
+      lines[2] = P.chgray .. emptyText .. "|r"
+      emptyText = nil
+    end
+  end
+  -- The local player's row is the one row the collapse may not eat: when it
+  -- falls past the cut it is lifted into the last visible slot, the rule Death
+  -- Roll and the reveal stage already apply (PLAN 3, F6).
+  if #lines > MAX_ROWS and me then
+    local mineAt
+    for i = MAX_ROWS, #lines do
+      if lines[i]:find(me, 1, true) then
+        mineAt = i
+        break
+      end
+    end
+    if mineAt then
+      local row = table.remove(lines, mineAt)
+      table.insert(lines, MAX_ROWS - 1, row)
+    end
   end
   local shown = math.min(#lines, MAX_ROWS)
   if #lines > MAX_ROWS then
@@ -3281,6 +3408,8 @@ RefreshUI = function()
     rowAt(i):Show()
   end
   for i = shown + 1, #rows do rows[i]:Hide() end
+  ui.empty:SetText(emptyText or "")
+  ui.empty:SetShown(emptyText ~= nil)
 
   -- bottom line: your total, or your medal tally and record after the reveal
   if refereed then
@@ -3337,15 +3466,27 @@ end
 -- Host config dialog
 -------------------------------------------------------------------------------
 
+-- The host dialog's own geometry. A left label column against a right-anchored
+-- input column, both at the shared inset, so the two edges finally agree (they
+-- were 20 and 24).
+local DLG_W = 320
+local FIELD_W = 70
 local function makeField(parent, label, y, default, maxLetters)
-  local fs = parent:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  fs:SetPoint("TOPLEFT", 20, y)
+  local inset = mt("INSET")
+  local fs = parent:CreateFontString(nil, "OVERLAY", ft("T"))
+  fs:SetPoint("TOPLEFT", inset, y)
+  -- bounded: the label column is what the input column leaves, and no
+  -- FontString in this file is allowed to be unbounded
+  fs:SetWidth(DLG_W - 2 * inset - FIELD_W - 8)
+  fs:SetJustifyH("LEFT")
+  fs:SetWordWrap(false)
+  fs:SetMaxLines(1)
   fs:SetText(label)
   fs:SetTextColor(P.CHALK[1], P.CHALK[2], P.CHALK[3])
   if Theme then Theme.Shadow(fs) end
   local eb = CreateFrame("EditBox", nil, parent, "InputBoxTemplate")
-  eb:SetSize(70, 20)
-  eb:SetPoint("TOPRIGHT", -24, y + 2)
+  eb:SetSize(FIELD_W, 20)
+  eb:SetPoint("TOPRIGHT", -inset, y + 2)
   eb:SetAutoFocus(false)
   eb:SetNumeric(true)
   eb:SetMaxLetters(maxLetters or 3)
@@ -3408,24 +3549,36 @@ end
 
 local function ensureDialog()
   if dialog then return end
-  dialog = PG.UI.Window("qzdialog", "Start Quiz", 320, 470, "faire")
-  local hint = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  hint:SetPoint("TOPLEFT", 20, -40)
-  hint:SetPoint("TOPRIGHT", -20, -40)
+  -- 512, not 470: PG.UI.ScopePicker is 58 tall now (its fallback hint used to
+  -- render 13px OUTSIDE the rect it declared) and the note under it has to
+  -- clear Start with all three of its lines showing. This dialog carries three
+  -- fields, five checkboxes, the picker and the note; it is honestly tall.
+  dialog = PG.UI.Window("qzdialog", "Start Quiz", DLG_W, 512, "QZ")
+  local inset = mt("INSET")
+  local hint = dialog:CreateFontString(nil, "OVERLAY", ft("S"))
+  hint:SetPoint("TOPLEFT", inset, -56)
+  hint:SetPoint("TOPRIGHT", -inset, -56)
+  hint:SetHeight(24)
   hint:SetJustifyH("LEFT")
+  hint:SetJustifyV("TOP")
   hint:SetWordWrap(true)
+  hint:SetMaxLines(2)
   hint:SetText("Answers are typed here and whispered to the host - nothing is ever posted to chat.")
   hint:SetTextColor(P.CHGRAY[1], P.CHGRAY[2], P.CHGRAY[3])
   if Theme then Theme.Shadow(hint) end
 
   dlgInputs = {
-    rounds = makeField(dialog, "Questions", -84, 5, 1),
-    joinSecs = makeField(dialog, "Join window (sec)", -114, 30, 3),
-    answerSecs = makeField(dialog, "Answer time (sec)", -144, 20, 2),
+    rounds = makeField(dialog, "Questions", -88, 5, 1),
+    joinSecs = makeField(dialog, "Join window (sec)", -120, 30, 3),
+    answerSecs = makeField(dialog, "Answer time (sec)", -152, 20, 2),
   }
 
-  local header = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  header:SetPoint("TOPLEFT", 20, -178)
+  local header = dialog:CreateFontString(nil, "OVERLAY", ft("T"))
+  header:SetPoint("TOPLEFT", inset, -184)
+  header:SetPoint("TOPRIGHT", -inset, -184)
+  header:SetJustifyH("LEFT")
+  header:SetWordWrap(false)
+  header:SetMaxLines(1)
   header:SetText("Which games")
   header:SetTextColor(P.BRASS[1], P.BRASS[2], P.BRASS[3])
   if Theme then Theme.Shadow(header) end
@@ -3436,9 +3589,14 @@ local function ensureDialog()
   local function check(label, y, get, set)
     local cb = CreateFrame("CheckButton", nil, dialog, "UICheckButtonTemplate")
     cb:SetSize(26, 26)
-    cb:SetPoint("TOPLEFT", 24, y)
-    cb.label = dialog:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+    cb:SetPoint("TOPLEFT", inset, y)
+    cb.label = dialog:CreateFontString(nil, "OVERLAY", ft("B"))
     cb.label:SetPoint("LEFT", cb, "RIGHT", 4, 0)
+    -- bounded: a label with no width runs out through the border art
+    cb.label:SetPoint("RIGHT", dialog, "RIGHT", -inset, 0)
+    cb.label:SetJustifyH("LEFT")
+    cb.label:SetWordWrap(false)
+    cb.label:SetMaxLines(1)
     cb.label:SetText(label)
     cb:SetScript("OnClick", function(self) set(self:GetChecked() and true or false) end)
     cb:SetScript("OnShow", function(self) self:SetChecked(get() and true or false) end)
@@ -3448,7 +3606,7 @@ local function ensureDialog()
   dlgChecks = {}
   for i = 1, #MODE_ORDER do
     local m = MODE_ORDER[i]
-    dlgChecks[m] = check(MODE_NAME[m], -198 - (i - 1) * 26,
+    dlgChecks[m] = check(MODE_NAME[m], -204 - (i - 1) * 28,
       function() return readOpts()[m] end,
       function(v)
         if not v then
@@ -3475,7 +3633,7 @@ local function ensureDialog()
         refreshDialog()
       end)
   end
-  dlgChecks.hints = check("Hints at the halfway mark", -306,
+  dlgChecks.hints = check("Hints at the halfway mark", -320,
     function() return readOpts().hints end,
     function(v) writeOpt("hints", v) end)
 
@@ -3485,14 +3643,21 @@ local function ensureDialog()
     reasons = scopeNote,
     onChange = function() refreshDialog() end,
   })
-  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -336)
+  dlgScope:SetPoint("TOPLEFT", dialog, "TOPLEFT", 0, -356)
+  dlgScope:SetPoint("TOPRIGHT", dialog, "TOPRIGHT", 0, -356)
 
-  dlgNote = dialog:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  dlgNote:SetPoint("TOPLEFT", 20, -386)
-  dlgNote:SetPoint("TOPRIGHT", -20, -386)
+  -- Anchored to the picker's own bottom, not to an absolute offset that has to
+  -- be re-guessed every time the control changes height.
+  dlgNote = dialog:CreateFontString(nil, "OVERLAY", ft("S"))
+  dlgNote:SetPoint("TOPLEFT", dlgScope, "BOTTOMLEFT", inset, -8)
+  dlgNote:SetPoint("TOPRIGHT", dlgScope, "BOTTOMRIGHT", -inset, -8)
   dlgNote:SetJustifyH("LEFT")
+  -- TOP, so a one-line note sits where a three-line note starts instead of
+  -- floating in the middle of its box (four of the five dialogs did this)
+  dlgNote:SetJustifyV("TOP")
   dlgNote:SetWordWrap(true)
-  dlgNote:SetHeight(32)
+  dlgNote:SetHeight(36)
+  dlgNote:SetMaxLines(3)
   dlgNote:SetTextColor(P.CHGOLD[1], P.CHGOLD[2], P.CHGOLD[3])
   if Theme then Theme.Shadow(dlgNote) end
 
@@ -3573,7 +3738,7 @@ end
 PG.RegisterInit(function()
   if PG.Theme and PG.Theme.C then
     Theme = PG.Theme
-    local c = Theme.C("faire")
+    local c = Theme.C()
     for k in pairs(P) do
       if c[k] ~= nil then P[k] = c[k] end
     end
