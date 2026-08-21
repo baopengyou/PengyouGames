@@ -54,10 +54,13 @@
 --                 section 7.
 --   6 MODIFIERS.  A completed vision-granting front building (Watchtower) makes
 --                 sections 5 and 6 of its own lane permanently visible. The
---                 Shrine pulse, Divination, Omen and Veil are M3; see MODIFIERS
---                 at the bottom of this file.
+--                 Shrine's reveal pulse, Divination, Omen and Veil -- the four
+--                 M3 information effects, LIVE since M3 part 2 -- are the INFO
+--                 EFFECTS block below, consuming sim/Mods.lua's INFO_EFFECTS
+--                 handoff and the hashed SHRINE_PULSE_* constants.
 --   7 NEVER.      Enemy Levy, bank, income, spending and loadout are not spatial
---                 and are never visible by any route.
+--                 and are never visible by any route -- including every route
+--                 the M3 cards add (doc section 7 has no card-shaped exception).
 --
 -- ---------------------------------------------------------------------------
 -- FRAMES, WHICH IS THE ONE PLACE THIS IS EASY TO GET WRONG
@@ -81,6 +84,13 @@
 local IB_SIM_MODULES = rawget(_G, "IB_SIM_MODULES")
 local Rules = IB_SIM_MODULES and IB_SIM_MODULES.Rules or require("sim.Rules")
 local Hash = IB_SIM_MODULES and IB_SIM_MODULES.Hash or require("sim.Hash")
+-- sim/Mods.lua is loaded ONLY for its INFO_EFFECTS handoff surface -- the
+-- declared names of the four perception effects whose numbers live in the
+-- hashed ruleset and whose semantics live HERE (M3 part 2). Requiring it has no
+-- side effects (install() runs only when Sim.new calls it), and the dependency
+-- points the allowed way: fog/ may read sim/'s declarations, sim/ can never
+-- read fog/ (A.5 grep 1 makes that structural).
+local Mods = IB_SIM_MODULES and IB_SIM_MODULES.Mods or require("sim.Mods")
 
 local M = {}
 
@@ -305,6 +315,248 @@ for i = 1, #Rules.BUILDINGS do
 end
 
 -- ---------------------------------------------------------------------------
+-- THE M3 INFORMATION EFFECTS (doc section 6; M3 part 2)
+--
+-- Divination, Omen, Veil and the Shrine's reveal pulse. Their sim-side
+-- existence -- card ids, affinity, hashing, loadout legality, the pulse
+-- constants -- landed in M3 part 1 and is deliberately inert there: Ruling 1
+-- shares the whole state, so what these four change is what a client RENDERS,
+-- and that is this module's jurisdiction and nobody else's.
+--
+-- WHO IS RESOLVED FROM WHAT. The names come from sim/Mods.lua's declared
+-- handoff surface (Mods.INFO_EFFECTS) and are resolved against the HASHED
+-- ruleset -- three of the four are cards (Rules.CARD_BY_KEY) and the fourth is
+-- a building ability (the Shrine, matched by catalogue key, because unlike the
+-- Watchtower's `vision` field the ruleset carries no flag for "emits the reveal
+-- pulse" -- the pulse CONSTANTS are hashed in Rules.C but the emitter is named
+-- only by the handoff). An INFO_EFFECTS entry this block does not recognise
+-- refuses to load: an under-modelled information source must fail the build,
+-- not silently render as fog.
+--
+-- WHAT EACH ONE REVEALS is implemented at the point it applies and cross-
+-- referenced here:
+--
+--   Divination   the SCRY layer in observe(), plus divinedBuilding() for a
+--                live consumer. All COMPLETED enemy buildings, slot and
+--                identity, continuously, every lane, ignoring both the section
+--                rule and the front-slot shield. NEVER HP, never under
+--                construction. Beaten by Veil, absolutely.
+--   Omen         omenPending(). Enemy deploy orders surfaced as issued, lane
+--                and count only, NEVER unit type. Temporal, not spatial: it is
+--                a filter over the shared command queue, not new data.
+--   Veil         not a reveal but an EXEMPTION, threaded through every
+--                predicate that shows a building. The precedence rule is ONE
+--                SENTENCE and it is stated at veiled() below.
+--   Shrine pulse the pulse window plus the OCC layer in observe(). While a
+--                completed Shrine of yours stands, every SHRINE_PULSE_EVERY
+--                ticks for SHRINE_PULSE_TICKS: all enemy units in all lanes at
+--                full detail, plus enemy building OCCUPANCY only -- not
+--                identity, not HP.
+--
+-- SELF-ANNOUNCEMENT (Q9b: information modifiers announce themselves; "seeing
+-- costs being seen") is PRESENTATION and lands in M7. What this module owns is
+-- the fact the announcement discloses, as marks() -- so the renderer and the
+-- policy view read one predicate instead of each reaching into the enemy
+-- loadout, which doc section 7 forbids rendering.
+-- ---------------------------------------------------------------------------
+
+M.CARD_DIVINATION = 0
+M.CARD_OMEN = 0
+M.CARD_VEIL = 0
+M.BLD_SHRINE = 0
+for i = 1, #Mods.INFO_EFFECTS do
+  local name = Mods.INFO_EFFECTS[i]
+  if name == "divination" then
+    M.CARD_DIVINATION = Rules.CARD_BY_KEY[name] or 0
+  elseif name == "omen" then
+    M.CARD_OMEN = Rules.CARD_BY_KEY[name] or 0
+  elseif name == "veil" then
+    M.CARD_VEIL = Rules.CARD_BY_KEY[name] or 0
+  elseif name == "shrine" then
+    for b = 1, #Rules.BUILDINGS do
+      if Rules.BUILDINGS[b].key == name then M.BLD_SHRINE = b end
+    end
+  else
+    error("Fog: sim/Mods.lua hands off an information effect this model does not implement: "
+      .. tostring(name), 0)
+  end
+end
+must(M.CARD_DIVINATION > 0, "the Divination card is not in the hashed pool")
+must(M.CARD_OMEN > 0, "the Omen card is not in the hashed pool")
+must(M.CARD_VEIL > 0, "the Veil card is not in the hashed pool")
+must(M.BLD_SHRINE > 0, "the Shrine building is not in the hashed catalogue")
+must(C.SHRINE_PULSE_TICKS > 0 and C.SHRINE_PULSE_TICKS < C.SHRINE_PULSE_EVERY,
+  "the Shrine pulse must be briefer than its own cadence or 'periodically, briefly' is neither")
+
+-- Does `side`'s loadout hold card id `cardId`? A read of hashed state
+-- (sd.loadout has been inside Hash.state since M1), five comparisons.
+function M.hasCard(sim, side, cardId)
+  local lo = sim.sides[side].loadout
+  for i = 1, 5 do
+    if lo[i] == cardId then return true end
+  end
+  return false
+end
+
+-- THE VEIL PRECEDENCE RULE, in one sentence:
+--
+--   VEIL BEATS EVERY ROUTE THAT DOES NOT PUT A BODY THERE. A veiled side's
+--   buildings are exempt from Divination, from the Shrine pulse's occupancy
+--   scan and from REMOTE section light (the Watchtower's permanent sections);
+--   they are still shown by a unit of yours standing in the section (doc
+--   sections 2-3) and by contact (doc section 3a) -- and Veil conceals
+--   BUILDINGS ONLY, never units, so no unit predicate consults it.
+--
+-- WHY THIS IS THE RULE AND NOT ONE OF ITS NEIGHBOURS. Three texts overlap
+-- here and no two use the same words: the fog doc's section 6 row says
+-- "exempt from every disclosure route ABOVE" (its table's rows: Watchtower,
+-- Shrine pulse, Divination); D.3's normative card wording says "every source
+-- EXCEPT contact reveal and destruction" and "beats Divination and Shrine
+-- pulses absolutely"; and D.3's sentence predates the section model -- it was
+-- written against Q9a's old disclosure-trigger list, where "every source"
+-- could not have meant the section rule because the section rule did not
+-- exist. The reading that satisfies all three at once is the one above:
+-- remote scrying (tower, pulse, divination) is beaten absolutely, physical
+-- presence (a body in the section, a weapon on the wall) is not -- which also
+-- keeps 3a's promise ("you can see what you are fighting") unconditional,
+-- exactly as D.3's contact exception demands. The one point where the texts
+-- genuinely diverge -- whether a veiled building hides from a PLAIN unit-lit
+-- section -- is escalated as README open item 25 rather than smoothed; this
+-- implementation shows it, because the alternative deletes the base model's
+-- section rule for one card and reintroduces the grinding-a-wall-you-cannot-
+-- see absurdity that 3a exists to remove.
+function M.veiled(sim, side)
+  return M.hasCard(sim, side, M.CARD_VEIL)
+end
+
+-- A completed Shrine of `side`'s, standing right now. Under-construction does
+-- not pulse (Rules INTERPRETATIONS 4: no effect until complete), and the
+-- effect dies with the building exactly as the Watchtower's sight does.
+function M.shrineStands(sim, side)
+  local sd = sim.sides[side]
+  for s = 1, C.SLOTS do
+    local b = sd.slots[s]
+    if b and b.done == 1 and b.b == M.BLD_SHRINE then return true end
+  end
+  return false
+end
+
+-- Is `side`'s reveal pulse live on this tick? The schedule is the HEX rule
+-- (Rules INTERPRETATIONS 24) applied to the hashed pulse constants: live at
+-- tick t iff t mod SHRINE_PULSE_EVERY < SHRINE_PULSE_TICKS -- windows [0,30),
+-- [200,230), ... anchored at tick 0, because that is the one anchor the
+-- documents already use for a fixed schedule ("on a fixed schedule from tick
+-- 0") and it needs no per-building state. A Shrine completed mid-window joins
+-- the window in progress; one that dies mid-window ends it that tick.
+function M.shrinePulseActive(sim, side)
+  if sim.clock % C.SHRINE_PULSE_EVERY >= C.SHRINE_PULSE_TICKS then return false end
+  return M.shrineStands(sim, side)
+end
+
+-- What Divination shows the observer in enemy slot `slot`, LIVE: the identity
+-- of a COMPLETED building there, or 0 -- for an empty slot, for scaffolding
+-- (never under construction, D.3's own amendment), for a slot the observer has
+-- no Divination to scry with, and for a veiled enemy, whose every scry is
+-- empty ("a diviner facing Veil gets an empty scry"). Identity means the
+-- catalogue index and the fact it is complete; NEVER HP -- there is no HP in
+-- the return and no route to one.
+function M.divinedBuilding(sim, side, slot)
+  if not M.hasCard(sim, side, M.CARD_DIVINATION) then return 0 end
+  if M.veiled(sim, 3 - side) then return 0 end
+  local b = sim.sides[3 - side].slots[slot]
+  if b and b.done == 1 then return b.b end
+  return 0
+end
+
+-- OMEN: enemy deploy orders surfaced as issued -- lane and count only, NEVER
+-- unit type. Returns (orders, units) pending into `lane` for an observer
+-- holding the card; (0, 0) otherwise.
+--
+-- THE DETERMINISTIC REPRESENTATION, which fog open item 16 asked for. The
+-- shared command queue already holds every accepted atom on both clients
+-- (that is how the sim executes it later), so Omen is a FILTER over known
+-- data and never new data: an enemy deploy order is surfaced while it is
+-- still pending in sim.bucket AND the clock has reached its exec tick minus
+-- ORDER_DELAY. Everything in that sentence is an integer both clients hold --
+-- the exec tick is the hashed field of the atom, and exec - ORDER_DELAY is
+-- the LATEST tick the atom can have been issued on (A.11 requires exec in
+-- [issue + ORDER_DELAY, issue + ORDER_DELAY_CLAMP]), so the window is the
+-- doc's own gloss, "one order-delay before it takes the field", derived
+-- without touching issueTick -- which is wire metadata the sim's contract
+-- deliberately excludes (Rules INTERPRETATIONS 12). The window closes when
+-- the order executes and its bucket entry is consumed: what lands on the
+-- field is thereafter the section rule's problem, and no omen signal is ever
+-- REMEMBERED -- a stale wave warning is the same trap as a ghosted stack
+-- (doc section 4), so there is no omen field in the memory store.
+--
+-- TWO HONEST CAVEATS, stated rather than discovered:
+--   * an atom queued LATER than exec - ORDER_DELAY (a resend that only just
+--     made it, A.12) surfaces late -- from arrival -- so a lossy wire can only
+--     SHORTEN the warning, never lengthen it. Under-estimate, the safe
+--     direction.
+--   * an atom issued with a delay above the minimum surfaces from
+--     exec - ORDER_DELAY, which is later than its true issue tick. Same
+--     direction. The M2 driver issues every atom at the minimum delay and
+--     queues it on its issue tick, so under the policy layer the window IS
+--     "from the issue tick" exactly, and sweep/determinism.lua holds it to
+--     byte-identical replay.
+--
+-- The count surfaced is clamped to MAX_UNITS_PER_ORDER exactly as execDeploy
+-- will clamp it: the order surfaced is the order that can take the field.
+-- cmd.cls is Sim.lua's own class code (kindIdx = cls * 100 + index; deploys
+-- are class 1); the UNIT TYPE inside kindIdx is deliberately never read.
+--
+-- pendingDeploys is the raw filter and omenPending is the card gate over it.
+-- They are separate because the FULL information regime must stay a strict
+-- superset of the fogged one (the muster-bar lesson, README Finding 7): the
+-- pending queue is on every client under Ruling 1, so the upper bound carries
+-- the signal with no card, and only the fogged view charges a loadout slot
+-- for it.
+local CLS_UNIT_CODE = 1
+function M.pendingDeploys(sim, side, lane)
+  local RC = sim.rules.C
+  local foe = 3 - side
+  local nOrders, nUnits = 0, 0
+  local hi = sim.clock + RC.ORDER_DELAY
+  local maxN = RC.MAX_UNITS_PER_ORDER
+  for t = sim.clock, hi do
+    local b = sim.bucket[t]
+    if b then
+      for i = 1, #b do
+        local cmd = b[i]
+        if cmd.side == foe and cmd.cls == CLS_UNIT_CODE and cmd.target == lane then
+          nOrders = nOrders + 1
+          local n = cmd.count
+          if n > maxN then n = maxN end
+          nUnits = nUnits + n
+        end
+      end
+    end
+  end
+  return nOrders, nUnits
+end
+
+function M.omenPending(sim, side, lane)
+  if not M.hasCard(sim, side, M.CARD_OMEN) then return 0, 0 end
+  return M.pendingDeploys(sim, side, lane)
+end
+
+-- The Q9b self-announcing marks, from the WATCHED side's chair: am I being
+-- scried (their Divination, "at tick 0, persistent"), are my orders being
+-- read (their Omen, same), am I being scanned RIGHT NOW (their pulse)? Veil
+-- is the sole non-announcing source and so has no mark, by ruling. These are
+-- the sanctioned partial disclosures of an enemy loadout nothing else may
+-- render (doc section 7), which is why they are one predicate here instead
+-- of two consumers each reaching into sd.loadout.
+function M.marks(sim, side)
+  local foe = 3 - side
+  local scried = M.hasCard(sim, foe, M.CARD_DIVINATION) and 1 or 0
+  local omened = M.hasCard(sim, foe, M.CARD_OMEN) and 1 or 0
+  local scanned = M.shrinePulseActive(sim, foe) and 1 or 0
+  return scried, omened, scanned
+end
+
+-- ---------------------------------------------------------------------------
 -- VISIBLE SECTIONS
 --
 -- `out[s]` is 1 if the observer can see section s of that lane, 0 otherwise.
@@ -404,11 +656,11 @@ end
 --     building while the front one still stands". That is a statement about the
 --     attacker's reach, and it is the only thing that keeps the shield a
 --     geometric fact rather than a property of which buildings happen to shoot.
---   * IT IS THE SAFE DIRECTION. This model is a strict UNDER-estimate of the
---     shipped one in four named places already (see MODIFIERS at the bottom);
---     the alternative reading would make it an over-estimate in a fifth, and
---     would put the enemy's whole damage model -- unit ranges, building
---     dmgRange, trap radii and every M3 range hook -- inside the fog module.
+--   * IT IS THE SAFE DIRECTION. Everywhere this model must choose it errs
+--     toward showing LESS (the tail block names what is still outside it);
+--     the alternative reading would be its one over-estimate, and would put
+--     the enemy's whole damage model -- unit ranges, building dmgRange, trap
+--     radii and every M3 range hook -- inside the fog module.
 --
 -- The consequence is a real one and it is escalated rather than smoothed: under
 -- this reading you do not see what is shooting you if you cannot shoot back.
@@ -507,14 +759,46 @@ local CONTACT = { n = 0, p = {}, r = {}, lo = 0, hi = -1 }
 -- An enemy unit. Doc sections 2 and 3: the plain section rule, with no shield.
 -- A unit standing in section 7 beside an intact front building IS visible; only
 -- the BACK BUILDING is shielded. Doc section 3a adds the second route: a unit
--- one of mine is fighting is visible wherever it stands.
+-- one of mine is fighting is visible wherever it stands. Doc section 6 adds the
+-- third: while the observer's Shrine pulse is live, EVERY enemy unit in EVERY
+-- lane is visible at full detail -- and Veil never enters this predicate,
+-- because Veil conceals buildings only.
 --
 -- `cs` is this side's contact set for u's lane; one is built if it is omitted.
-function M.seesEnemyUnit(sim, side, u, vis, cs)
+-- `pulse` is M.shrinePulseActive(sim, side), passed by a caller walking a whole
+-- board so six slots are not re-scanned per unit; computed when omitted.
+function M.seesEnemyUnit(sim, side, u, vis, cs, pulse)
+  if pulse == nil then pulse = M.shrinePulseActive(sim, side) end
+  if pulse then return true end
   if vis == nil then vis = M.visibleSections(sim, side, u.lane, SCRATCH) end
   if vis[M.sectionOfEnemy(u.pos)] == 1 then return true end
   if cs == nil then cs = M.contactSet(sim, side, u.lane, CONTACT) end
   return M.inContact(cs, C.LANE_LEN - u.pos)
+end
+
+-- Is observer section `section` of `lane` lit by one of the observer's own
+-- UNITS -- as opposed to by a vision-granting building? The two light the same
+-- bitmap in visibleSections because for everything EXCEPT a veiled building
+-- they are the same thing; Veil is the one rule that tells them apart (a body
+-- in the section beats Veil, remote tower light does not), so the distinction
+-- is derived here on demand rather than carried in every section set.
+function M.unitLitSection(sim, side, lane, section)
+  local us = sim.sides[side].lanes[lane].units
+  for i = 1, #us do
+    if M.sectionOfOwn(us[i].pos) == section then return true end
+  end
+  return false
+end
+
+-- The section route AS IT APPLIES TO BUILDINGS: a lit section shows the
+-- buildings standing in it unless the buildings' owner holds Veil, in which
+-- case only a section lit by a BODY does (the precedence rule at veiled()).
+-- Sections 7 and 8 are only ever unit-lit (the Watchtower grants 5 and 6), so
+-- for them this degrades to the plain bitmap test at the cost of one loop.
+local function sectionShowsBuilding(sim, side, lane, section, vis)
+  if vis[section] ~= 1 then return false end
+  if not M.veiled(sim, 3 - side) then return true end
+  return M.unitLitSection(sim, side, lane, section)
 end
 
 -- Is one of the observer's units in contact with the building standing in enemy
@@ -572,14 +856,24 @@ end
 -- standing right next to it" and one board (an infiltrator caught behind a
 -- rebuilt wall) can produce exactly that unit. The second is what makes the
 -- claim unconditional instead of a property of the current slot positions.
+--
+-- SINCE M3 PART 2 this is the FULL-FIDELITY predicate -- slot, identity AND
+-- HP grade sight, the kind that overwrites memory -- and it is veil-aware:
+-- a veiled enemy's buildings show only to a body in the section or to contact
+-- (the precedence rule at veiled()). Divination and the Shrine pulse are NOT
+-- routes into this predicate on purpose: they disclose strictly less than it
+-- does (identity without HP; occupancy without either) and surface through
+-- their own layers in observe() and believedBuilding() instead. A predicate
+-- that answered "true" for a scried building would hand its callers HP the
+-- scry never showed.
 function M.seesEnemyBuilding(sim, side, slot, vis, cs)
   local lane = M.laneOfSlot(slot)
   if vis == nil then vis = M.visibleSections(sim, side, lane, SCRATCH) end
   if isFrontSlot(slot) then
-    if vis[M.SEC_ENEMY_FRONT] == 1 then return true end
+    if sectionShowsBuilding(sim, side, lane, M.SEC_ENEMY_FRONT, vis) then return true end
     return M.inContactWithBuilding(sim, side, slot, cs)
   end
-  if vis[M.SEC_ENEMY_BACK] == 1 then
+  if sectionShowsBuilding(sim, side, lane, M.SEC_ENEMY_BACK, vis) then
     local es = sim.sides[3 - side]
     if not es.slots[frontSlotOf(lane)] then return true end
   end
@@ -668,6 +962,40 @@ end
 --                     this store and there is no accessor that returns one. A
 --                     ghosted stack invites a decision against an army that
 --                     moved two minutes ago, which is worse than no information.
+--                     The same rule covers the two M3 sources ABOUT units: what
+--                     a Shrine pulse showed of an army is gone when the pulse
+--                     ends, and no Omen signal outlives its pending order --
+--                     a stale wave warning is a ghosted stack wearing a bell.
+--
+-- SINCE M3 PART 2 THE STORE IS THREE PARALLEL LAYERS, because the two card
+-- sources see LESS than a body does and memory must never promote a partial
+-- sight into a full record -- a scry that recorded an HP it cannot see would
+-- be fabricating evidence, which is worse than fog:
+--
+--   FULL layer  (slotB/slotHp/slotMaxHp/slotDone/slotSeen/slotTick)
+--               written ONLY by full-fidelity sight -- the section rule and
+--               contact -- through recordSlot, exactly as before part 2.
+--   SCRY layer  (slotScryB/slotScryTick)
+--               Divination. Stamped EVERY observation while the observer holds
+--               the card: the identity of the completed building there, or 0
+--               for empty, for scaffolding and for a veiled enemy (the empty
+--               scry). Continuous, so its freeze never shows while the card is
+--               held -- the layer exists so the composition below has one
+--               shape, not because a scry can be lost mid-match.
+--   OCC layer   (slotOcc/slotOccTick)
+--               the Shrine pulse. Stamped on pulse ticks only: 1 if anything
+--               stands in the slot -- complete or scaffolding, occupancy is a
+--               fact about the SLOT (Rules INTERPRETATIONS 4: an
+--               under-construction building occupies it) -- and 0 for an empty
+--               or veiled one, frozen until the next pulse.
+--
+-- WHAT ONE LAYER'S WRITE MAY NEVER DO IS TOUCH ANOTHER: a pulse that showed a
+-- slot occupied says NOTHING about which building stands there now, so the
+-- frozen full record keeps its palisade; a pulse that showed it empty does not
+-- delete that record either -- it is a fresher, coarser observation, and WHICH
+-- of the two a consumer believes is the composition rule in
+-- believedBuilding(), written once, where the renderer and the policy view
+-- must share it.
 --
 -- THE INITIAL STATE IS THE TICK-0 BOARD, and that is not a shortcut: at tick 0
 -- both sides have six empty slots and a keep at C.KEEP_HP, and the ruleset that
@@ -699,6 +1027,10 @@ function M.newMemory(rules)
     secSeen = {},
     secTick = {},
   }
+  mem.slotScryB = {}
+  mem.slotScryTick = {}
+  mem.slotOcc = {}
+  mem.slotOccTick = {}
   for s = 1, RC.SLOTS do
     mem.slotB[s] = 0
     mem.slotHp[s] = 0
@@ -706,6 +1038,10 @@ function M.newMemory(rules)
     mem.slotDone[s] = 0
     mem.slotSeen[s] = 0
     mem.slotTick[s] = M.NEVER_SEEN
+    mem.slotScryB[s] = 0
+    mem.slotScryTick[s] = M.NEVER_SEEN
+    mem.slotOcc[s] = 0
+    mem.slotOccTick[s] = M.NEVER_SEEN
   end
   for lane = 1, RC.LANES do
     local a, b = {}, {}
@@ -766,16 +1102,25 @@ function M.observe(mem, sim, side)
     -- Their front slot: the section rule, or a unit of mine with its weapon on
     -- the building in it. The second route is what closes README open item 13 --
     -- an attacker stopped at 1240 by the wall it is destroying now records that
-    -- wall, at the HP it can see, on the tick it is hitting it.
-    if vis[M.SEC_ENEMY_FRONT] == 1 or M.inContactWithBuilding(sim, side, fs, cs) then
+    -- wall, at the HP it can see, on the tick it is hitting it. Since M3
+    -- part 2 the section half is veil-aware (sectionShowsBuilding): remote
+    -- tower light does not put a veiled wall into the FULL record, a body in
+    -- the section still does, and in a cardless match the predicate is
+    -- exactly the old bitmap test.
+    if sectionShowsBuilding(sim, side, lane, M.SEC_ENEMY_FRONT, vis)
+      or M.inContactWithBuilding(sim, side, fs, cs) then
       recordSlot(mem, es, fs, t)
     end
     -- Doc section 5: section 7 AND their front slot empty or destroyed. Doc 3a
     -- adds the entity-scoped route -- a Bow razing a back building from
     -- section 6 records it -- and inContactWithBuilding carries section 5's
     -- shield inside itself, so it is written once and cannot drift from the
-    -- predicate the renderer will call.
-    if (vis[M.SEC_ENEMY_BACK] == 1 and not es.slots[fs])
+    -- predicate the renderer will call. (Section 7 is only ever unit-lit --
+    -- the Watchtower grants 5 and 6 -- so the veil-aware form changes nothing
+    -- here today; it is used anyway so the rule is written once, and so a
+    -- future building that lights section 7 remotely cannot quietly pierce
+    -- Veil through this one call site.)
+    if (sectionShowsBuilding(sim, side, lane, M.SEC_ENEMY_BACK, vis) and not es.slots[fs])
       or M.inContactWithBuilding(sim, side, fs + 1, cs) then
       recordSlot(mem, es, fs + 1, t)
     end
@@ -783,6 +1128,47 @@ function M.observe(mem, sim, side)
       mem.keepHp = es.keepHp
       mem.keepSeen = 1
       mem.keepTick = t
+    end
+  end
+
+  -- THE SCRY LAYER (Divination). Continuous: stamped at every observation the
+  -- observer holds the card, all six slots, ignoring sections and the shield.
+  -- The value is the completed building's identity, or 0 -- and 0 is a REAL
+  -- observation ("nothing completed stands there"), not a missing one, which
+  -- is why the tick advances for it too: it is how a diviner learns a razed
+  -- wall is gone.
+  --
+  -- AGAINST VEIL THE LAYER IS NOT STAMPED AT ALL, and the difference between
+  -- "recorded empty" and "recorded nothing" is the whole card. Veil
+  -- SUPPRESSES a route; it does not manufacture observations. A veiled scry
+  -- that WROTE zeros would out-vote knowledge the observer earned through the
+  -- routes Veil cannot beat -- a wall recorded by a body standing at it would
+  -- vanish from the screen because a lying scry "refreshed" it -- and that is
+  -- deception beyond what the card promises. Left unstamped, a diviner facing
+  -- Veil sees exactly what the doc says: an empty scry everywhere, stale
+  -- body-earned knowledge intact, and the one clue Q9b sanctions -- a wall you
+  -- have TOUCHED that the scry refuses to show is how you learn "I am against
+  -- Veil". Inference, not sight.
+  if M.hasCard(sim, side, M.CARD_DIVINATION) and not M.veiled(sim, 3 - side) then
+    for s = 1, RC.SLOTS do
+      local b = es.slots[s]
+      mem.slotScryB[s] = (b and b.done == 1) and b.b or 0
+      mem.slotScryTick[s] = t
+    end
+  end
+
+  -- THE OCC LAYER (the Shrine pulse). Pulse ticks only: 1 when anything
+  -- stands in the slot -- occupancy is a fact about the SLOT, and scaffolding
+  -- occupies it (Rules INTERPRETATIONS 4) -- 0 for an empty one. It never
+  -- touches the FULL record in either direction: what the scan saw is
+  -- occupancy, and occupancy is what it remembers. Against Veil it is not
+  -- stamped, on exactly the scry layer's argument: the scan comes back with
+  -- nothing, not with a fabricated "empty" that would erase body-earned
+  -- knowledge.
+  if M.shrinePulseActive(sim, side) and not M.veiled(sim, 3 - side) then
+    for s = 1, RC.SLOTS do
+      mem.slotOcc[s] = es.slots[s] and 1 or 0
+      mem.slotOccTick[s] = t
     end
   end
 
@@ -805,6 +1191,74 @@ end
 
 function M.rememberedKeepHp(mem)
   return mem.keepHp, mem.keepTick
+end
+
+-- WHAT THE OBSERVER BELIEVES IS IN AN ENEMY SLOT, all three layers composed.
+-- This is the one place the composition rule is written; the policy view reads
+-- it and M7's renderer must read it too, because two compositions of the same
+-- three layers would be two different screens.
+--
+-- Returns (b, hp, maxHp, done, occ, tick):
+--   b     the identity drawn there, 0 when none is known
+--   hp    the HP figure the drawing carries, 0 when NO HP is known -- which is
+--         unambiguous, because a standing building's live hp is always >= 1
+--   occ   1 when the slot is believed OCCUPIED. This is the field that says
+--         more than b: a pulse-scanned slot can be known occupied with no
+--         identity at all (occ 1, b 0), which no single field could express
+--   tick  when the belief was formed (NEVER_SEEN for the tick-0 default)
+--
+-- THE RULE: THE FRESHEST LAYER WINS; a tie goes to the layer that knows MORE
+-- (full > scry > occ) -- with the one exception that an EMPTY scry never beats
+-- a same-tick occupancy scan, because "nothing completed stands there" does
+-- not contradict "something stands there": scaffolding satisfies both, and
+-- the scan is the one that saw it. Spelled out:
+--
+--   1 full record at tF >= everything else -> the full record, frozen.
+--   2 else a scry that SHOWS a building (tS >= tO) -> that identity, done by
+--     definition, occupied -- and the HP shown is the FROZEN full-record HP
+--     when the record's identity matches the scry's (the screen keeps its
+--     stale HP bar under a live identity), 0 when it does not (the building
+--     the record knew is gone; its HP died with it).
+--   3 else the occupancy scan (tO >= tS) -> occupied: the frozen full record
+--     supplies whatever identity and HP it holds (a scan ping under a
+--     remembered palisade draws the palisade); empty: an empty slot, however
+--     confidently a stale record disagrees.
+--   4 else (a fresher EMPTY scry) -> empty. This is the under-estimate: a
+--     diviner whose scry shows nothing draws nothing, even over an older
+--     occupancy ping -- the razed-vs-scaffolding ambiguity is exactly the
+--     "is that wall up yet?" tension Divination is documented to preserve.
+--
+-- Veil never appears here because it already happened: a veiled enemy's scry
+-- and scan layers are never stamped at all (observe()'s two folds say why
+-- suppression must be absence rather than a recorded zero), so this function
+-- composes only observations that were genuinely made -- and a diviner facing
+-- Veil keeps the wall a body of theirs once touched, which is the sanctioned
+-- inference route.
+function M.believedBuilding(mem, slot)
+  local tF = mem.slotTick[slot]
+  local tS = mem.slotScryTick[slot]
+  local tO = mem.slotOccTick[slot]
+  if tF >= tS and tF >= tO then
+    local b = mem.slotB[slot]
+    return b, mem.slotHp[slot], mem.slotMaxHp[slot], mem.slotDone[slot],
+           (b > 0) and 1 or 0, tF
+  end
+  local scryB = mem.slotScryB[slot]
+  if scryB > 0 and tS >= tO then
+    if mem.slotB[slot] == scryB then
+      return scryB, mem.slotHp[slot], mem.slotMaxHp[slot], 1, 1, tS
+    end
+    return scryB, 0, 0, 1, 1, tS
+  end
+  if tO >= tS then
+    if mem.slotOcc[slot] == 0 then return 0, 0, 0, 0, 0, tO end
+    local b = mem.slotB[slot]
+    if b > 0 then
+      return b, mem.slotHp[slot], mem.slotMaxHp[slot], mem.slotDone[slot], 1, tO
+    end
+    return 0, 0, 0, 0, 1, tO
+  end
+  return 0, 0, 0, 0, 0, tS
 end
 
 function M.sectionSeen(mem, lane, section)
@@ -835,6 +1289,10 @@ function M.memHash(mem)
     h = Hash.int(h, mem.slotDone[s])
     h = Hash.int(h, mem.slotSeen[s])
     h = Hash.int(h, mem.slotTick[s])
+    h = Hash.int(h, mem.slotScryB[s])
+    h = Hash.int(h, mem.slotScryTick[s])
+    h = Hash.int(h, mem.slotOcc[s])
+    h = Hash.int(h, mem.slotOccTick[s])
   end
   local nl = #mem.secSeen
   h = Hash.int(h, nl)
@@ -849,33 +1307,35 @@ function M.memHash(mem)
 end
 
 -- ---------------------------------------------------------------------------
--- MODIFIERS NOT MODELLED HERE, NAMED SO THE GAP IS READABLE (doc section 6)
+-- WHAT IS STILL NOT MODELLED, NAMED SO THE GAP IS READABLE
 --
--- Three of the doc's five information sources are M3 Mystic modifiers and one
--- is an M3 building ability; none of them exists in the M1 ruleset, so none is
--- implemented and none is stubbed with an always-false predicate that a future
--- reader would mistake for a decision:
+-- The four M3 information effects are LIVE (the INFO EFFECTS block above
+-- closed fog open item 16), so the "strict under-estimate in four named
+-- places" caveat this block used to carry is retired. What remains outside the
+-- model, each deliberately and each escalated in the README rather than
+-- stubbed:
 --
---   Shrine reveal pulse  periodic, every section of every lane, enemy building
---                        OCCUPANCY ONLY -- not identity, not HP. Self-
---                        announcing. Needs an M3 ability hook and a pulse
---                        cadence the doc does not fix.
---   Divination           all COMPLETED enemy buildings, slot and identity,
---                        continuously, ignoring both the section rule and the
---                        front-slot shield. Never HP, never under construction.
---   Omen                 enemy deploy orders as they are issued: lane and count
---                        only, never type. Temporal rather than spatial, so it
---                        is the one source that does not fit the section model
---                        at all and will need its own channel into the view.
---   Veil                 exempts YOUR buildings from every route above, so it
---                        is a filter on the OTHER side's fog and cannot be
---                        expressed until at least one of the three above is.
---
--- What IS modelled from section 6 is the Watchtower, because it is the only one
--- that exists in the shipping ruleset today. So this model is a strict
--- UNDER-estimate of the shipped one in exactly four named places, and never an
--- over-estimate -- which is the safe direction for a measurement, and is stated
--- here rather than discovered later.
+--   self-announcement    Q9b's marks ("you are being scried", "you were
+--                        scanned") are PRESENTATION and land in M7. The FACT
+--                        each mark discloses is marks() above, so the renderer
+--                        will not have to reach into an enemy loadout that doc
+--                        section 7 forbids rendering; the pixels are not this
+--                        module's business.
+--   Watchfires' reveal   Q9b's table gives the Watchfires card a reveal half
+--                        ("reveal their lane out to that range") and the fog
+--                        doc's section 6 -- later, binding, and claiming to
+--                        restate Q9b "so the two cannot drift" -- has no such
+--                        row. The card's RANGE half is sim-side and landed in
+--                        part 1; the reveal half is implemented as the binding
+--                        doc writes it, which is not at all. README open
+--                        item 26.
+--   pulse vs sections    the pulse reveals units and occupancy and never
+--                        lights a section or marks ground explored -- the only
+--                        reading on which "occupancy only" survives its own
+--                        sentence. README open item 27 asks the doc to
+--                        confirm it.
+--   buildings as         doc 3a says "a UNIT also reveals", so an Arrow Tower
+--   observers            firing at something reveals nothing. Open item 19c.
 -- ---------------------------------------------------------------------------
 
 return M

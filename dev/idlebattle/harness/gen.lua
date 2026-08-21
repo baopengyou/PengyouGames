@@ -61,6 +61,35 @@ end
 
 local function isFrontSlot(slot) return (slot % 2) == 1 end
 
+-- M3: the generator's affordability model must stay CONSERVATIVE under cards.
+-- Before cards, every cost modifier in reach was a discount, so reserving the
+-- BASE cost was the worst case. Discord ends that: the opponent's card puts a
+-- SURCHARGE on this side's unitCost channel. The worst any channel can do is
+-- its clamp ceiling, so unit Levy is reserved at floor(base * (100 + hi) /
+-- 100) -- over-reserving only ever issues fewer orders, never an unaffordable
+-- one. Supply stays reserved at BASE cost, which is exact: the supply cap is
+-- immune to every modifier (Q4).
+local WORST_COST = {}
+do
+  local hi = Rules.CLAMPS[Rules.CH.unitCost][2]
+  for t = 1, #Rules.UNITS do
+    WORST_COST[t] = math.floor(Rules.UNITS[t].cost * (100 + hi) / 100)
+  end
+end
+
+-- M3: a random legal loadout -- five DISTINCT card ids (INTERPRETATIONS 13).
+local function drawLoadout(r, lo)
+  local got, n = {}, 0
+  while n < 5 do
+    local c = Rand.range(r, 1, #Rules.CARDS)
+    if not got[c] then
+      got[c] = true
+      n = n + 1
+      lo[n] = c
+    end
+  end
+end
+
 local function occupied(sd)
   local n = 0
   for s = 1, C.SLOTS do
@@ -153,7 +182,8 @@ local function pickDeploy(g, side, avail)
   local cand, nc, total = {}, 0, 0
   for t = 1, 3 do
     local base = Rules.UNITS[t].cost
-    local byBank = floor(avail / base)
+    local wc = WORST_COST[t]           -- Levy reserved at the clamp ceiling (M3)
+    local byBank = floor(avail / wc)
     if byBank > C.MAX_UNITS_PER_ORDER then byBank = C.MAX_UNITS_PER_ORDER end
     if byBank >= 1 then
       for lane = 1, C.LANES do
@@ -186,7 +216,7 @@ local function pickDeploy(g, side, avail)
   local base = Rules.UNITS[pick.t].cost
   return {
     kind = UNIT_KIND[pick.t], target = pick.lane, count = count,
-    levy = base * count, lane = pick.lane, supply = base * count, slot = 0,
+    levy = WORST_COST[pick.t] * count, lane = pick.lane, supply = base * count, slot = 0,
   }
 end
 
@@ -254,9 +284,26 @@ function M.make(seed, opts)
   if opts.styleB then styleB = opts.styleB end
   log.style = styleA .. "/" .. styleB
 
+  -- M3: half the sample plays CARDED -- both sides draw a random legal 5-card
+  -- loadout -- so the milestone fuzz exercises the modifier layer against the
+  -- same four arrival patterns as everything else. The other half stays
+  -- cardless, which keeps the M1 game in the sample. The generator issues no
+  -- verb atoms (their legality windows -- cooldowns, one-outstanding -- are a
+  -- policy question, not a generator one); the chaos pass throws them, carded
+  -- and cardless, at the fizzle-or-execute path instead.
+  if opts.loadoutA ~= nil or opts.loadoutB ~= nil then
+    for i = 1, 5 do
+      log.loadout[1][i] = (opts.loadoutA and opts.loadoutA[i]) or 0
+      log.loadout[2][i] = (opts.loadoutB and opts.loadoutB[i]) or 0
+    end
+  elseif opts.cards ~= false and Rand.range(r, 1, 100) <= 50 then
+    drawLoadout(r, log.loadout[1])
+    drawLoadout(r, log.loadout[2])
+  end
+
   local g = {
     rand = r,
-    sim = SimM.new(Rules, seed),
+    sim = SimM.new(Rules, seed, log.loadout[1], log.loadout[2]),
     pol = { newPolicy(r, styleA), newPolicy(r, styleB) },
     res = {
       { levy = 0, occ = 0, slot = { 0, 0, 0, 0, 0, 0 }, supply = { 0, 0, 0 } },
@@ -402,6 +449,15 @@ function M.makeChaos(seed, opts)
   local r = Rand.new(seed + 99991)
   local log = logfmt.newLog(seed, ticks)
   log.name = "chaos:" .. seed
+  -- M3: half the chaos logs are carded, so the verb atoms below sometimes hit
+  -- a side that OWNS the card -- real dispatch through cooldowns, the
+  -- one-outstanding guard and the lane checks -- and sometimes a side that
+  -- does not, which must fizzle exactly like M1 did. Both paths are sim code
+  -- and both clients must take them identically.
+  if Rand.range(r, 1, 100) <= 50 then
+    drawLoadout(r, log.loadout[1])
+    drawLoadout(r, log.loadout[2])
+  end
   local seq = { 0, 0 }
   local letters = {}
   for i = 1, #Rules.BUILDINGS do letters[i] = Rules.BUILDINGS[i].letter end

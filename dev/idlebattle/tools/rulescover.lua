@@ -50,8 +50,44 @@ end
 for i = 1, #Rules.BUILDINGS do
   cover("BUILDINGS[" .. i .. "]", Rules.BUILDINGS[i], Rules.BUILDING_FIELDS)
 end
+-- M3: every field of every card must be named by CARD_FIELDS in both
+-- directions, or a card value ships outside rulesHash and two builds that
+-- disagree about it pass the handshake.
+for i = 1, #Rules.CARDS do
+  cover("CARDS[" .. i .. "]", Rules.CARDS[i], Rules.CARD_FIELDS)
+end
+if #Rules.CARDS ~= 40 then
+  fail("card pool is not 40 cards: " .. #Rules.CARDS)
+end
+-- The wheel: a 5x5 of -1/0/+1 named by WHEEL_TYPES, and the hash walker walks
+-- exactly #WHEEL_TYPES rows of #WHEEL_TYPES entries, so a ragged or oversized
+-- matrix is a hashed-value escape.
+if #Rules.WHEEL ~= #Rules.WHEEL_TYPES then
+  fail("WHEEL row count differs from WHEEL_TYPES")
+end
+for i = 1, #Rules.WHEEL do
+  if #Rules.WHEEL[i] ~= #Rules.WHEEL_TYPES then
+    fail("WHEEL[" .. i .. "] is not " .. #Rules.WHEEL_TYPES .. " wide")
+  end
+  for j = 1, #Rules.WHEEL[i] do
+    local w = Rules.WHEEL[i][j]
+    if w ~= -1 and w ~= 0 and w ~= 1 then
+      fail("WHEEL[" .. i .. "][" .. j .. "] outside -1..1")
+    end
+  end
+end
 if #Rules.CHANNELS ~= #Rules.CLAMPS then
   fail("CHANNELS and CLAMPS differ in length: " .. #Rules.CHANNELS .. " vs " .. #Rules.CLAMPS)
+end
+-- Every channel a card names must exist, in both the self and the foe column,
+-- and the scoped-unit field must name a real unit.
+for i = 1, #Rules.CARDS do
+  local cd = Rules.CARDS[i]
+  if cd.ch1 < 0 or cd.ch1 > #Rules.CHANNELS then fail("CARDS[" .. i .. "].ch1 is not a channel") end
+  if cd.ch2 < 0 or cd.ch2 > #Rules.CHANNELS then fail("CARDS[" .. i .. "].ch2 is not a channel") end
+  if cd.foeCh < 0 or cd.foeCh > #Rules.CHANNELS then fail("CARDS[" .. i .. "].foeCh is not a channel") end
+  if cd.scopeUnit < 0 or cd.scopeUnit > #Rules.UNITS then fail("CARDS[" .. i .. "].scopeUnit is not a unit") end
+  if cd.unlockBld < 0 or cd.unlockBld > #Rules.BUILDINGS then fail("CARDS[" .. i .. "].unlockBld is not a building") end
 end
 
 -- Derived lookups must actually equal their derivation, so a hand edit fails.
@@ -70,6 +106,11 @@ for i = 1, #Rules.CHANNELS do
     fail("CH drifted from CHANNELS at " .. i)
   end
 end
+for i = 1, #Rules.CARDS do
+  if Rules.CARD_BY_KEY[Rules.CARDS[i].key] ~= i then
+    fail("CARD_BY_KEY drifted from CARDS at " .. i)
+  end
+end
 if Rules.UNIT_SPEAR ~= 1 or Rules.UNIT_HORSE ~= 2 or Rules.UNIT_BOW ~= 3 then
   fail("UNIT_* index constants do not match the UNITS order")
 end
@@ -84,6 +125,8 @@ local TOP = {
   UNIT_SPEAR = "d", UNIT_HORSE = "d", UNIT_BOW = "d", UNIT_BY_KIND = "d",
   BUILDING_FIELDS = "s", BUILDINGS = "h", BUILDING_BY_LETTER = "d",
   CHANNELS = "h", CH = "d", CLAMPS = "h", TIERS = "h",
+  CARDS = "h", CARD_FIELDS = "s", CARD_BY_KEY = "d",
+  WHEEL = "h", WHEEL_TYPES = "s",
   REASON = "h", REASON_ORDER = "s",
   rulesHash = "x", rulesHash36 = "x", recomputeHash = "x",
 }
@@ -102,6 +145,8 @@ if fails > 0 then
 end
 print(string.format(
   "ruleset coverage: %d top-level keys, %d constants, %d units, %d buildings, "
-  .. "%d channels, %d reason codes -- every value hashed, structural or derived",
+  .. "%d channels, %d cards x %d fields, a %dx%d wheel, %d reason codes -- "
+  .. "every value hashed, structural or derived",
   classified, #Rules.CONST_ORDER, #Rules.UNITS, #Rules.BUILDINGS,
-  #Rules.CHANNELS, #Rules.REASON_ORDER))
+  #Rules.CHANNELS, #Rules.CARDS, #Rules.CARD_FIELDS,
+  #Rules.WHEEL_TYPES, #Rules.WHEEL_TYPES, #Rules.REASON_ORDER))

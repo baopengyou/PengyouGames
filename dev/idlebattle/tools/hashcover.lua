@@ -216,6 +216,78 @@ do
                      function() Rules.rulesHash = old end)
 end
 
+-- ---------------------------------------------------------------------------
+-- 3. M3 card runtime state. A second fixture whose loadouts own every card
+-- that keeps per-side runtime state, so each mods key exists and each must
+-- move the hash -- a latch or cooldown outside the hash would let two clients
+-- disagree about a pending payout and agree about everything visible.
+-- ---------------------------------------------------------------------------
+
+local carded = Sim.new(Rules, 777,
+  { 18, 19, 27, 31, 39 },   -- Golden Age, Investment, War Drums, Scorched Earth, Ley Line
+  { 29, 5, 11, 32, 12 })    -- Vanguard, Endless Ranks, Counterwall, Raiding Party, Deep Foundations
+carded.sides[1].bank = 400
+carded.sides[1].earned = carded.sides[1].earned + 370
+carded:queueCommand({ side = 1, seq = 1, tick = 25, kind = "I", target = 1, count = 2 })
+carded:queueCommand({ side = 1, seq = 2, tick = 30, kind = "S", target = 1, count = 3 })
+carded:queueCommand({ side = 2, seq = 1, tick = 30, kind = "S", target = 1, count = 3 })
+carded:run(400)
+if carded:isOver() then
+  fail("M3 hashcover fixture ended early; probes need a live match")
+  os.exit(1)
+end
+
+do
+  local h1 = carded:stateHash()
+  local function cprobe(label, mutate, restore)
+    mutate()
+    local h = carded:stateHash()
+    restore()
+    if h == h1 then
+      fail("state hash does NOT cover " .. label)
+      return
+    end
+    if carded:stateHash() ~= h1 then
+      fail("restore failed while probing " .. label)
+      return
+    end
+    print("ok    covered: " .. label)
+  end
+  local function modProbe(side, key)
+    local sd = carded.sides[side]
+    if sd.mods[key] == nil then
+      fail("M3 fixture never created mods." .. key .. " on side " .. side)
+      return
+    end
+    local old = sd.mods[key]
+    cprobe("card runtime mods." .. key .. " (side " .. side .. ")",
+      function() sd.mods[key] = old + 1 end,
+      function() sd.mods[key] = old end)
+  end
+  modProbe(1, "gaLatch")
+  modProbe(1, "invAmt")
+  modProbe(1, "invDue")
+  modProbe(1, "wdUntil")
+  modProbe(1, "seCd")
+  modProbe(1, "llCd")
+  modProbe(2, "vg1")
+  modProbe(2, "vg2")
+  modProbe(2, "vg3")
+  -- The wheel edge is non-zero here (Boom-heavy against a Fortress-heavy
+  -- loadout) and hashed per side; the M1 probe above only ever saw 0.
+  local w = carded.sides[1].wheelNum
+  if w == 0 then fail("M3 fixture's wheel edge is unexpectedly zero") end
+  cprobe("non-zero wheel edge",
+    function() carded.sides[1].wheelNum = w + 1 end,
+    function() carded.sides[1].wheelNum = w end)
+  -- Static card channel points are folded into sd.chan, which the per-channel
+  -- probes above cover on the M1 fixture; prove the carded fixture actually
+  -- HAS non-zero card state so this section cannot silently probe a blank.
+  if carded.sides[1].mods.invDue == 0 then
+    fail("M3 fixture's Investment never became outstanding")
+  end
+end
+
 if fails > 0 then
   print("FAILURES: " .. fails)
   os.exit(1)

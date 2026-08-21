@@ -45,10 +45,11 @@
 --
 --   * WHAT THE CLIENT HOLDS. Ruling 1 shares the whole state and fog is a
 --     pure RENDER filter, so both clients genuinely hold the enemy's lanes,
---     buildings and bank. Nothing in this view is something a real client could
---     not have, and the view still deliberately carries nothing NO client holds:
---     the enemy's in-flight orders, the contents of a future tick, or the
---     enemy's policy state.
+--     buildings and bank -- and, once each atom has crossed the wire, the
+--     enemy's PENDING orders too, which is the known data the Omen card's
+--     channel filters (M3 part 2). The view still deliberately carries nothing
+--     NO client holds: an enemy order that has not arrived yet, the contents
+--     of a future tick, or the enemy's policy state.
 --   * WHAT THE PLAYER SEES. That is ../docs/IDLE_BATTLE_FOG.md, and it is a
 --     strictly smaller set: no enemy Levy ever, no enemy building except the one
 --     you remember from having stood in its section or from having hit it, and
@@ -364,6 +365,19 @@ local function newLaneView()
     -- nothing: the muster bar was an aggregate about the ENEMY and the doc
     -- deletes that outright.
     lit = 0, seen = 0,
+    -- M3 part 2, filled on `foe` only. `omen` / `omenN` are the Omen card's
+    -- temporal channel (fog open item 16): units / orders in ENEMY deploy
+    -- orders into this lane that are surfaced right now -- pending in the
+    -- shared queue, within one order-delay of taking the field. Lane and
+    -- count ONLY; there is deliberately no field a type could travel in.
+    -- Under fog they are 0 without the card; under full information they are
+    -- always filled, because the queue is on every client (Ruling 1) and the
+    -- upper bound must stay a superset of anything a card can buy.
+    -- `frontOcc` / `backOcc` are believed OCCUPANCY, a superset of frontB > 0:
+    -- a Shrine-pulse scan can prove a slot occupied without disclosing what
+    -- stands in it, which no identity field could carry (occ 1, b 0).
+    omen = 0, omenN = 0,
+    frontOcc = 0, backOcc = 0,
   }, RO)
 end
 
@@ -378,10 +392,23 @@ local function newSideView(R)
     slotCap = 0,
     levyFlat = 0,    -- flat Levy per Levy tick from completed buildings
     units = 0, supplyTotal = 0,
+    -- M3 part 2. On `me`: the Q9b self-announcing marks -- THEIR Divination is
+    -- scrying me (persistent from tick 0), THEIR Omen is reading my orders
+    -- (same), THEIR Shrine pulse is scanning me right now. The one sanctioned
+    -- disclosure of an enemy loadout (fog doc section 7 forbids rendering the
+    -- loadout itself; Veil is not self-announcing and has no mark). On `foe`:
+    -- `scan` = 1 while MY pulse is rendering their whole board, so a carded
+    -- policy can tell a confirmed-empty lane from a merely dark one.
+    scried = 0, omened = 0, scanned = 0,
+    scan = 0,
     lanes = {}, slots = {},
   }
   for lane = 1, R.C.LANES do sv.lanes[lane] = newLaneView() end
   for slot = 1, R.C.SLOTS do
+    -- `free` and `b` are decoupled since M3 part 2: free 0 with b 0 is a slot
+    -- known OCCUPIED by something unidentified (a pulse scan), and hp 0 with
+    -- b > 0 is an identity known without an HP figure (a Divination scry) --
+    -- unambiguous, because a standing building's live hp is always >= 1.
     sv.slots[slot] = setmetatable({ b = 0, done = 0, hp = 0, free = 1 }, RO)
   end
   return setmetatable(sv, RO)
@@ -548,6 +575,8 @@ local function fillOwn(R, sv, sim, side, res)
     local fsv, bsv = sv.slots[fs], sv.slots[fs + 1]
     lv.frontB = fsv.b; lv.frontDone = fsv.done; lv.frontHp = fsv.hp
     lv.backB = bsv.b; lv.backDone = bsv.done; lv.backHp = bsv.hp
+    lv.frontOcc = 1 - fsv.free
+    lv.backOcc = 1 - bsv.free
     units = units + n
     supplyTotal = supplyTotal + lv.supply
     pen = pen + ln.depth
@@ -555,6 +584,12 @@ local function fillOwn(R, sv, sim, side, res)
   sv.units = units
   sv.supplyTotal = supplyTotal
   sv.penetration = pen
+
+  -- The self-announcing marks (M3 part 2): the three facts about being watched
+  -- that Q9b's announcements disclose, read off fog/Fog.lua's one predicate in
+  -- BOTH regimes -- they are facts about the shared state, and the upper bound
+  -- must not be missing a field the fogged view carries.
+  sv.scried, sv.omened, sv.scanned = Fog.marks(sim, side)
 end
 
 -- THE ENEMY HALF.
@@ -567,14 +602,23 @@ end
 -- The three groups below are the fog doc's three object classes, and each one
 -- is filled from a different source on purpose:
 --
---   units      LIVE state, filtered by the section rule. Units are NEVER
---              remembered (doc section 4), so there is no memory read here and
---              a unit that walks back out of sight simply vanishes.
+--   units      LIVE state, filtered by the section rule, contact, and -- since
+--              M3 part 2 -- the observer's Shrine pulse, which shows every
+--              enemy unit in every lane at full detail while it is live. Units
+--              are NEVER remembered (doc section 4), so there is no memory
+--              read here and a unit that walks back out of sight -- or whose
+--              pulse window closes -- simply vanishes.
 --   buildings  MEMORY ONLY. Never live. A building destroyed while unobserved
 --              still shows intact, one built while unobserved does not show at
 --              all, and both fall out of "read the frozen record" rather than
---              from a special case.
---   keep       position is structural (it is always there); HP from MEMORY.
+--              from a special case. Since M3 part 2 the record is THREE frozen
+--              layers -- full sight, Divination's identity scry, the pulse's
+--              occupancy scan -- and Fog.believedBuilding is the one place
+--              they compose; this file only reads the answer. Veil never
+--              appears here because it already shaped what observe() wrote.
+--   keep       position is structural (it is always there); HP from MEMORY --
+--              no card touches it: Divination and the pulse disclose
+--              buildings, and the keep is not a building.
 --
 -- No side is named anywhere in it: `side` is the index of whoever is being
 -- polled and every position test goes through fog/Fog.lua's frame conversion,
@@ -617,17 +661,28 @@ local function fillFoe(R, sv, sim, side, fog, mem)
     sv.keepHp = sd.keepHp
   end
 
+  -- The observer's own pulse, once per fill: it decides the unit filter in the
+  -- fogged branch and the `scan` flag in both. Both clients hold the shrine
+  -- and the clock, so this is a shared-state read like everything else here.
+  local pulse = Fog.shrinePulseActive(sim, side)
+  sv.scan = pulse and 1 or 0
+
   local occ = 0
   for slot = 1, C.SLOTS do
     local s = sv.slots[slot]
-    local bi, hp, maxHp, done
+    local bi, hp, maxHp, done, occb
     if fog then
-      bi, hp, maxHp, done = Fog.rememberedBuilding(mem, slot)
+      -- All three memory layers, composed ONCE in fog/Fog.lua: the frozen
+      -- full record, Divination's identity scry (never HP -- hp arrives 0
+      -- unless the full record knows this same building), and the pulse's
+      -- occupancy scan (occb 1 with bi 0 is "occupied by something unseen").
+      bi, hp, maxHp, done, occb = Fog.believedBuilding(mem, slot)
     else
       local b = sd.slots[slot]
       if b then bi, hp, done = b.b, b.hp, b.done else bi, hp, done = 0, 0, 0 end
+      occb = (bi > 0) and 1 or 0
     end
-    if bi > 0 then
+    if occb == 1 then
       s.b = bi; s.done = done; s.hp = hp; s.free = 0
       occ = occ + 1
     else
@@ -656,13 +711,23 @@ local function fillFoe(R, sv, sim, side, fog, mem)
       -- copy of it here.
       cs = Fog.contactSet(sim, side, lane, CTC)
     end
+    -- The Omen channel (M3 part 2): enemy deploy orders into this lane,
+    -- surfaced now -- lane and count only, from the pending half of the
+    -- shared queue. Card-gated under fog; always present under full, where
+    -- the queue is on the client anyway and the upper bound must stay a
+    -- superset of anything a card can buy.
+    if fog then
+      lv.omenN, lv.omen = Fog.omenPending(sim, side, lane)
+    else
+      lv.omenN, lv.omen = Fog.pendingDeploys(sim, side, lane)
+    end
     for i = 1, #us do
       local u = us[i]
       -- The ONE visibility test on a unit, and it is Fog's, not a second copy
       -- of the rule. u.pos is own-frame (their distance from THEIR keep); Fog
       -- converts it into the observer's section numbering.
       local shown = true
-      if fog then shown = Fog.seesEnemyUnit(sim, side, u, vis, cs) end
+      if fog then shown = Fog.seesEnemyUnit(sim, side, u, vis, cs, pulse) end
       if shown then
         n = n + 1
         hp = hp + u.hp
@@ -692,6 +757,8 @@ local function fillFoe(R, sv, sim, side, fog, mem)
     local fsv, bsv = sv.slots[fs], sv.slots[fs + 1]
     lv.frontB = fsv.b; lv.frontDone = fsv.done; lv.frontHp = fsv.hp
     lv.backB = bsv.b; lv.backDone = bsv.done; lv.backHp = bsv.hp
+    lv.frontOcc = 1 - fsv.free
+    lv.backOcc = 1 - bsv.free
     units = units + n
     supplyTotal = supplyTotal + supply
     pen = pen + ln.depth

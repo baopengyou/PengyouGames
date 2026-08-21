@@ -24,6 +24,13 @@
 -- may not, and tools/greps.sh + tools/comptest.sh over fog/ are what enforce
 -- that.
 --
+-- SINCE M3 PART 2 it also covers the four INFORMATION EFFECTS of doc section 6
+-- (sections 16-21: Divination, Omen, Veil with its precedence rule, the Shrine
+-- pulse, the three-layer memory composition, and the tower/card compositions
+-- from both seats) and section 22, the MUTATION suite: a copy of fog/Fog.lua
+-- with one effect surgically disabled is loaded from /tmp and the checks that
+-- effect carries must flip -- the proof that none of 16-19 passes vacuously.
+--
 --   usage: lua tools/fogtest.lua
 --   exit:  0 = every rule holds, 1 = at least one failed
 
@@ -82,10 +89,19 @@ end
 -- assertion; it is idempotent and cheap.
 local pinned = {}
 
-local function newSim(seed)
+-- loA / loB are 5-slot loadout arrays (M3 part 2's sections hand them in);
+-- partial loadouts are legal in the sim (Rules INTERPRETATIONS 13).
+local function newSim(seed, loA, loB)
   pinned = {}
-  return SimM.new(Rules, seed or 1)
+  return SimM.new(Rules, seed or 1, loA, loB)
 end
+
+-- Loadout literals for the info-card sections. Card ids come from the hashed
+-- pool, never hand-written.
+local CARD_DIV = Rules.CARD_BY_KEY.divination
+local CARD_OMEN = Rules.CARD_BY_KEY.omen
+local CARD_VEIL = Rules.CARD_BY_KEY.veil
+local function lo(...) return { ... } end
 
 local function repin()
   for i = 1, #pinned do pinned[i].u.pos = pinned[i].pos end
@@ -1373,6 +1389,957 @@ do
     "and the attacker has lit only the section it is standing in")
   eq(v.me.lanes[2].seen, Fog.OWN_SECTIONS + 1, "...and explored only that one")
   ok(u.pos == Fog.OBS_ENEMY_FRONT - Rules.UNITS[1].range, "the attacker is at the wall")
+end
+
+-- ===========================================================================
+-- 16. DIVINATION (doc section 6; D.3 Mystic card 2) -- M3 part 2
+--
+-- "All COMPLETED enemy buildings -- slot and identity, continuously, in every
+-- lane, ignoring both the section rule and the front-slot shield. Never HP,
+-- never buildings under construction."
+-- ===========================================================================
+
+G("16. Divination scries slot and identity, continuously, and nothing else")
+
+do
+  -- Every lane, ignoring the section rule: no unit of mine anywhere, and every
+  -- completed building of theirs is scried anyway. (Two boards, because the
+  -- C.SLOT_CAP of 4 will not hold every case at once.)
+  local sim = newSim(50, lo(CARD_DIV), nil)
+  local pal = build(sim, 2, "palisade", FS(1))
+  build(sim, 2, "granary", BS(2))
+  eq(Fog.divinedBuilding(sim, 1, FS(1)), pal.b, "their lane-1 front building is scried with no sight at all")
+  ok(Fog.divinedBuilding(sim, 1, BS(2)) > 0, "...and their lane-2 back building, a different lane")
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), false, "while the full-sight predicate still says dark")
+
+  -- Identity means identity: two different buildings scry as their two
+  -- different catalogue indices.
+  ok(Fog.divinedBuilding(sim, 1, FS(1)) ~= Fog.divinedBuilding(sim, 1, BS(2)),
+    "the scry names WHICH building, not merely occupancy")
+
+  -- An empty slot scries 0 -- and so does everything else that must: the card
+  -- gate and the missing card.
+  eq(Fog.divinedBuilding(sim, 1, FS(2)), 0, "an empty slot scries empty")
+  eq(Fog.divinedBuilding(sim, 2, FS(1)), 0, "the side without the card scries nothing")
+
+  -- Never under construction: scaffolding scries 0 until the tick it completes.
+  fund(sim, 2, 1000)
+  order(sim, 2, "c", FS(2), 1, sim.clock + C.ORDER_DELAY)
+  run(sim, C.ORDER_DELAY + 5)
+  local sc = sim.sides[2].slots[FS(2)]
+  ok(sc ~= false and sc.done == 0, "a Palisade is under construction")
+  eq(Fog.divinedBuilding(sim, 1, FS(2)), 0, "scaffolding is never scried (D.3's own amendment)")
+  run(sim, Rules.BUILDINGS[sc.b].build + 5)
+  eq(sim.sides[2].slots[FS(2)].done, 1, "the build completed")
+  ok(Fog.divinedBuilding(sim, 1, FS(2)) > 0, "...and the completed building appears -- 'including rebuilds'")
+end
+
+do
+  -- Ignoring the front-slot shield: the section rule cannot show a back slot
+  -- behind an intact front slot even to a body in section 7 (test 5); the scry
+  -- ignores the wall entirely.
+  local sim = newSim(53, lo(CARD_DIV), nil)
+  build(sim, 2, "palisade", FS(3))
+  build(sim, 2, "granary", BS(3))
+  ok(Fog.divinedBuilding(sim, 1, BS(3)) > 0, "the scry pierces the front-slot shield")
+  place(sim, 1, 3, 1700)
+  repin()
+  eq(Fog.seesEnemyBuilding(sim, 1, BS(3)), false, "...which full sight, standing right there, cannot")
+end
+
+do
+  -- NEVER HP, structurally: the live predicate returns one integer (identity),
+  -- the scry layer of the memory store holds identity and tick and NOTHING
+  -- else, and the composed belief carries hp 0 for a building known only
+  -- through the scry.
+  local sim = newSim(51, lo(CARD_DIV), nil)
+  local pal = build(sim, 2, "palisade", FS(1))
+  pal.hp = 123                      -- something a leak would show
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  local b, hp, mhp, done, occ = Fog.believedBuilding(mem, FS(1))
+  eq(b, pal.b, "the scried identity reaches the belief")
+  eq(hp, 0, "...with NO HP figure, ever")
+  eq(mhp, 0, "...and no maxHp either")
+  eq(done, 1, "...and done by definition: only completed buildings are scried")
+  eq(occ, 1, "...and the slot believed occupied")
+  ok(mem.slotScryHp == nil, "there is no field in the scry layer an HP could travel in")
+
+  -- Continuously: a razed wall disappears from the scry on the very next
+  -- observation -- the freeze of doc section 4 never shows while the card is
+  -- held, because every observation restamps the layer.
+  sim.sides[2].slots[FS(1)] = false
+  Fog.observe(mem, sim, 1)
+  local b2, _, _, _, occ2 = Fog.believedBuilding(mem, FS(1))
+  eq(b2, 0, "a razed building is gone from the scry at the next observation")
+  eq(occ2, 0, "...and the slot believed empty: this is how a diviner learns a wall fell")
+end
+
+do
+  -- The self-announcing mark (Q9b: "seeing costs being seen"): the WATCHED side
+  -- knows it is being scried, from tick 0, persistently -- and the watcher
+  -- carries no mark, and a cardless match carries none anywhere.
+  local sim = newSim(52, lo(CARD_DIV), nil)
+  local scried, omened, scanned = Fog.marks(sim, 2)
+  eq(scried, 1, "the scried side carries the 'you are being scried' mark from tick 0")
+  eq(omened, 0, "...and no omen mark: nobody holds Omen")
+  eq(scanned, 0, "...and no scan mark: nobody has a Shrine")
+  local s2 = Fog.marks(sim, 1)
+  eq(s2, 0, "the DIVINER is not marked: the disclosure points at the watched side only")
+end
+
+-- ===========================================================================
+-- 17. OMEN (doc section 6; D.3 Mystic card 3) -- M3 part 2
+--
+-- "Enemy deploy orders surfaced as they are issued: lane and count only, never
+-- unit type." Temporal, not spatial: a filter over the shared command queue,
+-- never new data.
+-- ===========================================================================
+
+G("17. Omen surfaces enemy deploy orders as issued -- lane and count, never type")
+
+do
+  local sim = newSim(60, lo(CARD_OMEN), nil)
+  fund(sim, 2, 1000)
+  fund(sim, 1, 1000)
+  run(sim, 5)
+  local exec = sim.clock + C.ORDER_DELAY
+  order(sim, 2, "H", 2, 3, exec)      -- their Horses into lane 2
+  order(sim, 2, "S", 2, 12, exec)     -- their Spears, count over the atom cap
+  order(sim, 2, "b", FS(1), 1, exec)  -- their BUILD order: not a deploy
+  order(sim, 1, "S", 2, 4, exec)      -- MY deploy: not an enemy order
+  local nOrders, nUnits = Fog.omenPending(sim, 1, 2)
+  eq(nOrders, 2, "two enemy deploy orders surfaced at their issue tick")
+  eq(nUnits, 3 + C.MAX_UNITS_PER_ORDER,
+    "the count is the count that can take the field: 3 + the atom cap, not 3 + 12")
+  eq(select(1, Fog.omenPending(sim, 1, 1)), 0, "nothing surfaced for a lane nothing is bound for")
+  eq(select(1, Fog.omenPending(sim, 2, 2)), 0, "the side without the card gets nothing")
+
+  -- The window closes when the order executes: what lands on the field is the
+  -- section rule's problem, and no omen signal outlives its pending order.
+  run(sim, C.ORDER_DELAY + 1)
+  local o2, u2 = Fog.omenPending(sim, 1, 2)
+  eq(o2, 0, "the signal is gone once the order executes")
+  eq(u2, 0, "...units included")
+end
+
+do
+  -- NEVER UNIT TYPE, proved by indistinguishability rather than by inspection:
+  -- two pending waves that differ ONLY in unit type produce bit-identical omen
+  -- signals. If any field carried the type, these two would differ somewhere.
+  local function signal(kind)
+    local sim = newSim(61, lo(CARD_OMEN), nil)
+    fund(sim, 2, 1000)
+    run(sim, 3)
+    order(sim, 2, kind, 3, 5, sim.clock + C.ORDER_DELAY)
+    local o, u = Fog.omenPending(sim, 1, 3)
+    return o * 1000 + u
+  end
+  eq(signal("H"), signal("B"), "five Horses and five Bows read identically")
+  eq(signal("S"), signal("H"), "...and five Spears too: lane and count only")
+end
+
+do
+  -- A FILTER OVER THE SHARED QUEUE, NOT NEW DATA. pendingDeploys is the raw
+  -- filter and the card only gates it: with the card the two agree exactly, and
+  -- under the FULL regime the same channel is filled with no card at all --
+  -- the queue is on every client under Ruling 1, so the upper bound must stay a
+  -- strict superset of anything a card can buy (the muster-bar lesson).
+  local sim = newSim(62, lo(CARD_OMEN), nil)
+  fund(sim, 2, 1000)
+  run(sim, 4)
+  order(sim, 2, "S", 1, 6, sim.clock + C.ORDER_DELAY)
+  local ro, ru = Fog.pendingDeploys(sim, 1, 1)
+  local co, cu = Fog.omenPending(sim, 1, 1)
+  eq(co, ro, "the carded signal IS the raw filter, order for order")
+  eq(cu, ru, "...and unit for unit: the card adds no data, it unlocks a filter")
+
+  Policy.setVision(Policy.VISION_FULL)
+  local v = Policy.newView(Rules)
+  Policy.fillView(v, sim, 2, nil, nil)      -- side 2 has NO card
+  eq(v.foe.lanes[1].omenN, 0, "side 2 has issued nothing, so its foe channel is empty")
+  Policy.fillView(v, sim, 1, nil, nil)
+  eq(v.foe.lanes[1].omenN, ro, "under full information the channel fills with no card")
+  eq(v.foe.lanes[1].omen, ru, "...because the pending queue is on every client anyway")
+
+  Policy.setVision(Policy.VISION_FOG)
+  local mem = Fog.newMemory(Rules)
+  local v2 = Policy.newView(Rules)
+  Policy.fillView(v2, sim, 1, nil, mem)
+  eq(v2.foe.lanes[1].omen, ru, "under fog the carded side gets the same number")
+  local mem2 = Fog.newMemory(Rules)
+  Policy.fillView(v2, sim, 2, nil, mem2)
+  eq(v2.foe.lanes[1].omen, 0, "...and the cardless side gets zero through the same view")
+end
+
+do
+  -- THE WINDOW IS "ONE ORDER-DELAY BEFORE IT TAKES THE FIELD", derived from the
+  -- exec tick. An atom issued at the minimum delay surfaces from its issue tick
+  -- (the M2 driver's case, exact); one issued with a LONGER delay surfaces from
+  -- exec - ORDER_DELAY, later than its true issue tick -- the under-estimate,
+  -- stated in fog/Fog.lua's own caveats and pinned here so it cannot drift into
+  -- an over-estimate.
+  local sim = newSim(63, lo(CARD_OMEN), nil)
+  fund(sim, 2, 1000)
+  run(sim, 2)
+  local issue = sim.clock
+  order(sim, 2, "S", 2, 2, issue + C.ORDER_DELAY_CLAMP)   -- slowest legal exec
+  eq(select(1, Fog.omenPending(sim, 1, 2)), 0,
+    "an atom with a padded delay is NOT surfaced at its issue tick")
+  run(sim, C.ORDER_DELAY_CLAMP - C.ORDER_DELAY)
+  eq(select(1, Fog.omenPending(sim, 1, 2)), 1,
+    "...and surfaces exactly one order-delay before it takes the field")
+
+  -- NO OMEN MEMORY. A stale wave warning is a ghosted stack wearing a bell
+  -- (doc section 4), so there is no omen field in the memory store at all.
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  local omenish = {}
+  for k, _ in pairs(mem) do
+    local lk = k:lower()
+    if lk:find("omen") or lk:find("pending") or lk:find("order") then
+      omenish[#omenish + 1] = k
+    end
+  end
+  eq(#omenish, 0, "no field in the memory store could hold an omen signal")
+
+  -- The mark, from the watched chair.
+  local scried, omened = Fog.marks(sim, 2)
+  eq(omened, 1, "the watched side knows its orders are being read")
+  eq(scried, 0, "...and is not scried: the marks are per card")
+end
+
+-- ===========================================================================
+-- 18. VEIL (doc section 6; D.3 Mystic card 4) -- M3 part 2
+--
+-- THE PRECEDENCE RULE, as implemented and pinned: VEIL BEATS EVERY ROUTE THAT
+-- DOES NOT PUT A BODY THERE -- Divination's scry, the Shrine pulse's occupancy
+-- scan, and the Watchtower's remote section light -- and LOSES to physical
+-- presence: a unit of yours standing in the section, and contact (D.3: "every
+-- source except contact reveal and destruction"). Veil conceals BUILDINGS
+-- ONLY, never units, and is the one information card with no mark.
+-- ===========================================================================
+
+G("18. Veil: remote scrying is beaten absolutely, a body there is not")
+
+do
+  -- Route 1, Divination: the empty scry. The diviner gets 0 for every slot of a
+  -- veiled enemy, live and in memory -- and the memory layer is NOT stamped, so
+  -- knowledge earned through routes Veil cannot beat is never overwritten by a
+  -- lying refresh.
+  local sim = newSim(70, lo(CARD_DIV), lo(CARD_VEIL))
+  local pal = build(sim, 2, "palisade", FS(1))
+  eq(Fog.divinedBuilding(sim, 1, FS(1)), 0, "a diviner facing Veil gets an empty scry")
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  eq(mem.slotScryTick[FS(1)], Fog.NEVER_SEEN,
+    "the scry layer is not stamped at all: suppression is absence, not a recorded zero")
+
+  -- Route 2, the body. A unit of mine standing in the section sees the veiled
+  -- wall -- the doc's own base model (sections 2-3) is not a "disclosure route
+  -- above" and D.3's sentence predates the section model; fog/Fog.lua argues
+  -- the reading and the README escalates it.
+  local u = place(sim, 1, 1, 1300)
+  repin()
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), true, "a body in the section sees a veiled building")
+  Fog.observe(mem, sim, 1)
+  local rb, rhp = Fog.rememberedBuilding(mem, FS(1))
+  eq(rb, pal.b, "...and it enters FULL memory, HP included")
+  eq(rhp, pal.hp, "...at the HP the body can see")
+
+  -- ...and once earned, the empty scry cannot erase it: the observation after
+  -- the body leaves keeps the body-earned record.
+  u.pos = 100
+  Fog.observe(mem, sim, 1)
+  local rb2, rhp2 = Fog.rememberedBuilding(mem, FS(1))
+  eq(rb2, pal.b, "the frozen record survives the empty scry")
+  eq(rhp2, rhp, "...HP included: a veiled scry never fabricates an observation")
+  local bb = Fog.believedBuilding(mem, FS(1))
+  eq(bb, pal.b, "...and the composed belief still draws the wall a body once touched")
+end
+
+do
+  -- Route 3, contact: grinding a veiled wall shows the wall (D.3's explicit
+  -- exception). The attacker is in section 5, the wall in section 6, nothing
+  -- lit -- the contact route alone carries it, straight through Veil.
+  local sim = newSim(71, nil, lo(CARD_VEIL))
+  build(sim, 2, "palisade", FS(1))
+  local u = deploy(sim, 1, 1, "S")
+  run(sim, 200)
+  eq(u.pos, Fog.OBS_ENEMY_FRONT - Rules.UNITS[1].range, "the Spear is parked at the veiled wall")
+  eq(vis(sim, 1, 1)[6], 0, "its section is not lit")
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), true, "contact reveal beats Veil")
+  u.pos = u.pos - 1
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), false, "...by exactly the weapon envelope, as ever")
+end
+
+do
+  -- Route 4, the Watchtower: REMOTE light loses to Veil. The same board with
+  -- and without the card, so the check is the difference and nothing else.
+  local function towerSees(veiled)
+    local sim = newSim(72, nil, veiled and lo(CARD_VEIL) or nil)
+    build(sim, 2, "palisade", FS(1))
+    build(sim, 1, "watchtower", FS(1))
+    local lit = vis(sim, 1, 1)[6] == 1
+    return lit, Fog.seesEnemyBuilding(sim, 1, FS(1))
+  end
+  local litV, seesV = towerSees(true)
+  local litN, seesN = towerSees(false)
+  eq(litV, true, "the tower lights section 6 either way -- Veil hides buildings, not ground")
+  eq(litN, true, "...")
+  eq(seesN, true, "an unveiled wall shows in the tower-lit section")
+  eq(seesV, false, "a veiled one does NOT: remote light is not a body")
+
+  -- ...and a body in the tower-lit section still wins, so the two routes into
+  -- one lit section are genuinely distinguished.
+  local sim = newSim(73, nil, lo(CARD_VEIL))
+  build(sim, 2, "palisade", FS(1))
+  build(sim, 1, "watchtower", FS(1))
+  place(sim, 1, 1, 1300)
+  repin()
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), true,
+    "a body standing in the same section shows the veiled wall the tower could not")
+end
+
+do
+  -- Route 5, the Shrine pulse: the scan comes back with NOTHING against Veil --
+  -- the occ layer is never stamped, so a body-earned record is not erased and
+  -- no fabricated "empty" appears.
+  local sim = newSim(74, nil, lo(CARD_VEIL))
+  build(sim, 2, "palisade", FS(2))
+  build(sim, 1, "shrine", BS(1))
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  eq(Fog.shrinePulseActive(sim, 1), true, "my pulse is live")
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  eq(mem.slotOccTick[FS(2)], Fog.NEVER_SEEN, "the occupancy scan is not stamped against Veil")
+  local _, _, _, _, occ = Fog.believedBuilding(mem, FS(2))
+  eq(occ, 0, "...so the veiled slot stays believed empty, not scanned-empty")
+
+  -- VEIL CONCEALS BUILDINGS ONLY: their units are pulse-revealed exactly as an
+  -- unveiled side's are (the doc: "it never conceals units"). place() advances
+  -- the sim 21 ticks, which stays inside the 30-tick window just entered.
+  local eu = place(sim, 2, 3, 0)
+  repin()
+  eu.pos = 100
+  ok(sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS, "still inside the window")
+  eq(Fog.seesEnemyUnit(sim, 1, eu), true, "a veiled side's units are revealed by the pulse anyway")
+
+  -- ...and the plain section rule never consults Veil for units either: window
+  -- over, a body of mine lights section 5, their unit stands in it.
+  while sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS do sim:tick() end
+  place(sim, 1, 3, 1100)
+  repin()
+  eu.pos = 900                                -- their 900 = my 1100, my section 5
+  eq(Fog.shrinePulseActive(sim, 1), false, "the pulse is over")
+  eq(Fog.seesEnemyUnit(sim, 1, eu), true, "...nor does the section rule: Veil is about buildings")
+end
+
+do
+  -- NO MARK. Veil is the sole non-announcing source (Q9b), so the veiled side's
+  -- opponent learns nothing from the marks -- inference through an empty scry is
+  -- the only route, and that is the design.
+  local sim = newSim(75, lo(CARD_DIV, CARD_OMEN), lo(CARD_VEIL))
+  local scried, omened, scanned = Fog.marks(sim, 1)
+  eq(scried, 0, "the diviner is not told it is scried (it is not)")
+  eq(omened, 0, "...nor omened")
+  eq(scanned, 0, "...nor scanned: Veil announces nothing, in either direction")
+  ok(Fog.CARD_VEIL > 0, "and the card is real, so those zeros are the rule and not a stub")
+end
+
+-- ===========================================================================
+-- 19. THE SHRINE'S REVEAL PULSE (doc section 6; Q9b; D.2's hashed constants)
+--
+-- "While a completed Shrine stands, every SHRINE_PULSE_EVERY ticks for
+-- SHRINE_PULSE_TICKS: all enemy units in all lanes at full detail, plus enemy
+-- building OCCUPANCY only -- not identity, not HP."
+-- ===========================================================================
+
+G("19. the Shrine pulse: every unit everywhere, buildings as occupancy only")
+
+do
+  -- The schedule is the hashed constants, anchored at tick 0, and nothing else:
+  -- live at t iff t mod EVERY < TICKS. Swept over two full periods.
+  local sim = newSim(80)
+  build(sim, 1, "shrine", BS(1))
+  local base = floor(sim.clock / C.SHRINE_PULSE_EVERY) * C.SHRINE_PULSE_EVERY
+    + C.SHRINE_PULSE_EVERY
+  while sim.clock < base do sim:tick() end
+  local mismatches = 0
+  for t = base, base + 2 * C.SHRINE_PULSE_EVERY - 1 do
+    local want = (t % C.SHRINE_PULSE_EVERY) < C.SHRINE_PULSE_TICKS
+    if Fog.shrinePulseActive(sim, 1) ~= want then mismatches = mismatches + 1 end
+    sim:tick()
+  end
+  eq(mismatches, 0, format("the window is [0, %d) mod %d, swept tick by tick over two periods",
+    C.SHRINE_PULSE_TICKS, C.SHRINE_PULSE_EVERY))
+  eq(Fog.shrinePulseActive(sim, 2), false, "the shrineless side never pulses")
+end
+
+do
+  -- ALL enemy units, ALL lanes, at full detail -- and the negation one tick
+  -- after the window shuts.
+  local sim = newSim(81)
+  build(sim, 1, "shrine", BS(2))
+  local eus = {}
+  for lane = 1, C.LANES do
+    eus[lane] = place(sim, 2, lane, 100 + lane)   -- deep in their own half
+  end
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  repin()
+  for lane = 1, C.LANES do
+    eq(Fog.seesEnemyUnit(sim, 1, eus[lane]), true,
+      format("their unit deep in lane %d is revealed by the pulse", lane))
+  end
+  while sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS do sim:tick() end
+  repin()
+  for lane = 1, C.LANES do
+    eq(Fog.seesEnemyUnit(sim, 1, eus[lane]), false,
+      format("...and vanishes the tick the window shuts (lane %d)", lane))
+  end
+end
+
+do
+  -- OCCUPANCY ONLY. A pulse over an enemy board with a completed building, a
+  -- scaffolding and an empty slot: the first two scan as OCCUPIED -- occupancy
+  -- is a fact about the SLOT, and scaffolding occupies it -- with no identity
+  -- and no HP; the third as empty.
+  local sim = newSim(82)
+  build(sim, 1, "shrine", BS(3))
+  build(sim, 2, "granary", BS(1))
+  fund(sim, 2, 1000)
+  order(sim, 2, "c", FS(2), 1, sim.clock + C.ORDER_DELAY)
+  run(sim, C.ORDER_DELAY + 3)
+  ok(sim.sides[2].slots[FS(2)] ~= nil and sim.sides[2].slots[FS(2)].done == 0,
+    "their lane-2 front slot holds scaffolding")
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  ok(sim.sides[2].slots[FS(2)] ~= nil and sim.sides[2].slots[FS(2)].done == 0,
+    "...still under construction on the pulse tick")
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  local b, hp, mhp, done, occ = Fog.believedBuilding(mem, BS(1))
+  eq(occ, 1, "a completed building scans as occupied")
+  eq(b, 0, "...with NO identity")
+  eq(hp, 0, "...and no HP")
+  eq(done, 0, "...and no completion flag: occupancy is all the scan carries")
+  local b2, _, _, _, occ2 = Fog.believedBuilding(mem, FS(2))
+  eq(occ2, 1, "scaffolding scans as occupied too -- it occupies the slot")
+  eq(b2, 0, "...identity-free like everything the pulse touches")
+  local _, _, _, _, occ3 = Fog.believedBuilding(mem, FS(1))
+  eq(occ3, 0, "an empty slot scans as empty")
+  ok(mem.slotOccTick[BS(1)] >= 0, "the scan really was stamped, so those zeros are the rule")
+
+  -- The scan FREEZES until the next pulse: raze the Granary between windows and
+  -- the belief keeps its occupied ping until a new scan says otherwise.
+  while sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS do sim:tick() end
+  sim.sides[2].slots[BS(1)] = false
+  Fog.observe(mem, sim, 1)
+  local _, _, _, _, occ4 = Fog.believedBuilding(mem, BS(1))
+  eq(occ4, 1, "between pulses the occupancy ping is frozen, doc section 4's rule verbatim")
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  Fog.observe(mem, sim, 1)
+  local _, _, _, _, occ5 = Fog.believedBuilding(mem, BS(1))
+  eq(occ5, 0, "...and the next pulse's scan updates it")
+end
+
+do
+  -- THE PULSE DOES NOT LIGHT SECTIONS AND DOES NOT MARK GROUND EXPLORED. It
+  -- shows units (not remembered, doc section 4) and occupancy (its own layer);
+  -- a section-model `seen` that ticked up during a pulse would claim knowledge
+  -- -- building identity, HP -- that the pulse never disclosed. Same argument as
+  -- contact being entity-scoped, and pinned the same way.
+  local sim = newSim(83)
+  build(sim, 1, "shrine", BS(1))
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  eq(Fog.shrinePulseActive(sim, 1), true, "the pulse is live")
+  local v = vis(sim, 1, 2)
+  for s = 5, 8 do
+    eq(v[s], 0, format("section %d stays dark during the pulse", s))
+  end
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  for s = 5, 8 do
+    eq(Fog.sectionSeen(mem, 2, s), false,
+      format("...and section %d is not marked explored by it", s))
+  end
+  -- The keep is not a building: the pulse never touches its remembered HP.
+  sim.sides[2].keepHp = 777
+  Fog.observe(mem, sim, 1)
+  eq(Fog.rememberedKeepHp(mem), C.KEEP_HP, "the pulse does not read the enemy keep's HP")
+end
+
+do
+  -- SELF-ANNOUNCING ("you were scanned"), live during the window, gone after,
+  -- and the policy view carries both halves: the watched side's mark and the
+  -- scanning side's own scan flag.
+  Policy.setVision(Policy.VISION_FOG)
+  local sim = newSim(84)
+  build(sim, 1, "shrine", BS(2))
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  local _, _, scanned = Fog.marks(sim, 2)
+  eq(scanned, 1, "the scanned side is told, while it is happening")
+  local memA, memB = Fog.newMemory(Rules), Fog.newMemory(Rules)
+  local v = Policy.newView(Rules)
+  Policy.fillView(v, sim, 2, nil, memB)
+  eq(v.me.scanned, 1, "...and its view says so")
+  eq(v.foe.scan, 0, "its own pulse flag is 0: it has no Shrine")
+  Policy.fillView(v, sim, 1, nil, memA)
+  eq(v.me.scanned, 0, "the scanning side is not scanned")
+  eq(v.foe.scan, 1, "...and its view knows its own pulse is rendering their board")
+  run(sim, C.SHRINE_PULSE_TICKS)
+  local _, _, after = Fog.marks(sim, 2)
+  eq(after, 0, "the mark ends with the window")
+end
+
+-- ===========================================================================
+-- 20. THE THREE MEMORY LAYERS COMPOSE, AND NO LAYER PROMOTES ANOTHER
+--
+-- Full sight (slot, identity, HP), Divination's scry (identity only), the
+-- pulse's scan (occupancy only). The rule, written once in
+-- Fog.believedBuilding: the freshest layer wins; a tie goes to the layer that
+-- knows more; an empty scry never beats a same-tick occupancy scan.
+-- ===========================================================================
+
+G("20. memory: full sight, the scry and the scan compose without promotion")
+
+do
+  local sim = newSim(90, lo(CARD_DIV), nil)
+  local pal = build(sim, 2, "palisade", FS(1))
+  local full = pal.hp
+
+  -- A body at the wall: full record and scry stamped the same tick; the full
+  -- record wins the tie and the belief carries HP.
+  local mem = Fog.newMemory(Rules)
+  local u = place(sim, 1, 1, 1300)
+  repin()
+  Fog.observe(mem, sim, 1)
+  local b, hp = Fog.believedBuilding(mem, FS(1))
+  eq(b, pal.b, "tie at one tick: the full record wins")
+  eq(hp, full, "...so the belief carries the HP only full sight knows")
+
+  -- The body leaves (killed the way the sim kills, so the walks below run over
+  -- an empty lane); the wall is damaged; the scry stays fresher than the frozen
+  -- record and agrees about identity: live identity over STALE HP -- the screen
+  -- keeps its old HP bar under a fresh nameplate.
+  local us = sim.sides[1].lanes[1].units
+  for i = #us, 1, -1 do us[i] = nil end
+  pinned = {}
+  run(sim, 1)
+  pal.hp = 200
+  Fog.observe(mem, sim, 1)
+  local b2, hp2, _, done2, occ2 = Fog.believedBuilding(mem, FS(1))
+  eq(b2, pal.b, "a fresher scry that agrees keeps the identity live")
+  eq(hp2, full, "...over the FROZEN HP, not the live 200: the scry never carries HP")
+  eq(done2, 1, "...done, by scry definition")
+  eq(occ2, 1, "...occupied")
+
+  -- They raze it and complete something else while nothing of mine is there:
+  -- the scry alone reports the NEW identity, with no HP at all -- the building
+  -- the record knew is gone and its HP died with it.
+  sim.sides[2].slots[FS(1)] = false
+  fund(sim, 2, 1000)
+  local at = Policy.BLD_INDEX.arrowTower
+  order(sim, 2, Rules.BUILDINGS[at].letter, FS(1), 1, sim.clock + C.ORDER_DELAY)
+  run(sim, C.ORDER_DELAY + Rules.BUILDINGS[at].build + 5)
+  eq(sim.sides[2].slots[FS(1)].done, 1, "an Arrow Tower now stands where the Palisade was")
+  Fog.observe(mem, sim, 1)
+  local b3, hp3 = Fog.believedBuilding(mem, FS(1))
+  eq(b3, at, "the scry reports the rebuild's identity")
+  eq(hp3, 0, "...with no HP: the stale record's HP belonged to a different building")
+end
+
+do
+  -- The scan under a remembered wall, and the scan over one. A pulse ping
+  -- CONFIRMS occupancy but names nothing, so a remembered identity fills it in;
+  -- a pulse ping of EMPTY out-votes a stale record however confident.
+  local sim = newSim(91)
+  build(sim, 1, "shrine", BS(1))
+  local pal = build(sim, 2, "palisade", FS(2))
+  local mem = Fog.newMemory(Rules)
+  local u = place(sim, 1, 2, 1300)
+  repin()
+  Fog.observe(mem, sim, 1)                       -- full record of the wall
+  local frozenHp = pal.hp
+  ok(u ~= nil, "the recording body existed")
+  local us = sim.sides[1].lanes[2].units         -- ...and dies, so the walks below
+  for i = #us, 1, -1 do us[i] = nil end          -- run over an empty lane
+  pinned = {}
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  Fog.observe(mem, sim, 1)                       -- pulse: ping over the same wall
+  local b, hp, _, _, occ, tick = Fog.believedBuilding(mem, FS(2))
+  eq(b, pal.b, "a scan ping under a remembered palisade draws the palisade")
+  eq(hp, frozenHp, "...with the frozen HP the record holds")
+  eq(occ, 1, "...occupied, which is what the ping added")
+  eq(tick, mem.slotOccTick[FS(2)], "...at the scan's freshness")
+
+  -- Now raze it while unobserved and let the NEXT pulse scan the empty slot.
+  sim.sides[2].slots[FS(2)] = false
+  while sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS do sim:tick() end
+  Fog.observe(mem, sim, 1)                       -- between windows: frozen
+  local bF = Fog.believedBuilding(mem, FS(2))
+  eq(bF, pal.b, "between pulses the razed wall still shows -- memory, doc section 4")
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  Fog.observe(mem, sim, 1)                       -- pulse: ping of EMPTY
+  local b2, hp2, _, done2, occ2 = Fog.believedBuilding(mem, FS(2))
+  eq(occ2, 0, "a fresher scan of EMPTY out-votes the stale record")
+  eq(b2, 0, "...identity gone from the screen")
+  eq(hp2, 0, "...HP gone with it")
+  eq(done2, 0, "...everything gone: the slot is drawn empty")
+  ok(mem.slotB[FS(2)] == pal.b, "while the FULL layer itself still holds the frozen record underneath")
+end
+
+do
+  -- THE STATED TIE EXCEPTION: an empty scry never beats a same-tick occupancy
+  -- scan, because "nothing completed stands there" does not contradict
+  -- "something stands there" -- scaffolding satisfies both, and the scan saw it.
+  local sim = newSim(92, lo(CARD_DIV), nil)
+  build(sim, 1, "shrine", BS(1))
+  -- Time the build so the scaffolding is still scaffolding on the pulse tick:
+  -- start it 50 ticks before the window opens (a Palisade builds for 90).
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= C.SHRINE_PULSE_EVERY - 50 do sim:tick() end
+  fund(sim, 2, 1000)
+  order(sim, 2, "c", FS(3), 1, sim.clock + C.ORDER_DELAY)
+  run(sim, C.ORDER_DELAY + 3)
+  ok(sim.sides[2].slots[FS(3)] ~= nil and sim.sides[2].slots[FS(3)].done == 0,
+    "their lane-3 front slot holds scaffolding")
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  ok(sim.sides[2].slots[FS(3)] ~= nil and sim.sides[2].slots[FS(3)].done == 0,
+    "...still scaffolding on the pulse tick")
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)                       -- scry says empty, scan says occupied, one tick
+  eq(mem.slotScryTick[FS(3)], mem.slotOccTick[FS(3)], "both layers stamped on one observation")
+  local b, _, _, _, occ = Fog.believedBuilding(mem, FS(3))
+  eq(occ, 1, "the same-tick scan wins over the empty scry: the slot is known occupied")
+  eq(b, 0, "...with no identity, which is the razed-vs-scaffolding tension Divination preserves")
+
+  -- ...but an empty scry FRESHER than the last scan draws empty (rule 4, the
+  -- under-estimate): the pulse window closes, the scaffolding is razed, and the
+  -- still-running scry reports nothing there.
+  while sim.clock % C.SHRINE_PULSE_EVERY < C.SHRINE_PULSE_TICKS do sim:tick() end
+  sim.sides[2].slots[FS(3)] = false
+  Fog.observe(mem, sim, 1)
+  local b2, _, _, _, occ2 = Fog.believedBuilding(mem, FS(3))
+  eq(occ2, 0, "a fresher empty scry draws the slot empty over the older ping")
+  eq(b2, 0, "...the diviner's under-estimate, exactly as documented")
+end
+
+do
+  -- NO PROMOTION, asserted at the layer level across one whole story: nothing a
+  -- scry or a scan writes ever reaches the FULL record's fields.
+  local sim = newSim(93, lo(CARD_DIV), nil)
+  build(sim, 1, "shrine", BS(1))
+  build(sim, 2, "granary", BS(2))
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)                       -- scry sees the Granary
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  Fog.observe(mem, sim, 1)                       -- scan pings it
+  eq(mem.slotB[BS(2)], 0, "the FULL record never learned an identity from either layer")
+  eq(mem.slotHp[BS(2)], 0, "...nor an HP")
+  eq(mem.slotSeen[BS(2)], 0, "...nor a sighting")
+  eq(mem.slotTick[BS(2)], Fog.NEVER_SEEN, "...nor a tick: partial sight is never promoted")
+  ok(mem.slotScryB[BS(2)] > 0, "while the scry layer holds the identity")
+  eq(mem.slotOcc[BS(2)], 1, "...and the scan layer holds the ping, each in its own lane")
+end
+
+-- ===========================================================================
+-- 21. THE FOUR EFFECTS AND THE WATCHTOWER COMPOSE, SYMMETRICALLY,
+--     AND CARDED MEMORY IS STILL A DETERMINISTIC FOLD OUTSIDE THE HASH
+-- ===========================================================================
+
+G("21. composition: tower + cards, both seats, and the carded memory replays")
+
+do
+  -- Watchtower + Divination against an unveiled enemy: the tower's sections
+  -- show the front slot at full fidelity (HP and all), the scry adds the back
+  -- slot the shield hides from everything else. Each route contributes exactly
+  -- its own grade of sight.
+  local sim = newSim(100, lo(CARD_DIV), nil)
+  build(sim, 1, "watchtower", FS(1))
+  local pal = build(sim, 2, "palisade", FS(1))
+  local gra = build(sim, 2, "granary", BS(1))
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  eq(Fog.seesEnemyBuilding(sim, 1, FS(1)), true, "the tower-lit section shows their wall")
+  eq(Fog.seesEnemyBuilding(sim, 1, BS(1)), false, "the shield still hides the back slot from SIGHT")
+  local bF, hpF = Fog.believedBuilding(mem, FS(1))
+  eq(bF, pal.b, "front: full fidelity through the tower's section")
+  eq(hpF, pal.hp, "...HP included")
+  local bB, hpB = Fog.believedBuilding(mem, BS(1))
+  eq(bB, gra.b, "back: identity through the scry, past the shield")
+  eq(hpB, 0, "...and no HP, because only the scry has been there")
+end
+
+do
+  -- Watchtower + Omen are independent axes: the tower changes nothing about the
+  -- temporal channel, the card changes nothing about the sections. The orders
+  -- go into lane 3 so the horses they field never meet the lane-1 tower.
+  local sim = newSim(101, lo(CARD_OMEN), nil)
+  fund(sim, 2, 1000)
+  run(sim, 3)
+  order(sim, 2, "H", 3, 4, sim.clock + C.ORDER_DELAY)
+  local o1, u1 = Fog.omenPending(sim, 1, 3)
+  build(sim, 1, "watchtower", FS(1))
+  fund(sim, 2, 1000)
+  order(sim, 2, "H", 3, 4, sim.clock + C.ORDER_DELAY)
+  local o2, u2 = Fog.omenPending(sim, 1, 3)
+  eq(o1, 1, "one order pending before the tower")
+  eq(o2, 1, "...and one after: the tower does not touch the omen channel")
+  eq(u1, u2, "...unit for unit")
+  eq(vis(sim, 1, 1)[5], 1, "the tower lights its sections regardless of the card")
+end
+
+do
+  -- All four at once, from both seats, and A.2 exactly: the same physical board
+  -- seated the other way round answers identically, and the two memories hash
+  -- identically. Side 1 holds Divination + Omen and a Shrine; side 2 holds Veil
+  -- and a Watchtower.
+  local function boardHash(sim, side)
+    local mem = Fog.newMemory(Rules)
+    Fog.observe(mem, sim, side)
+    return Fog.memHash(mem)
+  end
+  local function makeBoard(flip)
+    local a, b = flip and 2 or 1, flip and 1 or 2
+    local sim = newSim(102,
+      flip and lo(CARD_VEIL) or lo(CARD_DIV, CARD_OMEN),
+      flip and lo(CARD_DIV, CARD_OMEN) or lo(CARD_VEIL))
+    -- built in a FIXED physical order so the two boards are the same match
+    build(sim, a, "shrine", BS(1))
+    build(sim, a, "watchtower", FS(2))          -- the diviner also owns a tower
+    build(sim, b, "palisade", FS(1))
+    build(sim, b, "granary", BS(1))
+    while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+    fund(sim, b, 1000)
+    order(sim, b, "H", 2, 3, sim.clock + C.ORDER_DELAY)   -- pending at check time
+    return sim, a, b
+  end
+  local s1, a1, b1 = makeBoard(false)
+  local s2, a2, b2 = makeBoard(true)
+  eq(Fog.shrinePulseActive(s1, a1), Fog.shrinePulseActive(s2, a2), "the pulse reads the same from either seat")
+  eq(Fog.divinedBuilding(s1, a1, FS(1)), Fog.divinedBuilding(s2, a2, FS(1)),
+    "the scry reads the same from either seat (and it is empty: Veil)")
+  eq(Fog.divinedBuilding(s1, a1, FS(1)), 0, "...empty, to be exact")
+  local o1, u1 = Fog.omenPending(s1, a1, 2)
+  local o2, u2 = Fog.omenPending(s2, a2, 2)
+  eq(o1, o2, "the omen channel reads the same from either seat")
+  eq(u1, u2, "...unit for unit")
+  ok(o1 == 1 and u1 == 3, "...and it is carrying the real pending wave")
+  eq(boardHash(s1, a1), boardHash(s2, a2), "the diviner's memory hashes identically from either seat")
+  eq(boardHash(s1, b1), boardHash(s2, b2), "...and so does the veiled side's")
+end
+
+do
+  -- CARDED MEMORY IS STILL A DETERMINISTIC FOLD AND STILL OUTSIDE stateHash.
+  -- The section-11 property, re-proved with all four effects live: two replays
+  -- of a carded match produce bit-identical memories for both sides, a
+  -- different log produces different ones, and mutating every NEW layer of a
+  -- store moves no stateHash.
+  local function playAndFold(kind)
+    local sim = newSim(4243, lo(CARD_DIV, CARD_OMEN), lo(CARD_VEIL))
+    local m = { Fog.newMemory(Rules), Fog.newMemory(Rules) }
+    local s = 0
+    -- One shrine each, so both memories carry occupancy scans.
+    fund(sim, 1, 1000); fund(sim, 2, 1000)
+    s = s + 1; sim:queueCommand({ side = 1, seq = s, tick = C.ORDER_DELAY,
+      kind = Rules.BUILDINGS[Policy.BLD_INDEX.shrine].letter, target = BS(1), count = 1 })
+    s = s + 1; sim:queueCommand({ side = 2, seq = s, tick = C.ORDER_DELAY,
+      kind = Rules.BUILDINGS[Policy.BLD_INDEX.shrine].letter, target = BS(2), count = 1 })
+    for tick = 0, 900 do
+      if tick % 60 == 0 then
+        for side = 1, 2 do
+          fund(sim, side, 500)
+          s = s + 1
+          sim:queueCommand({ side = side, seq = s, tick = tick + C.ORDER_DELAY,
+            kind = (side == 1) and kind or "S", target = (tick % 3) + 1, count = 2 })
+        end
+      end
+      if not sim:tick() then break end
+      Fog.observe(m[1], sim, 1)
+      Fog.observe(m[2], sim, 2)
+    end
+    return Fog.memHash(m[1]), Fog.memHash(m[2]), sim:stateHash(), m
+  end
+  local a1, a2, sh1 = playAndFold("H")
+  local b1, b2, sh2 = playAndFold("H")
+  eq(sh1, sh2, "the two carded replays are the same match")
+  eq(a1, b1, "the diviner's memory replays bit-identically, scry and scan included")
+  eq(a2, b2, "...and the veiled side's")
+  local c1, c2, sh3 = playAndFold("B")
+  ok(sh3 ~= sh1, "a different log is a different match")
+  ok(c1 ~= a1 or c2 ~= a2, "...and a different memory, so the digest is not constant")
+
+  local sim = newSim(103, lo(CARD_DIV), nil)
+  build(sim, 1, "shrine", BS(1))
+  while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+  local before = sim:stateHash()
+  local mem = Fog.newMemory(Rules)
+  Fog.observe(mem, sim, 1)
+  mem.slotScryB[1] = 9
+  mem.slotScryTick[1] = 5
+  mem.slotOcc[2] = 1
+  mem.slotOccTick[2] = 5
+  eq(sim:stateHash(), before, "no mutation of the scry or scan layers moves stateHash")
+
+  -- ...and the new layers are INSIDE memHash, or sweep/determinism.lua could
+  -- not catch a divergence in them: each mutation moves the digest.
+  local base = Fog.memHash(mem)
+  mem.slotScryB[3] = 7
+  ok(Fog.memHash(mem) ~= base, "the scry layer is inside memHash")
+  local base2 = Fog.memHash(mem)
+  mem.slotOccTick[3] = 9
+  ok(Fog.memHash(mem) ~= base2, "...and the scan layer too")
+end
+
+-- ===========================================================================
+-- 22. MUTATION: EACH INFO EFFECT IS LOAD-BEARING
+--
+-- The proof that sections 16-19 cannot pass vacuously: a copy of fog/Fog.lua
+-- with ONE effect surgically disabled is loaded from /tmp (never the tree), and
+-- the named check that section proved must now come out the other way. A
+-- mutation whose needle no longer matches the source FAILS the suite, so a
+-- refactor cannot quietly defuse these.
+-- ===========================================================================
+
+G("22. mutation: disable each effect and its named checks flip")
+
+do
+  local src
+  do
+    local f = io.open(here .. "/../fog/Fog.lua", "r")
+    ok(f ~= nil, "fog/Fog.lua is readable")
+    src = f:read("*a")
+    f:close()
+  end
+
+  -- Plain-text replace-all with a count; no Lua patterns, so the needles above
+  -- cannot be bent by magic characters.
+  local function plainReplace(s, from, to)
+    local out, n, pos = {}, 0, 1
+    while true do
+      local i = s:find(from, pos, true)
+      if not i then break end
+      out[#out + 1] = s:sub(pos, i - 1)
+      out[#out + 1] = to
+      pos = i + #from
+      n = n + 1
+    end
+    out[#out + 1] = s:sub(pos)
+    return table.concat(out), n
+  end
+
+  -- Load a mutated module from /tmp. Everything it requires is already in
+  -- package.loaded, so the mutant shares the real Rules/Hash/Mods.
+  local function loadMutant(mutSrc, label)
+    local path = os.tmpname()
+    local f = io.open(path, "w")
+    ok(f ~= nil, "a /tmp scratch file is writable for " .. label)
+    f:write(mutSrc)
+    f:close()
+    local okLoad, mod = pcall(dofile, path)
+    os.remove(path)
+    ok(okLoad, label .. " mutant still loads (the mutation must not trip the CHECKS block)")
+    return okLoad and mod or nil
+  end
+
+  -- DIVINATION OFF: every hasCard gate on the card asks for an id no loadout
+  -- can hold.
+  do
+    local mutSrc, n = plainReplace(src, ", M.CARD_DIVINATION)", ", -1)")
+    eq(n, 3, "the Divination gate appears at its three sites (scry, live, mark)")
+    local mut = loadMutant(mutSrc, "divination-off")
+    if mut then
+      local sim = newSim(110, lo(CARD_DIV), nil)
+      local pal = build(sim, 2, "palisade", FS(1))
+      eq(Fog.divinedBuilding(sim, 1, FS(1)), pal.b, "the real model scries the wall")
+      eq(mut.divinedBuilding(sim, 1, FS(1)), 0, "the mutant does not: section 16's check is load-bearing")
+      local mem = mut.newMemory(Rules)
+      mut.observe(mem, sim, 1)
+      eq(mem.slotScryTick[FS(1)], mut.NEVER_SEEN, "...its scry layer never stamps")
+      local scried = mut.marks(sim, 2)
+      eq(scried, 0, "...and its mark is gone")
+    end
+  end
+
+  -- OMEN OFF: same shape.
+  do
+    local mutSrc, n = plainReplace(src, ", M.CARD_OMEN)", ", -1)")
+    eq(n, 2, "the Omen gate appears at its two sites (channel, mark)")
+    local mut = loadMutant(mutSrc, "omen-off")
+    if mut then
+      local sim = newSim(111, lo(CARD_OMEN), nil)
+      fund(sim, 2, 1000)
+      run(sim, 3)
+      order(sim, 2, "S", 1, 5, sim.clock + C.ORDER_DELAY)
+      eq(select(1, Fog.omenPending(sim, 1, 1)), 1, "the real model surfaces the order")
+      eq(select(1, mut.omenPending(sim, 1, 1)), 0, "the mutant does not: section 17 is load-bearing")
+      eq(select(1, mut.pendingDeploys(sim, 1, 1)), 1,
+        "...while its raw filter still works: the mutation is surgical")
+      local _, omened = mut.marks(sim, 2)
+      eq(omened, 0, "...and its mark is gone")
+    end
+  end
+
+  -- VEIL OFF: veiled() answers false for everyone.
+  do
+    local mutSrc, n = plainReplace(src,
+      "return M.hasCard(sim, side, M.CARD_VEIL)", "return false")
+    eq(n, 1, "the Veil predicate has exactly one body")
+    local mut = loadMutant(mutSrc, "veil-off")
+    if mut then
+      local sim = newSim(112, lo(CARD_DIV), lo(CARD_VEIL))
+      local pal = build(sim, 2, "palisade", FS(1))
+      eq(Fog.divinedBuilding(sim, 1, FS(1)), 0, "the real model's scry is blanked by Veil")
+      eq(mut.divinedBuilding(sim, 1, FS(1)), pal.b,
+        "the mutant scries straight through it: section 18 is load-bearing")
+      local mem = mut.newMemory(Rules)
+      mut.observe(mem, sim, 1)
+      ok(mem.slotScryTick[FS(1)] >= 0, "...its scry layer stamps against a veiled enemy")
+    end
+  end
+
+  -- PULSE OFF: the window predicate never opens.
+  do
+    local mutSrc, n = plainReplace(src,
+      "if sim.clock % C.SHRINE_PULSE_EVERY >= C.SHRINE_PULSE_TICKS then return false end",
+      "if true then return false end")
+    eq(n, 1, "the pulse window predicate has exactly one gate")
+    local mut = loadMutant(mutSrc, "pulse-off")
+    if mut then
+      local sim = newSim(113)
+      build(sim, 1, "shrine", BS(1))
+      local eu = place(sim, 2, 2, 0)
+      while sim.clock % C.SHRINE_PULSE_EVERY ~= 0 do sim:tick() end
+      repin()
+      eu.pos = 100
+      eq(Fog.shrinePulseActive(sim, 1), true, "the real model's pulse is live in the window")
+      eq(mut.shrinePulseActive(sim, 1), false, "the mutant's never is: section 19 is load-bearing")
+      eq(Fog.seesEnemyUnit(sim, 1, eu), true, "the real model reveals the deep unit")
+      eq(mut.seesEnemyUnit(sim, 1, eu), false, "...the mutant does not")
+      local mem = mut.newMemory(Rules)
+      mut.observe(mem, sim, 1)
+      eq(mem.slotOccTick[FS(1)], mut.NEVER_SEEN, "...and its scan layer never stamps")
+      local _, _, scanned = mut.marks(sim, 2)
+      eq(scanned, 0, "...and its mark is gone")
+    end
+  end
+
+  -- WATCHTOWER OFF, the M1 modifier, held to the same standard: the section-9
+  -- and section-18 checks that lean on tower light must flip.
+  do
+    local mutSrc, n = plainReplace(src,
+      "M.GRANTS_VISION[i] = (Rules.BUILDINGS[i].vision > 0) and 1 or 0",
+      "M.GRANTS_VISION[i] = 0")
+    eq(n, 1, "the vision-grant derivation has exactly one site")
+    local mut = loadMutant(mutSrc, "watchtower-off")
+    if mut then
+      local sim = newSim(114)
+      build(sim, 1, "watchtower", FS(1))
+      eq(vis(sim, 1, 1)[5], 1, "the real model's tower lights section 5")
+      local mv = mut.visibleSections(sim, 1, 1, {})
+      eq(mv[5], 0, "the mutant's does not: section 9 is load-bearing")
+      eq(mv[6], 0, "...section 6 included")
+    end
+  end
 end
 
 -- ---------------------------------------------------------------------------

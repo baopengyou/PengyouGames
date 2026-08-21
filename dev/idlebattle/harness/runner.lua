@@ -397,8 +397,51 @@ function M.invariants(sim)
         bad("side %d rubble[%d] is %d, not 0 or 1", s, slot, sd.rubble[slot])
       end
     end
-    if occ > C.SLOT_CAP then
-      bad("side %d holds %d buildings, over the slot cap %d", s, occ, C.SLOT_CAP)
+    -- The slot cap is soft (Q7): Boomtown raises it through the slotCap
+    -- channel, clamped exactly as Sim.slotCapOf clamps it.
+    local capC = Rules.CLAMPS[Rules.CH.slotCap]
+    local slotCap = C.SLOT_CAP + sd.chan[Rules.CH.slotCap]
+    if slotCap < capC[1] then slotCap = capC[1] end
+    if slotCap > capC[2] then slotCap = capC[2] end
+    if occ > slotCap then
+      bad("side %d holds %d buildings, over the slot cap %d", s, occ, slotCap)
+    end
+
+    -- M3 card runtime block: modsOrder must be sorted and unique (the hash
+    -- walks it in order), every named key must exist as an integer, and no
+    -- mods key may sit outside modsOrder -- a value there would be invisible
+    -- to the hash. The harness bans pairs() like the sim does (a log must be
+    -- replayable), so the outside-the-order direction is checked against the
+    -- ROSTER of keys sim/Mods.lua can create, which is the only writer.
+    local named = {}
+    for i = 1, #sd.modsOrder do
+      local k = sd.modsOrder[i]
+      if named[k] then bad("side %d modsOrder repeats %s", s, tostring(k)) end
+      named[k] = true
+      if i > 1 and not (sd.modsOrder[i - 1] < k) then
+        bad("side %d modsOrder is not sorted at %d", s, i)
+      end
+      local v = sd.mods[k]
+      if not isInt(v) then
+        bad("side %d mods.%s is not an integer", s, tostring(k))
+      end
+    end
+    local MOD_KEYS = { "gaLatch", "invAmt", "invDue", "wdUntil", "seCd", "llCd",
+                       "vg1", "vg2", "vg3" }
+    for i = 1, #MOD_KEYS do
+      local k = MOD_KEYS[i]
+      if sd.mods[k] ~= nil and not named[k] then
+        bad("side %d mods.%s is OUTSIDE modsOrder -- invisible to the hash", s, k)
+      end
+    end
+    for lane = 1, C.LANES do
+      local ln = sd.lanes[lane]
+      if ln.muster < 0 or ln.muster > 3 then
+        bad("side %d lane %d muster %d outside 0..3", s, lane, ln.muster)
+      end
+      if ln.cwAcc < 0 then
+        bad("side %d lane %d Counterwall accumulator is negative", s, lane)
+      end
     end
   end
 

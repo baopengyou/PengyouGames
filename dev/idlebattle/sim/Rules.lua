@@ -24,7 +24,7 @@ local Hash = IB_SIM_MODULES and IB_SIM_MODULES.Hash or require("sim.Hash")
 
 local M = {}
 
-M.RULESET_VERSION = "IB-v2-M1"
+M.RULESET_VERSION = "IB-v2-M3"
 
 -- ---------------------------------------------------------------------------
 -- Scalar constants. Part C.1 (clocks and space), C.2 (economy), C.3 and C.5
@@ -87,6 +87,13 @@ M.C = {
 
   MAX_UNITS_PER_ORDER = 9,    -- the atom's count field is capped at 9 by the UI
 
+  -- D.2 Shrine reveal pulse, in sim ticks (Q11: every timer is sim ticks). The
+  -- pulse itself is a PERCEPTION effect and is implemented by the fog layer
+  -- (M3 part 2), never by the sim -- these two numbers live here so the whole
+  -- ruleset is hashed, including the part only the renderer consumes.
+  SHRINE_PULSE_EVERY  = 200,
+  SHRINE_PULSE_TICKS  = 30,
+
   -- Interpretation flags. Both are hashed, so flipping one is a compatibility
   -- break, which is the correct treatment for a rule the two clients must agree
   -- on. See the INTERPRETATIONS block at the bottom of this file.
@@ -103,7 +110,8 @@ M.CONST_ORDER = {
   "COUNTER_PCT", "STRUCTURE_DMG_PCT", "KEEP_HP",
   "DEPTH_HOLD_TICKS", "DEPTH_X1", "DEPTH_X2", "DEPTH_X3", "SCORE_SHOW_TICK",
   "WHEEL_K_PERMILLE", "WHEEL_EDGE_DEN", "AFFINITY_POINTS",
-  "MAX_UNITS_PER_ORDER", "ENFORCE_SLOT_CLASS", "BUILD_BLOCKS_ADVANCE",
+  "MAX_UNITS_PER_ORDER", "SHRINE_PULSE_EVERY", "SHRINE_PULSE_TICKS",
+  "ENFORCE_SLOT_CLASS", "BUILD_BLOCKS_ADVANCE",
 }
 
 -- ---------------------------------------------------------------------------
@@ -254,6 +262,238 @@ M.CLAMPS = {
   {   4,   5, 1 },  -- slotCap, absolute occupied-slot count
 }
 
+-- ---------------------------------------------------------------------------
+-- Q3 / Q12 / IDLE_BATTLE.md section 8: the five-type wheel.
+--
+-- WHEEL_TYPES is the Q3 vector order -- (Swarm, Boom, Mystic, Fortress, Raider)
+-- -- and WHEEL[i][j] is +1 when type i beats type j, -1 when it loses, 0 on the
+-- diagonal. The matrix is the symmetric five-cycle of section 8, so every row
+-- and column sums to zero: a uniform loadout is neutral against everything,
+-- mirrors resolve to exactly 0, and one integer edge drives both sides (the
+-- opponent's edge is the exact negative). All three properties are asserted at
+-- load in the CHECKS block below.
+--
+-- There is NO dominant-type label anywhere. Q3's ruling is that affinity is a
+-- VECTOR and the label is killed entirely -- "there is no tie because there is
+-- no label" -- so the sim stores only the bilinear edge (sd.wheelNum) and no
+-- code path ever computes, stores or exposes a type name for a side.
+-- ---------------------------------------------------------------------------
+
+M.WHEEL_TYPES = { "swarm", "boom", "mystic", "fortress", "raider" }
+
+M.WHEEL = {
+  {  0,  1,  1, -1, -1 },   -- Swarm    beats Boom, Mystic
+  { -1,  0,  1,  1, -1 },   -- Boom     beats Mystic, Fortress
+  { -1, -1,  0,  1,  1 },   -- Mystic   beats Fortress, Raider
+  {  1, -1, -1,  0,  1 },   -- Fortress beats Raider, Swarm
+  {  1,  1, -1, -1,  0 },   -- Raider   beats Swarm, Boom
+}
+
+-- ---------------------------------------------------------------------------
+-- D.3: the forty cards, normative wording, as hashed integer data.
+--
+-- Index IS the card id (the loadout arrays and the handshake carry these ids),
+-- in D.3's own order: Swarm 1-8, Fortress 9-16, Boom 17-24, Raider 25-32,
+-- Mystic 33-40. 0 in a loadout slot means "empty slot".
+--
+-- affSwarm..affRaider is the card's Q3 affinity vector: exactly 3 points, 3/0
+-- pure or 2/1 split across at most two types. Every card is pure in its home
+-- archetype EXCEPT Granary Reserves (2 Fortress / 1 Boom) -- the one split the
+-- documents force: IDLE_BATTLE.md section 9's "Turtle Bank" must total 8F/7B
+-- with pure-Boom as its worst matchup (Q3's worked example), which only that
+-- assignment reproduces. See INTERPRETATIONS item 14.
+--
+-- class is "stat" or "rule" per D.3's own labels (Press-Gang, Surplus and
+-- Boomtown ship as [Stat]; Tide of Bodies and Endless Ranks as [Rule]).
+--
+-- The payload fields are the card's numbers in this file's integer conventions:
+-- whole percentage points on a named channel (ch1/pts1, ch2/pts2, foeCh/foePts
+-- for a value written into the OPPONENT's channel), whole Levy, sim ticks,
+-- permille of the match clock for time gates (Q11: every time gate is a
+-- fraction of the clock, never an absolute). Scope flags select what a scoped
+-- [Stat] applies to. Semantics live in sim/Mods.lua; every NUMBER lives here,
+-- inside rulesHash, so two builds that disagree about any card value refuse
+-- each other at the handshake instead of desyncing (A.11.1).
+-- ---------------------------------------------------------------------------
+
+M.CARD_FIELDS = {
+  "key", "name", "class",
+  "affSwarm", "affBoom", "affMystic", "affFortress", "affRaider",
+  "ch1", "pts1", "ch2", "pts2", "foeCh", "foePts",
+  "scopeUnit", "scopeDefensive", "scopeOwnHalf", "scopeRubble", "condHalfBank",
+  "gatePermille", "gateEarned", "per", "perBank", "every", "cap", "window",
+  "pct", "flat", "dmg", "costPerBlock", "blocksMax", "dmgPerBlock",
+  "targetsMax", "cooldown", "perLaneMax", "unlockBld", "info",
+}
+
+local function CARD(t)
+  for i = 1, #M.CARD_FIELDS do
+    local f = M.CARD_FIELDS[i]
+    if t[f] == nil then t[f] = 0 end
+  end
+  return t
+end
+
+M.CARDS = {
+  -- SWARM (1-8)
+  CARD{ key = "breedingPits", name = "Breeding Pits", class = "stat", affSwarm = 3,
+        ch1 = M.CH.unitCost, pts1 = -10 },
+  CARD{ key = "chaff", name = "Chaff", class = "stat", affSwarm = 3,
+        ch1 = M.CH.unitCost, pts1 = -20, ch2 = M.CH.unitHP, pts2 = -30 },
+  CARD{ key = "scentTrails", name = "Scent Trails", class = "stat", affSwarm = 3,
+        ch1 = M.CH.march, pts1 = 25 },
+  CARD{ key = "tideOfBodies", name = "Tide of Bodies", class = "rule", affSwarm = 3,
+        ch1 = M.CH.unitDmg, per = 2, cap = 30 },        -- +per x N in lane, own-source ceiling
+  CARD{ key = "endlessRanks", name = "Endless Ranks", class = "rule", affSwarm = 3,
+        perLaneMax = 3 },                               -- Muster charges per lane
+  CARD{ key = "ricketyScaffolds", name = "Rickety Scaffolds", class = "stat", affSwarm = 3,
+        ch1 = M.CH.bldTime, pts1 = -50, ch2 = M.CH.bldHP, pts2 = -40 },
+  CARD{ key = "pressGang", name = "Press-Gang", class = "stat", affSwarm = 3,
+        ch1 = M.CH.levyTick, pts1 = 15, ch2 = M.CH.bankCap, pts2 = -50 },
+  CARD{ key = "conscription", name = "Conscription", class = "rule", affSwarm = 3,
+        per = 3 },                                      -- every per-th deploy is free
+
+  -- FORTRESS (9-16)
+  CARD{ key = "bastionWalls", name = "Bastion Walls", class = "stat", affFortress = 3,
+        ch1 = M.CH.bldHP, pts1 = 50, scopeDefensive = 1 },
+  CARD{ key = "ironDiscipline", name = "Iron Discipline", class = "stat", affFortress = 3,
+        ch1 = M.CH.dmgTaken, pts1 = -25, scopeOwnHalf = 1 },
+  CARD{ key = "counterwall", name = "Counterwall", class = "rule", affFortress = 3,
+        pct = 20 },                                     -- % of the lane accumulator on a clean repel
+  CARD{ key = "deepFoundations", name = "Deep Foundations", class = "rule", affFortress = 3 },
+  CARD{ key = "rapidMasonry", name = "Rapid Masonry", class = "stat", affFortress = 3,
+        ch1 = M.CH.bldCost, pts1 = -50, scopeRubble = 1 },
+  CARD{ key = "watchfires", name = "Watchfires", class = "stat", affFortress = 3,
+        pct = 50, scopeDefensive = 1 },                 -- +% damage range; the reveal is fog-side
+  CARD{ key = "granaryReserves", name = "Granary Reserves", class = "stat",
+        affFortress = 2, affBoom = 1,                   -- the one 2/1 split; see the header
+        ch1 = M.CH.bankCap, pts1 = 50, ch2 = M.CH.levyTick, pts2 = 20, condHalfBank = 1 },
+  CARD{ key = "bulwarkLine", name = "Bulwark Line", class = "stat", affFortress = 3,
+        ch1 = M.CH.unitHP, pts1 = 40, scopeUnit = 1 },  -- Spear
+
+  -- BOOM (17-24)
+  CARD{ key = "tradeRoutes", name = "Trade Routes", class = "stat", affBoom = 3,
+        ch1 = M.CH.levyFlat, per = 1, every = 600, cap = 6 },
+  CARD{ key = "goldenAge", name = "Golden Age", class = "rule", affBoom = 3,
+        ch1 = M.CH.levyTick, pts1 = 40, gateEarned = 700 },
+  CARD{ key = "investment", name = "Investment", class = "rule", affBoom = 3,
+        costPerBlock = 25, blocksMax = 4, window = 450, pct = 180 },
+  CARD{ key = "masterMasons", name = "Master Masons", class = "stat", affBoom = 3,
+        ch1 = M.CH.production, pts1 = 35 },
+  CARD{ key = "surplus", name = "Surplus", class = "stat", affBoom = 3,
+        ch1 = M.CH.levyFlat, per = 1, perBank = 50, cap = 6 },
+  CARD{ key = "caravan", name = "Caravan", class = "rule", affBoom = 3,
+        unlockBld = 12 },                               -- the Caravan building's index
+  CARD{ key = "lateLevy", name = "Late Levy", class = "stat", affBoom = 3,
+        ch1 = M.CH.unitCost, pts1 = -20, gatePermille = 500 },
+  CARD{ key = "boomtown", name = "Boomtown", class = "stat", affBoom = 3,
+        ch1 = M.CH.slotCap, pts1 = 1 },
+
+  -- RAIDER (25-32)
+  CARD{ key = "plunder", name = "Plunder", class = "rule", affRaider = 3,
+        pct = 100, flat = 20 },                         -- replaces the Spoils baseline
+  CARD{ key = "bloodTithe", name = "Blood Tithe", class = "rule", affRaider = 3,
+        pct = 20 },
+  CARD{ key = "warDrums", name = "War Drums", class = "stat", affRaider = 3,
+        ch1 = M.CH.unitDmg, pts1 = 15, window = 200 },
+  CARD{ key = "sappers", name = "Sappers", class = "stat", affRaider = 3,
+        ch1 = M.CH.dmgVsBuildings, pts1 = 100 },
+  CARD{ key = "vanguard", name = "Vanguard", class = "stat", affRaider = 3,
+        ch1 = M.CH.unitDmg, pts1 = 35, perLaneMax = 3 },
+  CARD{ key = "noRetreat", name = "No Retreat", class = "stat", affRaider = 3,
+        ch1 = M.CH.unitDmg, pts1 = 35 },                -- floor(pts1 * (maxHp - hp) / maxHp)
+  CARD{ key = "scorchedEarth", name = "Scorched Earth", class = "rule", affRaider = 3,
+        costPerBlock = 25, blocksMax = 4, dmgPerBlock = 600, targetsMax = 3, cooldown = 300 },
+  CARD{ key = "raidingParty", name = "Raiding Party", class = "rule", affRaider = 3,
+        ch1 = M.CH.march, pts1 = 40, scopeUnit = 2, perLaneMax = 1 },  -- Horse; 1 Bypass per lane
+
+  -- MYSTIC (33-40)
+  CARD{ key = "hex", name = "Hex", class = "rule", affMystic = 3,
+        foeCh = M.CH.levyTick, foePts = -30, every = 400, window = 200 },
+  CARD{ key = "divination", name = "Divination", class = "rule", affMystic = 3, info = 1 },
+  CARD{ key = "omen", name = "Omen", class = "rule", affMystic = 3, info = 1 },
+  CARD{ key = "veil", name = "Veil", class = "rule", affMystic = 3, info = 1 },
+  CARD{ key = "ward", name = "Ward", class = "stat", affMystic = 3,
+        pct = 25 },                                     -- % of pre-mitigation damage reflected
+  CARD{ key = "miasma", name = "Miasma", class = "stat", affMystic = 3,
+        dmg = 8 },                                      -- per resolve tick, in the owner's half
+  CARD{ key = "leyLine", name = "Ley Line", class = "rule", affMystic = 3,
+        cooldown = 450 },
+  CARD{ key = "discord", name = "Discord", class = "stat", affMystic = 3,
+        foeCh = M.CH.unitCost, foePts = 15 },
+}
+
+-- Direct-index lookup only; never iterated. Derived from the hashed CARDS table
+-- for the same reason UNIT_BY_KIND is.
+M.CARD_BY_KEY = {}
+for i = 1, #M.CARDS do
+  M.CARD_BY_KEY[M.CARDS[i].key] = i
+end
+
+-- ---------------------------------------------------------------------------
+-- CHECKS: the card table and the wheel refuse to load wrong, rather than
+-- computing a wrong match. Everything here is structural -- the numbers
+-- themselves are pinned by harness/selftest.lua's M3 sections.
+-- ---------------------------------------------------------------------------
+
+do
+  if #M.CARDS ~= 40 then error("Rules: the card pool must hold exactly 40 cards") end
+  if #M.WHEEL_TYPES ~= 5 or #M.WHEEL ~= 5 then error("Rules: the wheel is five types") end
+  for i = 1, 5 do
+    if #M.WHEEL[i] ~= 5 then error("Rules: wheel row is not five wide") end
+    if M.WHEEL[i][i] ~= 0 then error("Rules: wheel diagonal must be zero") end
+    local sum = 0
+    for j = 1, 5 do
+      local w = M.WHEEL[i][j]
+      if w ~= -1 and w ~= 0 and w ~= 1 then error("Rules: wheel entry outside -1..1") end
+      if M.WHEEL[j][i] ~= -w then error("Rules: wheel is not antisymmetric") end
+      sum = sum + w
+    end
+    if sum ~= 0 then
+      -- A row that does not sum to zero breaks Q3's three free properties:
+      -- neutral rainbow, exact-zero mirrors, one edge driving both sides.
+      error("Rules: wheel row does not sum to zero")
+    end
+  end
+  -- D.3's class distribution: [Rule] per archetype block is 3/2/3/4/5 = 17.
+  local ruleWant = { 3, 2, 3, 4, 5 }
+  local ruleTotal = 0
+  for blk = 1, 5 do
+    local n = 0
+    for i = (blk - 1) * 8 + 1, blk * 8 do
+      local cd = M.CARDS[i]
+      if cd.class == "rule" then n = n + 1
+      elseif cd.class ~= "stat" then error("Rules: card class must be stat or rule") end
+    end
+    if n ~= ruleWant[blk] then error("Rules: [Rule] count per archetype does not match D.3") end
+    ruleTotal = ruleTotal + n
+  end
+  if ruleTotal ~= 17 then error("Rules: Q5 says 17 [Rule] of 40") end
+  -- Q3: exactly AFFINITY_POINTS per card, split across at most two types.
+  for i = 1, #M.CARDS do
+    local cd = M.CARDS[i]
+    local a = { cd.affSwarm, cd.affBoom, cd.affMystic, cd.affFortress, cd.affRaider }
+    local sum, nz = 0, 0
+    for j = 1, 5 do
+      if a[j] < 0 then error("Rules: negative affinity points") end
+      if a[j] > 0 then nz = nz + 1 end
+      sum = sum + a[j]
+    end
+    if sum ~= M.C.AFFINITY_POINTS then error("Rules: a card must carry exactly 3 affinity points") end
+    if nz > 2 then error("Rules: affinity splits across at most two types (Q3)") end
+  end
+  -- The one worked example the documents give: Granary Reserves is the 2F/1B
+  -- split that makes section 9's Turtle Bank total 8F/7B.
+  local gr = M.CARDS[M.CARD_BY_KEY.granaryReserves]
+  if gr.affFortress ~= 2 or gr.affBoom ~= 1 then
+    error("Rules: Granary Reserves must be 2 Fortress / 1 Boom (INTERPRETATIONS 14)")
+  end
+  -- Caravan's unlock index must actually be the Caravan building.
+  if M.BUILDINGS[M.CARDS[M.CARD_BY_KEY.caravan].unlockBld].key ~= "caravan" then
+    error("Rules: the Caravan card unlocks a building that is not the Caravan")
+  end
+end
+
 -- Q10 ladder tier names, hashed so a reordering is a compatibility break.
 M.TIERS = { "keepHpRemoved", "slotsDestroyed", "penetration", "ownKeepHp", "draw" }
 
@@ -321,6 +561,26 @@ local function computeRulesHash(R)
     h = Hash.int(h, c[3])
   end
 
+  -- The wheel: type order, then every matrix entry.
+  h = Hash.int(h, #R.WHEEL_TYPES)
+  for i = 1, #R.WHEEL_TYPES do
+    h = Hash.str(h, R.WHEEL_TYPES[i])
+    for j = 1, #R.WHEEL_TYPES do
+      h = Hash.int(h, R.WHEEL[i][j])
+    end
+  end
+
+  -- The forty cards: every field of every card, in CARD_FIELDS order.
+  local cf = R.CARD_FIELDS
+  h = Hash.int(h, #R.CARDS)
+  for i = 1, #R.CARDS do
+    local cd = R.CARDS[i]
+    for f = 1, #cf do
+      h = Hash.str(h, cf[f])
+      h = Hash.any(h, cd[cf[f]])
+    end
+  end
+
   h = Hash.int(h, #R.TIERS)
   for i = 1, #R.TIERS do
     h = Hash.str(h, R.TIERS[i])
@@ -377,12 +637,22 @@ end
 --    that damaged the victim that tick, per S10.
 -- 8. Earned Levy (Golden Age's threshold) counts income, repel refunds and
 --    spoils alike -- everything credited, before bank-cap clipping.
--- 9. The Q3 type wheel scopes to UNIT damage only. Sim.unitDamage applies
---    sd.wheelNum; building damage (Arrow Tower, Watchtower) and the Trap Pit
---    burst do not. Rationale: Q3 calls the wheel a matchup edge between the two
---    ARMIES, and a tower has no type, so there is no edge to read. Recorded here
---    because it is a choice, not a reading -- M3 writes wheelNum and would
---    otherwise have to guess.
+-- 9. The Q3 type wheel multiplies ALL damage a unit DEALS -- into enemy
+--    units, buildings and the keep alike. This is a reading, not a choice:
+--    Q3's normative sentence is "applied as a single final multiplier on
+--    damage dealt", Q12 repeats it ("6% damage dealt at maximum focus"),
+--    and neither carves out a target type -- so Sim.unitDamage applies
+--    sd.wheelNum as the last factor of everything the unit deals, and a
+--    favourable matchup also razes structures ~6% faster, which is coherent
+--    with Q12's quiet global edge. What carries no wheel is damage no ARMY
+--    dealt: building damage (Arrow Tower, Watchtower), the Trap Pit burst,
+--    Ward's reflect, Miasma and Scorched Earth -- a tower has no type, so
+--    there is no edge to read. Pinned at HORSE scale by selftest section 19
+--    (a max-edge horse deals 23 per resolve to a palisade and to the keep,
+--    not the unwheeled 22); spear scale cannot falsify the structure half,
+--    because floor(8 * 1.06) is 8 again. (An earlier revision of this item
+--    said "UNIT damage only", contradicting Q3's sentence and the code,
+--    which has applied the wheel to structure damage since M3 part 1.)
 -- 10. A bank cap REDUCTION does not claw back Levy already banked. Razing a
 --    Granary drops the cap by 150, and an owner sitting on 350 keeps all 350;
 --    the excess is simply unspendable-on-top rather than destroyed, and the next
@@ -401,6 +671,118 @@ end
 --    caller supplies issueTick. The sim's contract is a pure function of
 --    (ruleset, seed, atoms with their EXEC ticks); the issue tick is wire
 --    metadata that a replay artifact need not carry. M5 must supply it.
+--
+-- M3 (the forty cards). Items 13-28. Each is a place D.3's normative wording,
+-- Q3/Q4/Q5 or the older IDLE_BATTLE.md was silent, ambiguous or in conflict,
+-- and this implementation chose. Every choice is either hashed data (so a
+-- future ruling is a deliberate compatibility break) or a documented rule in
+-- sim/Mods.lua with a selftest pinning it.
+--
+-- 13. Loadout validation. A loadout is an array of exactly 5 integer slots;
+--    each slot is 0 (empty) or a card id 1..40; a non-zero id may appear only
+--    once (Q6's "ten cards gives 252 loadouts" is C(10,5) -- combinations
+--    WITHOUT repetition -- and D.2's saturation table treats a second copy as
+--    unrepresentable). PARTIAL loadouts are legal in the SIM: the M3 milestone
+--    tests every card alone, and the first playable is "zero modifiers", so
+--    emptiness must be expressible. "Exactly 5 real cards" is the loadout UI's
+--    rule and is enforced at M8's handshake, not here. Violations error() at
+--    Sim.new -- a malformed loadout is a broken handshake, not a fizzle.
+-- 14. Affinity splits. Q3 allows 3/0 or 2/1 and no document assigns per-card
+--    splits. Every card is pure 3/0 in its home archetype except GRANARY
+--    RESERVES = 2 Fortress / 1 Boom, which is forced: IDLE_BATTLE.md section 9
+--    "Turtle Bank" (Bastion Walls, Rapid Masonry, Trade Routes, Master Masons,
+--    Granary Reserves) must total 8F/7B with pure Boom as its worst matchup
+--    (Q3's own worked example), and 2F/1B on Granary Reserves is the unique
+--    assignment that reproduces both. Asserted in CHECKS and in selftest.
+-- 15. S5's "event". Q4 S5 says "per event"; D.3's Swarm note says "only one
+--    free-deployment effect may fire per DEPLOY ORDER". The note is the more
+--    specific gloss and is what bounds the Swarm cost stack, so: at most ONE
+--    free unit per deploy order, from whichever effect fires first in
+--    ascending card-id order (Endless Ranks 5 before Conscription 8). A
+--    Conscription entitlement blocked by S5 is LOST, not deferred -- deferral
+--    would need a pending-freebie mechanism no document describes. An Endless
+--    Ranks charge is NOT consumed when the order's first unit cannot be placed
+--    (supply cap), per S5's "a non-firing effect does not consume its counter".
+-- 16. Conscription's counter IS sd.unitsDeployed -- "a match-long count of
+--    units you have deployed" already exists as a hashed accumulator, and a
+--    second copy of it would be a divergence waiting to disagree. The unit
+--    being deployed is number unitsDeployed + 1.
+-- 17. Counterwall. "That lane was last clear of enemy units" reads the WHOLE
+--    lane, both halves -- the sentence scopes the lane, not your half of it.
+--    The accumulator counts the PAID cost of each enemy unit that died past
+--    its own midline (u.cost, the same field the repel refund reads), the
+--    clear-transition check runs at the start of each resolve tick from the
+--    tick-start board, and the burst routes through queueCredit like every
+--    resolve-tick payout.
+-- 18. Scorched Earth hits UNITS only -- its target clause is "the up to three
+--    enemy units in that lane nearest your own keep", so the "structures take
+--    the standard x0.5" sentence has nothing to apply to and is implemented as
+--    dead wording (escalated in the README). Blocks clamp to blocksMax like a
+--    deploy count clamps to 9. A cast into a lane with no enemy units is a
+--    fizzle -- no spend, no cooldown -- matching the deploy rule that an order
+--    which places nothing fizzles. The damage rides the dmgTaken channel like
+--    the Trap Pit burst (Q4 S1/S2), and the wheel does not apply (item 9: the
+--    wheel multiplies what a UNIT deals, and the burst is card-sourced).
+-- 19. Investment matures 450 ticks after its exec tick and pays at the FIRST
+--    Levy tick at or after maturity -- "credited at that Levy tick" only
+--    parses if the credit waits for a Levy tick, since exec+450 is generally
+--    not on the Levy grid. Fixed order inside a Levy tick: Golden Age's latch
+--    check first (reading earned as it stood before the payout), then the
+--    Investment payout, then income -- so Surplus and Granary Reserves read
+--    the post-payout, pre-income bank, which satisfies Surplus's "before
+--    income is added" literally.
+-- 20. Ley Line moves units in ascending entity id, each unit moving iff the
+--    destination's supply (base cost, Q4) still has room for IT -- a horse
+--    that does not fit is skipped and a later spear that fits still moves.
+--    source == destination, an off-board lane, or a cast that moves nothing is
+--    a fizzle and does NOT consume the cooldown. A moved unit keeps its pos,
+--    its Vanguard flag and its identity; it does not re-trigger deploy-time
+--    effects and does not count against the destination lane's Vanguard three.
+-- 21. War Drums' "any kill by any source of yours" means enemy UNIT deaths.
+--    S8's attribution list (tower, trap, Ward reflect, Miasma, Scorched Earth)
+--    is a list of unit-killers; razing a building is never called a kill
+--    anywhere in the documents. Escalated in the README.
+-- 22. Ward. "Pre-mitigation damage" = the attacker's damage after its own
+--    unitDmg channel, BEFORE the structure x0.5 / dmgVsBuildings step and
+--    before the wheel (the wheel is an army edge and the reflect is
+--    building-sourced, item 9). "Your buildings" excludes the keep, which is
+--    not a building anywhere in the catalogue. The reflect rides the dmgTaken
+--    channel like every other damage source, writes into pend in the same
+--    resolve phase (S9), and the no-reflect flag is structural: reflect hits
+--    units, only building damage reflects, so reflected damage can never
+--    reflect again by construction.
+-- 23. Miasma's "x < 1000" is the CARD OWNER's frame: an enemy unit at owner-
+--    frame x < 1000 is a unit past its own midline, which is IDLE_BATTLE.md's
+--    "inside your half of a lane". (Iron Discipline's x < 1000 is the unit
+--    OWNER's frame -- "your own half" -- so the two cards read the same words
+--    in the frame of the side the card protects or punishes into.)
+-- 24. Hex's schedule from tick 0 is: the debuff is live at tick t iff
+--    t mod every < window -- windows [0,200), [400,600), ... A Levy tick at
+--    t = 35 is inside the first window, so Hex bites from the first income.
+-- 25. Deep Foundations. A hit on an immune back building is LOST -- the
+--    attacker does not retarget, and a Bow's target slot is consumed -- the
+--    building "cannot be damaged", not "cannot be attacked". With
+--    BUILD_BLOCKS_ADVANCE the case is reachable only by an infiltrator
+--    standing past a front slot that is then rebuilt (the same board as fog
+--    open item 19b).
+-- 26. Raiding Party's Bypass triggers at the start of a resolve tick, when any
+--    Horse of yours is within its weapon range of the standing enemy front
+--    building in that lane (the same envelope Sim.unitAttacks applies) --
+--    "reach the enemy front slot" cannot mean standing ON it, because
+--    BUILD_BLOCKS_ADVANCE parks the horse at range. The consumed flag stores
+--    THAT building's entity id: those horses ignore that building for blocking
+--    and targeting; a replacement built later has a new id and blocks
+--    normally, which is what "once per lane per match" buys. "A building
+--    stands" includes under construction (interpretation 4: it occupies, has
+--    HP and blocks).
+-- 27. Late Levy's gate is stored as permille of the match clock (Q11's rule
+--    that every time gate is a fraction), and "after 50% of the match clock
+--    (tick 3,000)" includes tick 3,000 itself: ticks 0..2999 are the first
+--    half of a 6,000-tick match, so exec tick >= floor(MATCH_TICKS * 500 /
+--    1000) qualifies.
+-- 28. Granary Reserves' "at or above half your modified bank cap" is
+--    bank * 2 >= cap, which is exact for odd caps without choosing a rounding
+--    direction for "half".
 -- ---------------------------------------------------------------------------
 
 return M

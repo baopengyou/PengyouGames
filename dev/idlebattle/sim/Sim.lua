@@ -39,6 +39,7 @@
 local IB_SIM_MODULES = rawget(_G, "IB_SIM_MODULES")
 local Hash = IB_SIM_MODULES and IB_SIM_MODULES.Hash or require("sim.Hash")
 local Rand = IB_SIM_MODULES and IB_SIM_MODULES.Rand or require("sim.Rand")
+local Mods = IB_SIM_MODULES and IB_SIM_MODULES.Mods or require("sim.Mods")
 
 local floor = math.floor
 local setmetatable = setmetatable
@@ -64,6 +65,7 @@ local K_UNIT, K_BUILDING, K_KEEP = 1, 2, 3
 -- the verb for both dispatch and the log digest.
 local CLS_UNIT, CLS_BUILD, CLS_VERB = 1, 2, 3
 
+local UNIT_HORSE = 2
 local UNIT_BOW = 3
 
 -- ---------------------------------------------------------------------------
@@ -135,6 +137,9 @@ end
 local function unitCostOf(sim, sd, lane, t)
   local R = sim.rules
   local pts = sd.chan[CH_UNITCOST] + sd.lanes[lane].aura.cost[t]
+  if sim.hooks.unitCostPoints then
+    pts = pts + sim.hooks.unitCostPoints(sim, sd, lane, t)   -- M3: Late Levy
+  end
   pts = clampCh(R, CH_UNITCOST, pts)
   local c = R.UNITS[t].cost
   if pts ~= 0 then c = floor(c * (100 + pts) / 100) end
@@ -538,15 +543,21 @@ local function phaseMove(sim)
       if nu > 0 then
         buildCands(sim, es, lane)
         local cg, ci, cn = sim.cg, sim.ci, sim.cn
+        -- M3 Raiding Party: a consumed Bypass flag holds the entity id of the
+        -- one enemy front building this side's HORSES walk past rather than
+        -- engage. 0 (the default, and the whole of M1) matches no candidate.
+        local byp = sd.lanes[lane].bypass
         for i = 1, nu do
           local u = us[i]
           local p = u.pos
           u.step = 0
+          local skipId = 0
+          if byp ~= 0 and u.t == UNIT_HORSE then skipId = byp end
           -- Nearest thing ahead: smallest cg not behind us, ties by lowest id.
           local bg, bid = -1, 0
           for k = 1, cn do
             local g = cg[k]
-            if g >= p and (bg < 0 or g < bg or (g == bg and ci[k] < bid)) then
+            if ci[k] ~= skipId and g >= p and (bg < 0 or g < bg or (g == bg and ci[k] < bid)) then
               bg = g; bid = ci[k]
             end
           end
@@ -612,6 +623,13 @@ local function unitDamage(sim, sd, es, u, kind, ref)
   else
     -- All units deal half damage to every structure, keep included; Sappers
     -- takes the dmgVsBuildings channel to +100 and that back to full.
+    if kind == K_BUILDING and sim.hooks.onStructHit then
+      -- M3: Ward. The reflect reads the PRE-mitigation figure -- after the
+      -- attacker's own unitDmg channel, before the structure step and the
+      -- wheel (INTERPRETATIONS 22) -- and writes into pend like every other
+      -- source, so it rides the same tick-start snapshot (S9).
+      sim.hooks.onStructHit(sim, sd, es, u, ref, d)
+    end
     local dvb = clampCh(R, CH_DMGVSBLD, sd.chan[CH_DMGVSBLD])
     d = floor(d * C.STRUCTURE_DMG_PCT * (100 + dvb) / 10000)
   end
@@ -635,23 +653,37 @@ local function unitAttacks(sim, s)
     if nu > 0 then
       buildCands(sim, es, lane)
       local cg, ci, cr, ck, cn, cm = sim.cg, sim.ci, sim.cr, sim.ck, sim.cn, sim.cm
+      local byp = sd.lanes[lane].bypass   -- M3 Raiding Party; 0 in M1, matches nothing
+      -- M3 Deep Foundations: a hit chosen onto an immune back building is
+      -- LOST -- the attacker does not retarget and a Bow's target slot is
+      -- consumed (INTERPRETATIONS 25). The guard sits between target choice
+      -- and damage so "cannot be damaged" never becomes "cannot be attacked".
+      local immune = sim.hooks.bldImmune
       for i = 1, nu do
         local u = us[i]
         if u.snapHp > 0 then
           local p = u.pos
           local range = unitRangeOf(sim, sd, u)
           local nt = R.UNITS[u.t].targets
+          local skipId = 0
+          if byp ~= 0 and u.t == UNIT_HORSE then skipId = byp end
           if nt == 1 then
             local bk, bd = 0, -1
             for k = 1, cn do
-              local g = cg[k] - p
-              if g < 0 then g = -g end
-              if g <= range and (bk == 0 or g < bd or (g == bd and ci[k] < ci[bk])) then
-                bk = k; bd = g
+              if ci[k] ~= skipId then
+                local g = cg[k] - p
+                if g < 0 then g = -g end
+                if g <= range and (bk == 0 or g < bd or (g == bd and ci[k] < ci[bk])) then
+                  bk = k; bd = g
+                end
               end
             end
             if bk ~= 0 then
-              addDamage(ck[bk], cr[bk], unitDamage(sim, sd, es, u, ck[bk], cr[bk]), u.id)
+              if ck[bk] == K_BUILDING and immune and immune(sim, es, cr[bk]) then
+                -- the swing lands on Deep Foundations and removes nothing
+              else
+                addDamage(ck[bk], cr[bk], unitDamage(sim, sd, es, u, ck[bk], cr[bk]), u.id)
+              end
             end
           else
             -- Bow hits up to 3. Multi-target is structural, not decorative: it is
@@ -661,7 +693,7 @@ local function unitAttacks(sim, s)
             for _ = 1, nt do
               local bk, bd = 0, -1
               for k = 1, cn do
-                if cm[k] ~= mk then
+                if cm[k] ~= mk and ci[k] ~= skipId then
                   local g = cg[k] - p
                   if g < 0 then g = -g end
                   if g <= range and (bk == 0 or g < bd or (g == bd and ci[k] < ci[bk])) then
@@ -671,7 +703,11 @@ local function unitAttacks(sim, s)
               end
               if bk == 0 then break end
               cm[bk] = mk
-              addDamage(ck[bk], cr[bk], unitDamage(sim, sd, es, u, ck[bk], cr[bk]), u.id)
+              if ck[bk] == K_BUILDING and immune and immune(sim, es, cr[bk]) then
+                -- the arrow lands on Deep Foundations and removes nothing
+              else
+                addDamage(ck[bk], cr[bk], unitDamage(sim, sd, es, u, ck[bk], cr[bk]), u.id)
+              end
             end
           end
         end
@@ -938,8 +974,21 @@ local function phaseIncome(sim)
     local flat = sd.cacheLevyFlat
     local prod = clampCh(R, CH_PRODUCTION, sd.chan[CH_PRODUCTION])  -- Master Masons
     if prod ~= 0 then flat = floor(flat * (100 + prod) / 100) end
-    local amt = C.BASE_INCOME + flat + clampCh(R, CH_LEVYFLAT, sd.chan[CH_LEVYFLAT])
-    local pts = clampCh(R, CH_LEVYTICK, sd.chan[CH_LEVYTICK])
+    local mflat = sd.chan[CH_LEVYFLAT]
+    if sim.hooks.levyFlatPoints then
+      -- M3: Trade Routes and Surplus join the levyFlat channel sum here and
+      -- are clamped with it, once (S2).
+      mflat = mflat + sim.hooks.levyFlatPoints(sim, sd)
+    end
+    local amt = C.BASE_INCOME + flat + clampCh(R, CH_LEVYFLAT, mflat)
+    local pts = sd.chan[CH_LEVYTICK]
+    if sim.hooks.levyTickPoints then
+      -- M3: Golden Age's latched bonus, Granary Reserves' conditional bonus
+      -- and Hex's windowed debuff -- ordinary points in the levyTick channel,
+      -- summed with the static ones and clamped once (S2).
+      pts = pts + sim.hooks.levyTickPoints(sim, sd)
+    end
+    pts = clampCh(R, CH_LEVYTICK, pts)
     if pts ~= 0 then amt = floor(amt * (100 + pts) / 100) end
     if amt < 0 then amt = 0 end
     credit(sim, sd, amt)
@@ -1065,6 +1114,33 @@ local function finishByClock(sim)
 end
 
 -- ---------------------------------------------------------------------------
+-- the internals handed to the modifier layer
+--
+-- sim/Mods.lua implements the forty cards through the named hooks, and some of
+-- them (the verbs, Ward, the payouts) need the sim's OWN primitives -- there
+-- must never be a second implementation of a death, a credit or a clamp. The
+-- table is built here, after everything in it exists, and passed to
+-- Mods.install by value, so Mods.lua requires nothing and no module cycle
+-- exists. These are internals on loan, not API: nothing outside sim/ may
+-- touch them.
+-- ---------------------------------------------------------------------------
+
+local INTERNAL = {
+  clampCh = clampCh,
+  credit = credit,
+  spend = spend,
+  queueCredit = queueCredit,
+  flushCredits = flushCredits,
+  onUnitDeath = onUnitDeath,
+  dmgTakenPts = dmgTakenPts,
+  addDamage = addDamage,
+  bankCapOf = bankCapOf,
+  recomputeSideDerived = recomputeSideDerived,
+  frontSlot = frontSlot,
+  K_UNIT = K_UNIT, K_BUILDING = K_BUILDING, K_KEEP = K_KEEP,
+}
+
+-- ---------------------------------------------------------------------------
 -- public API
 -- ---------------------------------------------------------------------------
 
@@ -1081,7 +1157,7 @@ function M.new(rules, seed, loadoutA, loadoutB)
     or rules.CH.slotCap ~= CH_SLOTCAP or rules.CH.repelRefund ~= CH_REPELREFUND then
     error("Sim: Rules.CHANNELS order does not match this file's channel indices")
   end
-  if rules.UNITS[UNIT_BOW].key ~= "bow" then
+  if rules.UNITS[UNIT_BOW].key ~= "bow" or rules.UNITS[UNIT_HORSE].key ~= "horse" then
     error("Sim: Rules.UNITS order does not match this file's unit indices")
   end
 
@@ -1112,6 +1188,13 @@ function M.new(rules, seed, loadoutA, loadoutB)
   -- Entity ids are allocated in a fixed order: keeps first, side 1 then side 2.
   sim.sides[1].keepId = nextId(sim)
   sim.sides[2].keepId = nextId(sim)
+
+  -- M3: the modifier layer. Validates both loadouts (a malformed loadout is a
+  -- broken handshake and errors here), and registers exactly the hooks the
+  -- cards present need -- including onMatchStart, which the next line fires.
+  -- TWO EMPTY LOADOUTS INSTALL NOTHING: every hook stays nil and the tick
+  -- path below is the M1 tick path, instruction for instruction.
+  Mods.install(sim, INTERNAL)
 
   if sim.hooks.onMatchStart then sim.hooks.onMatchStart(sim) end
 
@@ -1300,40 +1383,84 @@ function Sim:levy(side) return self.sides[side].bank end
 function Sim:keepHp(side) return self.sides[side].keepHp end
 
 -- ---------------------------------------------------------------------------
--- M3 HOOK POINTS (sim.hooks.<name>; all nil in M1)
+-- M3 HOOK POINTS (sim.hooks.<name>; registered by sim/Mods.lua at Sim.new,
+-- ONLY those the cards present actually need -- with two empty loadouts every
+-- one of them is nil and this file runs its M1 tick path unchanged)
 --
---   onMatchStart(sim)                            loadouts to channel points, the
---                                                Q3 wheel edge into sd.wheelNum
---   onLevyTickStart(sim, sd)                     Golden Age, Surplus, Granary
---                                                Reserves, Trade Routes, Hex,
---                                                Investment countdown
+--   onMatchStart(sim)                            loadouts to channel points,
+--                                                Discord's foe write, Caravan's
+--                                                unlock, the runtime mods keys,
+--                                                the Q3 wheel edge into
+--                                                sd.wheelNum
+--   onLevyTickStart(sim, sd)                     Golden Age latch, then the
+--                                                Investment payout (fixed
+--                                                order, INTERPRETATIONS 19)
+--   levyTickPoints(sim, sd) -> pts               NEW IN M3: Golden Age's +40,
+--                                                Granary Reserves' conditional
+--                                                +20, Hex's windowed -30 --
+--                                                dynamic levyTick sources join
+--                                                the channel sum in
+--                                                phaseIncome and clamp once
+--   levyFlatPoints(sim, sd) -> flat              NEW IN M3: Trade Routes,
+--                                                Surplus -- dynamic levyFlat
+--                                                sources, same clamp rule
+--   unitCostPoints(sim, sd, lane, t) -> pts      NEW IN M3: Late Levy's time-
+--                                                gated discount joins the
+--                                                unitCost sum in unitCostOf
 --   deployCost(sim, sd, lane, t, cost, i) -> n   Conscription, Endless Ranks
 --                                                (S5: one free deploy per order)
 --   onDeploy(sim, sd, unit)                      Vanguard's per-unit flag
---   unitHpPoints(sim, sd, t) -> pts              Bulwark Line, Chaff
+--   unitHpPoints(sim, sd, t) -> pts              Bulwark Line (Chaff is static
+--                                                chan, being unconditional)
 --   unitDmgPoints(sim, sd, u) -> pts             Tide of Bodies, War Drums,
 --                                                Vanguard, No Retreat
 --   dmgTakenPoints(sim, sd, u) -> pts            Iron Discipline
---   marchPoints(sim, sd, u) -> pts               Raiding Party
---   bldHpPoints(sim, sd, bi) -> pts              Bastion Walls, Rickety Scaffolds
---   bldRangePoints(sim, sd, b) -> units          Watchfires
+--   marchPoints(sim, sd, u) -> pts               Raiding Party (the march half)
+--   bldHpPoints(sim, sd, bi) -> pts              Bastion Walls (Rickety is
+--                                                static chan)
+--   bldRangePoints(sim, sd, b) -> units          Watchfires (the range half;
+--                                                the reveal is fog-side, M3
+--                                                part 2)
 --   rubbleCostPoints(sim, sd, slot) -> pts       Rapid Masonry
---   onResolveStart(sim)                          per-tick card bookkeeping
---   onExtraDamage(sim)                           Miasma, Ward reflect
---   onUnitDeath(sim, sd, es, u)                  Blood Tithe, Counterwall,
---                                                Endless Ranks charges
+--   onResolveStart(sim)                          Tide's tick-start lane counts,
+--                                                Raiding Party's Bypass
+--                                                trigger, Counterwall's
+--                                                clear-transition check
+--   bldImmune(sim, sd, b) -> bool                NEW IN M3: Deep Foundations'
+--                                                target filter; sd is the
+--                                                building's OWNER. A true
+--                                                verdict loses the hit --
+--                                                no retargeting
+--   onStructHit(sim, sd, es, u, b, pre)          NEW IN M3: Ward's reflect,
+--                                                fed the pre-mitigation figure
+--                                                by unitDamage; writes into
+--                                                pend via addDamage
+--   onExtraDamage(sim)                           Miasma decay
+--   onUnitDeath(sim, sd, es, u)                  Blood Tithe, Counterwall's
+--                                                accumulator, Endless Ranks
+--                                                charges, War Drums' timer
 --   onBuildingDestroyed(sim, sd, es, b, amt) -> amt   Plunder replaces Spoils
---   execVerb(sim, sd, cmd)                       Investment, Scorched Earth,
---                                                Ley Line
+--   execVerb(sim, sd, cmd)                       I Investment (target ignored),
+--                                                E Scorched Earth (target =
+--                                                lane), L Ley Line (target =
+--                                                source lane, count =
+--                                                destination lane). A side
+--                                                without the card fizzles,
+--                                                exactly like the M1 default
+--
+-- Raiding Party's Bypass SKIP is native to this file rather than a hook: once
+-- ln.bypass holds a building id (hashed lane state), phaseMove and unitAttacks
+-- skip that candidate for this side's Horses -- pure geometry off hashed
+-- state, needing no card table, and free when bypass is 0.
 --
 -- Every hook returns integers only and must not read anything outside `sim`.
--- Deliberately NOT stubbed in M1, and why:
---   * Deep Foundations' damage immunity   -- needs a target filter, M3
---   * Shrine's ward charge                -- effect still undefined (D.5)
---   * Caravan                             -- in the catalogue but card-gated, so
---                                            a build order for it fizzles here
---   * rollback snapshots (A.12)           -- M4
---   * fog (A.3)                           -- render only, must never be here
+-- Still deliberately NOT here:
+--   * Divination / Omen / Veil / Shrine pulse -- perception effects; fog-side,
+--     M3 part 2 (see Mods.INFO_EFFECTS). Their sim-side existence (ids,
+--     affinity, hashing, legality, the pulse constants) is complete.
+--   * Shrine's ward charge               -- effect still undefined (D.5)
+--   * rollback snapshots (A.12)          -- M4
+--   * fog (A.3)                          -- render only, must never be here
 -- ---------------------------------------------------------------------------
 
 return M

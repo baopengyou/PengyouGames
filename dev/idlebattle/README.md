@@ -34,6 +34,11 @@ tools/ci.sh 1000 /path/lua   # pick the interpreter (luac is looked for beside i
 
 tools/m2.sh                  # the whole M2 gate: 1,632 scripted matches against C.6
 tools/m2.sh 1                # same gate, 272 matches, ~25 s
+
+tools/m3.sh                  # the whole M3 gate: every card alone (x2 pairings),
+                             #   200 random dual loadouts, the clamp report. ~1 min
+tools/m3.sh 20               # same gate, 20 loadout pairs, a smoke test
+tools/m3.sh 200 "$(which luajit)"   # the 5.1-semantics half; compare SUITE HASHes
 ```
 
 **They are two gates, not one, and both must be run.** `tools/m2.sh`'s header gives
@@ -78,8 +83,14 @@ lua tools/rulescover.lua         # every ruleset value is inside rulesHash
 lua tools/hashcover.lua          # every state field moves the hash
 lua tools/mirror.lua 2000        # A.2: a mirrored match mirrors exactly
 lua tools/fogtest.lua            # FOG: every rule in docs/IDLE_BATTLE_FOG.md
-                                 #   INCLUDING section 3a contact reveal,
-                                 #   one at a time, against fog/Fog.lua
+                                 #   INCLUDING section 3a contact reveal AND the
+                                 #   four M3 info effects (Divination, Omen,
+                                 #   Veil, Shrine pulse) with their MUTATION
+                                 #   suite, one at a time, against fog/Fog.lua
+lua tools/m3gate.lua cards       # M3: each of the 40 cards individually,
+                                 #   vs-empty + mirrored, 4 arrival patterns
+lua tools/m3gate.lua loadouts 200   # M3: 200 random dual loadouts, full length
+lua tools/m3gate.lua clamp 200   # M3: the clamp-saturation report
 lua harness/selftest.lua         # the committed golden hashes
 lua harness/fuzz.lua 1000        # the milestone + mid-run arrival + invariants
 lua sweep/sweep.lua 6            # M2: the C.6 cross-check, metric by metric, with
@@ -164,7 +175,11 @@ here rather than implied away.
 `rulesHash` at that time was `297242539` (`4wyxt7`); on 2026-08-13 the A.11.2 wire-letter
 ruling landed (contiguous `a`-`l` catalogue, uppercase `I`/`E`/`L` verbs) and it became
 `333968378` (`5iu3ne`), with every golden regenerated together in the same commit - the
-worked example of the paragraph below. If you see a different value than 333968378, the
+worked example of the paragraph below. On 2026-08-21 **M3 part 1** landed the forty cards,
+the wheel matrix and the Shrine pulse constants inside the hashed ruleset and it became
+**`767294897` (`cotsj5`)**, with all four goldens regenerated together again (see the M3
+section below for the new values and for why `GOLDEN_LOGDIGEST` alone did not move). If
+you see a different value than 767294897, the
 ruleset changed; that is a deliberate compatibility break (A.11.1) and every recorded
 match log from before the change is invalid - and `harness/selftest.lua` will go **red**
 until `GOLDEN_RULESHASH`, `GOLDEN_STATE`, `GOLDEN_LOGDIGEST` and `harness/fuzz.lua`'s
@@ -179,7 +194,8 @@ the same process, so it must never silently switch itself off.
    *statically* by `tools/comptest.sh` (which rejects every 5.2+/5.3+/5.4+ construct) plus
    *dynamically* under **LuaJIT 2.1, which implements 5.1 semantics with doubles**:
    `sh tools/ci.sh 1000 $(which luajit)` is **GREEN (5/5 steps, 1000 logs)** with
-   `SUITE HASH 2005649413`, bit-identical to the Lua 5.5 run. That is the numeric model
+   `SUITE HASH 1912059909` (M3 part 1; the pre-M3 run was 2005649413), bit-identical to
+   the Lua 5.5 run. That is the numeric model
    WoW uses and it is the half that matters most. What is still missing is PUC 5.1 itself,
    whose standard library differs from LuaJIT's in a few corners; installing `lua5.1` and
    running `tools/ci.sh 1000 $(which lua5.1)` would close it completely.
@@ -262,14 +278,28 @@ Two further hazards that are not on the numbered list but will bite:
 ```
 sim/                 the simulation. Nothing in here may touch WoW, the UI or the network.
   Rules.lua          the entire ruleset as integers, in ONE file, plus rulesHash over it.
+                     Since M3 part 1 that includes the FORTY CARDS (Rules.CARDS, id =
+                     index, every payload number a hashed field), the Q3 wheel matrix
+                     (Rules.WHEEL over WHEEL_TYPES) and the D.2 Shrine pulse constants.
                      Its INTERPRETATIONS block at the bottom lists every place the design
-                     documents were silent or in conflict and this implementation chose.
+                     documents were silent or in conflict and this implementation chose;
+                     items 13-28 are the M3 card readings.
   Sim.lua            the one deterministic simulation (A.1): units, buildings, both keeps,
                      Levy, bank, income, costs, per-lane supply, the Q10 tiebreak ladder.
-                     Ends with the M3 hook points, all nil in M1.
+                     Ends with the M3 hook points -- REAL since M3 part 1, registered per
+                     match by Mods.install and all nil for a cardless match.
+  Mods.lua           M3: the forty cards' RUNTIME. Validates loadouts, folds static card
+                     points into sd.chan, computes the wheel edge, registers exactly the
+                     hooks the cards present need, and implements the I/E/L verbs. Every
+                     NUMBER it uses comes from Rules.CARDS; every mutable thing it owns
+                     lives inside the hashed sim state. Held to every determinism rule
+                     (the greps and comptest discover it automatically). With two empty
+                     loadouts it installs NOTHING, which is what keeps the cardless game
+                     byte-identical to M1.
   Hash.lua           31-bit integer hashing. Hash.state(sim) is the stateHash the heartbeat
                      carries; Hash.log(sim) is logDigest. No floats, no bitwise ops, no
-                     tostring - all three would differ across Lua versions.
+                     tostring - all three would differ across Lua versions. UNCHANGED by
+                     M3: every card field landed in state the hash already walks.
   Rand.lua           the sim's own integer LCG. See rule 3.
 
 fog/                 THE FOG OF WAR MODEL (../docs/IDLE_BATTLE_FOG.md), and a
@@ -291,7 +321,14 @@ fog/                 THE FOG OF WAR MODEL (../docs/IDLE_BATTLE_FOG.md), and a
                      the front-slot shield, and the per-side MEMORY store --
                      which lives here and NOT in sim state and NOT in
                      Hash.state, for the three reasons its own MEMORY block
-                     gives.
+                     gives. SINCE M3 PART 2 it also holds the EFFECTS block:
+                     Divination, Omen, Veil (the precedence rule is ONE
+                     sentence, stated at veiled()) and the Shrine reveal
+                     pulse, consuming sim/Mods.lua's INFO_EFFECTS handoff and
+                     the hashed SHRINE_PULSE_* constants, with the memory
+                     store grown into THREE parallel layers (full / scry /
+                     occupancy) composed in exactly one place,
+                     believedBuilding().
 
 tools/               checkers and the first test suite. NOT held to the sim's determinism
                      rules - these run on one machine and may use io, os and pairs freely.
@@ -328,7 +365,26 @@ tools/               checkers and the first test suite. NOT held to the sim's de
                      NEGATION -- visible here, invisible one section away. Also
                      asserts the two things nothing else can see: that fog memory
                      does not move stateHash, and that the muster bar is DELETED
-                     rather than disabled. Runs inside the M1 gate.
+                     rather than disabled. Runs inside the M1 gate. SINCE M3
+                     PART 2: 667 checks -- a section per information card, the
+                     Veil precedence route by route, the three-layer memory
+                     composition, tower/card compositions from both seats, and
+                     a MUTATION suite (each effect disabled in a /tmp copy of
+                     Fog.lua -> its named checks must flip).
+  m3.sh              THE M3 GATE, beside ci.sh and m2.sh where gates live: each
+                     of the 40 cards individually (vs-empty + mirrored), 200
+                     random dual loadouts, the clamp-saturation report, a
+                     verdict with hard exit codes. Its header argues why it is
+                     a sibling of ci.sh rather than a step inside it. Run it
+                     twice (Lua + LuaJIT) and compare the printed SUITE HASHes.
+  m3gate.lua         the implementation m3.sh fronts: the frozen seed
+                     schedules, the four arrival patterns per log via
+                     harness/runner.lua, verb-atom injection for the three verb
+                     cards, and the clamp report read off installed sims' own
+                     sd.chan plus card-table maxima -- with the applied-value
+                     probe (real Spear deploys against independently clamped
+                     arithmetic; M3 fix pass, item 3) as the step's
+                     falsifiable half.
 
 harness/             the SECOND suite, and not redundant with tools/. Three things live
                      ONLY here, and the M1 gate is dishonest without them:
@@ -372,7 +428,12 @@ policy/              M2. The scripted hands on the mouse. HELD TO THE SIM'S
                      POLL/MAX_ORDERS_PER_POLL at load time. It CONSUMES the fog
                      model and does not implement one: the renderer must apply
                      the same rules, and two implementations of "what can be
-                     seen" would be two different games.
+                     seen" would be two different games. SINCE M3 PART 2 the
+                     view carries the card-shaped fields, all filled through
+                     fog/Fog.lua: the per-lane omen channel and believed
+                     occupancy, the Q9b marks (scried/omened/scanned) and the
+                     scan flag. No shipped line reads any of them (open item
+                     24).
   lines.lua          the seventeen lines, four per family plus `Pathfinder` in
                      mixed, one parametric engine and seventeen configurations.
                      Each carries a note saying which Part B or Part C claim it
@@ -2082,6 +2143,463 @@ and `tools/comptest.sh` 0 failures over both.
 
 ---
 
+## M3 part 1 - the modifier layer, SIM SIDE (2026-08-21)
+
+All forty cards from `IDLE_BATTLE_DECISIONS.md` D.3 - the NORMATIVE wordings, not the
+older ones in `IDLE_BATTLE.md` section 7 - now exist in the sim: the hashed card table,
+the loadout plumbing, the Q4 S1-S10 stacking machinery, the seventeen `[Rule]` cards'
+runtime including the three verbs, and the Q3/Q12 hidden-affinity wheel. **Part 2 is the
+PERCEPTION half**: the fog effects of Divination, Omen, Veil and the Shrine's reveal
+pulse, which belong to `fog/Fog.lua` and not to `sim/` (A.5 grep 1 makes that
+structural), plus the M3 gate tooling described at the end of this section.
+
+**Where the cards live, and why.** `Rules.CARDS`, inside `sim/Rules.lua` itself rather
+than a sibling file, because the file's own first paragraph is the argument: rulesHash
+must be computed over ONE artifact that cannot drift silently, and this directory has
+already lived through what a value outside the hash costs. A card's id IS its index -
+D.3's own order, Swarm 1-8, Fortress 9-16, Boom 17-24, Raider 25-32, Mystic 33-40 - and
+every field of every card is walked by the hash in `CARD_FIELDS` order.
+`tools/rulescover.lua` now fails the build on a card field outside `CARD_FIELDS`, a
+non-channel channel reference, a broken wheel matrix, or an unclassified top-level key,
+in both directions, like everything else in the ruleset. The wheel is `Rules.WHEEL` over
+`WHEEL_TYPES` in Q3's vector order (Swarm, Boom, Mystic, Fortress, Raider); it refuses to
+LOAD unless it is antisymmetric with zero diagonal and zero row sums, because those three
+properties are what make the rainbow neutral, mirrors exact zeros, and one integer edge
+enough for both sides.
+
+**Loadouts are real.** `Sim.new(rules, seed, loadoutA, loadoutB)` validates at
+construction: an array of exactly 5 slots, each 0 (empty) or a card id 1..40, integral,
+no duplicate non-zero id. Duplicates are banned on Q6's own arithmetic - "ten cards gives
+252 loadouts" is C(10,5), combinations WITHOUT repetition - and a violation is an
+`error()`, not a fizzle, because a malformed loadout is a broken handshake rather than a
+player mistake. PARTIAL loadouts are deliberately legal in the SIM (the M3 milestone
+tests every card alone; D.1's first playable is "zero modifiers"); "exactly 5 real
+cards" is the loadout UI's rule and lands at M8 (INTERPRETATIONS 13). The loadout was
+already inside `Hash.state` from M1; what changed is that it now DOES something.
+
+**Stacking is one machine (Q4).** A card's unconditional `[Stat]` delta is summed into
+`sd.chan` once at match start - the same per-side channels the building auras already
+travel - and every scoped or time-varying delta joins the same sum through a `*Points`
+hook at the point of use: additive within the channel, clamped once from `R.CLAMPS`,
+applied once, floor once (S2, S4, S7). Nothing floors separately, nothing multiplies,
+and the state holds the UNclamped sum (Chaff + Breeding Pits shows -30 in the hash and
+pays as -20). Discord is S2's "opponent debuffs are ordinary local arithmetic" made
+concrete: install writes +15 into the OTHER side's unitCost channel and nothing else
+ever knows. D.2's saturation warnings reproduce exactly - Vanguard + War Drums + No
+Retreat sum to 84 points and land as the +35 clamp; the selftest pins it.
+
+**The `[Rule]` runtime.** `sim/Mods.lua` (new, held to every determinism rule, and
+discovered automatically by both grep implementations and comptest). Sim.new hands it a
+table of the sim's own internals - credit, spend, queueCredit, the one death path, the
+one mitigation function - so no card mechanism exists twice. Per-side runtime state all
+lives INSIDE the hashed state: Golden Age's latch, Investment's amount and maturity,
+War Drums' expiry, both verb cooldowns and Vanguard's three per-lane counters as
+`sd.mods` keys (sorted into `sd.modsOrder`, which `Hash.state` already walked); Endless
+Ranks' Muster charges, Raiding Party's Bypass and Counterwall's accumulator in the lane
+fields M1 shipped for them; the Vanguard flag on the unit (`u.vg`).
+`tools/hashcover.lua` gained a carded fixture that proves every one of those keys moves
+the hash, and `harness/runner.lua`'s invariants now check the mods block (sorted, no key
+outside the order array, integral) and the Boomtown-raised slot cap. The verbs are real
+dispatch: uppercase `I`/`E`/`L` per A.11.2, case-sensitive, routed to Investment
+(one outstanding, 25/block, pays 180% at the first Levy tick at or after exec + 450),
+Scorched Earth (600/block to the up-to-three deepest enemy units in the lane, S10 ties,
+300-tick cooldown, fizzle-not-spend on an empty lane) and Ley Line (own-half units to a
+second lane at the same x, ascending id, per-unit supply fit, 450-tick cooldown). A side
+that does not own the card fizzles the verb exactly as every side did in M1.
+
+**New named hooks, and why each earned its place** (the M3 HOOKS block at the bottom of
+`Sim.lua` is the full current list):
+
+| hook | card | why no existing site fit |
+|---|---|---|
+| `levyTickPoints(sim, sd) -> pts` | Golden Age, Granary Reserves, Hex | phaseIncome read `sd.chan` directly; a dynamic levyTick source must join that sum BEFORE its one clamp |
+| `levyFlatPoints(sim, sd) -> flat` | Trade Routes, Surplus | same, for the levyFlat channel |
+| `unitCostPoints(sim, sd, lane, t) -> pts` | Late Levy | the time gate must join the unitCost sum inside `unitCostOf`; the existing `deployCost` hook is post-clamp and using it would touch the quantity twice (S3) |
+| `bldImmune(sim, owner, b) -> bool` | Deep Foundations | a target FILTER: no points-hook can veto a hit. A true verdict loses the hit - no retargeting, and a Bow's target slot is consumed |
+| `onStructHit(sim, sd, es, u, b, pre)` | Ward | the reflect needs the per-hit PRE-mitigation figure, which only exists inside `unitDamage`; `onExtraDamage` (its originally listed site) sees only aggregated pend |
+
+Raiding Party's Bypass SKIP is native `Sim.lua` geometry rather than a hook - once
+`ln.bypass` holds a building id, this side's Horses ignore that candidate in movement and
+targeting; 0 (all of M1) matches nothing. The trigger that consumes the flag is
+card-conditional and lives in `Mods` at `onResolveStart`.
+
+**Affinity and the wheel.** Read Q3 before touching this: THERE IS NO DOMINANT TYPE.
+The ruling kills the label - "there is no tie because there is no label" - so the sim
+stores the loadout's affinity VECTOR only long enough to compute the bilinear edge
+`sum(m[i] * t[j] * W[i][j])` in [-225, +225] at Sim.new, writes it into `sd.wheelNum`
+(one side positive, the other its exact negative), and discards the vectors. Nothing
+player-facing ever names a type. The multiplier is the floor-only integer form Rules.C
+documents, applied by `unitDamage` as the single final multiplier outside every clamp on
+EVERYTHING a unit deals - enemy units, buildings and the keep alike, per Q3's "a single
+final multiplier on damage dealt" (INTERPRETATIONS 9; damage no army dealt - towers, the
+Trap Pit, Ward's reflect - carries no wheel, because a tower has no type to read an edge
+from). Neutral exists and is reachable: the 3-3-3-3-3
+rainbow scores 0 against everything (the selftest proves it against two different pure
+opponents). Every card is pure 3/0 in its home archetype except **Granary Reserves,
+2 Fortress / 1 Boom** - the one split the documents force, because section 9's Turtle
+Bank must total 8F/7B with pure Boom (its own secondary) as its worst matchup, and the
+selftest pins both numbers (-120 against pure Boom, +15 against pure Swarm).
+
+**Timed effects across a pause: automatic, and verified rather than assumed.** Q11's
+rule is that every timed effect is denominated in SIM TICKS and the counter does not
+advance while halted. The sim clock is ACTIVE ticks (A.9) and `sim/Mods.lua` reads
+`sim.clock` and nothing else - no wall clock exists anywhere in `sim/` for a card to
+reach (grep 3's sibling, enforced by comptest) - so a pause is simply the absence of
+`tick()` calls and no card can tell it happened. The selftest states it as a check: a
+carded match mid-War-Drums-window, mid-Investment-countdown and mid-Hex-window, ticked
+in ragged chunks against one ticked straight, is bit-identical.
+
+**The goldens moved, together, deliberately.** Cards are ruleset content, so rulesHash
+changed - a hard compatibility break (A.11.1, G.4), every pre-M3 recorded log is
+invalid, and all four goldens were regenerated in this one coherent state, `GOLDEN_SUITE`
+from the full 1,000-log milestone fuzz:
+
+| golden | pre-M3 | **M3 part 1** |
+|---|---|---|
+| `GOLDEN_RULESHASH` | 333968378 (`5iu3ne`) | **767294897 (`cotsj5`)** |
+| `GOLDEN_STATE` (hand.iblog, tick 260) | 1822913174 | **1939244196** |
+| `GOLDEN_LOGDIGEST` (same log) | 1455081792 | **1455081792 - unchanged** |
+| `GOLDEN_SUITE` (1,000-log milestone) | 2005649413 (`640zp`) | **1912059909 (`me2v9`)** |
+
+**Cardless matches are byte-identical to M1 in GAMEPLAY, and here is the reasoning, not
+just the claim.** With two empty loadouts `Mods.install` returns before touching the sim:
+every hook stays nil, so every new call site short-circuits on the same `if
+sim.hooks.x` pattern M1 shipped; the only new unconditional work on the tick path is the
+Bypass compare against `ln.bypass`, which is 0 in every cardless match and matches no
+entity id; and no state field was added or reordered, so `Hash.state`'s walk is
+layout-identical. Therefore every gameplay integer of a cardless match - positions, HP,
+banks, counters, verdicts - is exactly M1's, which is why `GOLDEN_LOGDIGEST` did not
+move (the digest covers commands only, and hand.iblog's commands are untouched) and why
+selftest section 3 still asserts the same spears on the same 4 HP at the same tick 970.
+`GOLDEN_STATE` and `GOLDEN_SUITE` DID move, for exactly one reason: `Hash.state` folds
+`rulesHash` in as its first term, so every stateHash in the tree shifts when the ruleset
+grows. Same match, new signature - which is correct, because a pre-M3 client and an M3
+client must refuse each other at the handshake rather than agree until the first card.
+(`SUITE` also moved because the generator changed: see below.)
+
+**The milestone fuzz now plays cards.** `harness/gen.lua` deals a random legal 5-card
+loadout to both sides in HALF its legal sample (and half the chaos sample, whose random
+`I`/`E`/`L` atoms therefore exercise both real dispatch and the no-card fizzle), and its
+affordability model reserves unit Levy at the unitCost clamp CEILING - Discord ended the
+era when every cost modifier in reach was a discount, and an over-reservation only ever
+issues fewer orders. The legal pass still asserts ZERO fizzles, over discounts, free
+deploys, surcharges and all: the 1,000-log run above is 0 desyncs, 0 legal-pass fizzles,
+0 invariant failures, with the four arrival patterns, the mirror and the interleaved
+fine pass all applied to carded matches. The generator issues no verb atoms itself
+(their legality windows are a policy question); the chaos pass throws them.
+
+**Tests added** (`harness/selftest.lua`, sections 12-21, 333 new checks - 638 total,
+was 305; **641 since the M3 fix pass** below reworked the wheel-scope and Investment
+pins - one section per card CLASS): the card table, the pool shape and the
+hash-coverage probes; loadout validation; every `[Stat]` channel moved and clamped at
+its number, including the D.2 saturations; the economy rules (Trade Routes' ramp and
+ceiling, Surplus before income, Granary Reserves' half-cap conditional, Golden Age
+latching at exactly 700 earned on the Levy tick at 2380 and never unlatching, Hex's
+[0,200) window recurring at 400); the S5 arbitration head-to-head (Endless Ranks
+outranks Conscription by card id, one free unit per order); deaths and razings (Blood
+Tithe with and without the repel overlap, Plunder replacing 75 Spoils with 120 on a
+100-cost granary,
+Counterwall accumulating 20 and paying 4 on the clear transition, War Drums stamping
+kill-tick + 200); the board rules (Deep Foundations immune only while the front slot
+holds, Rapid Masonry's 45-Levy rebuild consuming the mark, Watchfires reaching 480,
+Ward reflecting 4 per 8 dealt in lockstep, Miasma's 8 only past the midline); all three
+verbs' execute, fizzle, clamp, cooldown and cap paths; Raiding Party's bypass board
+(horse past the wall at 1940, spear still parked at 1240, no horse-sized dent in the
+wall); the wheel at maximum edge on every target class (spear-into-horse 24 -> 25,
+horse 44 -> 41 on the -6% side and 44 -> 46 on the +6% side, and - at horse scale,
+where floor cannot hide it - the halved 22 becoming 23 into a palisade and into the
+keep), at zero (mirror, rainbow) and at Q3's own -120 worked example; the information cards proven field-identical no-ops;
+the ragged-chunk pause check; and a carded determinism miniature - 8 random-loadout
+matches through all four arrival modes plus the mirror, and each of the 40 cards ALONE
+through an arrival replay with invariants.
+
+**What part 1 leaves for part 2, exactly.**
+
+1. **The perception effects** of Divination, Omen, Veil and the Shrine pulse, in
+   `fog/Fog.lua` and the policy view, consuming `Mods.INFO_EFFECTS` and the hashed
+   `SHRINE_PULSE_*` constants. Omen needs its own temporal channel (fog open item 16).
+   Their sim-side existence - ids, affinity, class, hashing, loadout legality, the
+   selftest that proves them field-inert - is complete and must not move.
+   **DONE in part 2 - the section below.**
+2. **The M3 gate tooling**: Part E's milestone asks for each of the 40 cards
+   individually and 200 random 5-card loadouts per side run through M1's bit-identical
+   test at FULL length on BOTH interpreters, plus the clamp-saturation report (every
+   channel's summed value across the 200, naming the cards that saturate together).
+   The selftest carries the fast miniature of the first half; the fuzz carries ~500
+   carded full-length logs; the dedicated gate script and the report do not exist yet.
+   **DONE in part 2 - `tools/m3.sh`, results below.**
+3. **Sim-vs-policy interaction**: none of the seventeen M2 lines knows cards exist.
+   Whether M2's roster should play loadouts is an M3-part-2 / doc-owner question
+   (open item 24). **Still with the doc owner; part 2 changed nothing here.**
+
+---
+
+## M3 part 2 - the PERCEPTION half and the gate (2026-08-21)
+
+Part 1 put the forty cards in the sim; part 2 is everything the four
+*information* cards and the Shrine's reveal pulse actually DO - which is
+render/policy-side by design (Ruling 1 shares all state; A.5 grep 1 keeps
+`sim/` unable to ask what is visible) - plus the milestone's own gate script.
+The EFFECTS block in `fog/Fog.lua` consumes `sim/Mods.lua`'s declared
+`INFO_EFFECTS` handoff, resolves the three cards through the hashed
+`Rules.CARD_BY_KEY` and the Shrine by catalogue key, and REFUSES TO LOAD on a
+handoff entry it does not model - an under-modelled information source must
+fail the build, not silently render as fog. **Nothing in `sim/` moved:
+`rulesHash` is still `767294897` (`cotsj5`), and all four goldens are exactly
+part 1's.**
+
+**What each effect is, as shipped** (doc section 6 and the D.3 wordings; every
+line below is pinned by a named check in `tools/fogtest.lua` 16-21):
+
+- **Divination** - all COMPLETED enemy buildings, slot and identity,
+  continuously, every lane, ignoring both the section rule and the front-slot
+  shield. NEVER HP - there is no HP in the return and no field in the scry
+  memory layer an HP could travel in - and never under-construction, so a
+  rebuild appears on the tick it completes and a razed wall vanishes at the
+  next observation ("including rebuilds", and how a diviner learns a wall
+  fell). Beaten by Veil absolutely: the scry comes back EMPTY and the memory
+  layer is not stamped at all. Self-announcing: the watched side's `scried`
+  mark is up from tick 0.
+- **Omen** - enemy deploy orders surfaced as issued: LANE AND COUNT ONLY,
+  never unit type (proved by indistinguishability: five Horses and five Bows
+  produce bit-identical signals). It is a FILTER over the shared command
+  bucket, never new data: an atom is surfaced while it is pending and the
+  clock is within one ORDER_DELAY of its exec tick - the doc's "one
+  order-delay before it takes the field", derived from the hashed exec field
+  without touching wire metadata. The count surfaced is clamped exactly as
+  `execDeploy` will clamp it. The window closes when the order executes; no
+  omen signal is ever remembered (a stale wave warning is a ghosted stack
+  wearing a bell). Under `full` vision the same channel fills with no card -
+  the queue is on every client under Ruling 1, so the upper bound stays a
+  strict superset. Two stated under-estimates: a resend that only just made it
+  surfaces late, and an atom issued with a padded delay surfaces from
+  `exec - ORDER_DELAY` rather than its true issue tick (under the M2 driver,
+  which issues at minimum delay, the window IS the issue tick exactly).
+- **Veil** - THE PRECEDENCE RULE, one sentence: **Veil beats every route that
+  does not put a body there - Divination's scry, the Shrine pulse's occupancy
+  scan, and the Watchtower's remote section light - and loses to physical
+  presence: a unit of yours standing in the section, and contact.** Veil
+  conceals BUILDINGS only, never units; it is the one non-announcing source
+  (no mark, in either direction); and suppression is ABSENCE, not a recorded
+  zero - a veiled scry/scan never stamps its memory layer, so knowledge earned
+  through a body is never erased by a lying refresh, and "a wall you have
+  touched that the scry refuses to show" remains the sanctioned inference
+  route ("I am against Veil"). See open item 25 for the one place the two
+  binding texts diverge and this reading had to choose.
+- **Shrine reveal pulse** - while a completed Shrine of yours stands (under
+  construction does not pulse; the effect dies with the building and joins a
+  window already in progress), live at tick t iff
+  `t mod SHRINE_PULSE_EVERY < SHRINE_PULSE_TICKS` (the hashed 200/30, anchored
+  at tick 0 exactly like Hex's schedule): ALL enemy units in ALL lanes at full
+  detail, plus enemy building OCCUPANCY only - not identity, not HP, and
+  scaffolding counts as occupancy because it occupies the slot. The scan
+  freezes between pulses (doc section 4 verbatim), never lights a section and
+  never marks ground explored (open item 27), never touches the enemy keep's
+  remembered HP (the keep is not a building), and is self-announcing: the
+  scanned side's `scanned` mark is up exactly while the window is.
+
+**The memory rule the pulse and the scry forced, and it is the load-bearing
+design decision of part 2: the store is now THREE PARALLEL LAYERS, and no
+layer's write may ever touch another.** Full sight (the section rule and
+contact) writes slot + identity + HP + done, exactly as before. Divination
+writes identity + tick. The pulse writes occupancy + tick. A scry that
+recorded an HP it cannot see would be fabricating evidence - worse than fog -
+so partial sight is never promoted into the full record (`fogtest` section 20
+asserts the full layer stays untouched through a scry-and-scan story).
+What a consumer BELIEVES is composed in exactly one place,
+`Fog.believedBuilding`: **the freshest layer wins; a tie goes to the layer
+that knows more (full > scry > occ); an empty scry never beats a same-tick
+occupancy scan** (scaffolding satisfies both "nothing completed stands there"
+and "something stands there", and the scan is the one that saw it). Enemy
+UNITS are still never remembered, from ANY source: what a pulse showed of an
+army is gone when the window shuts. Everything above holds the existing
+freeze rules: a frozen full record still shows a razed wall until a fresher
+layer says otherwise, and a fresher occupancy ping of EMPTY out-votes a stale
+record, however confident.
+
+The policy view grew the matching fields, filled only through `fog/Fog.lua`:
+per foe lane `omen`/`omenN` (the temporal channel, fog open item 16 - CLOSED)
+and `frontOcc`/`backOcc` (believed occupancy, which can be 1 with `b` 0 after
+a scan); per side the Q9b marks `scried`/`omened`/`scanned` on `me` and the
+`scan` flag on `foe` (my own pulse is rendering their board right now, so a
+carded line can tell confirmed-empty from dark). None of the seventeen M2
+lines reads any of them (open item 24 gates that), so every M2 number in this
+README is unchanged by part 2 - measured, not assumed: `lua sweep/verdict.lua 6
+500000 fog` on the part-2 tree reproduces Finding 10's gate column exactly
+(426 s / 76.1% / 80.1% / 16.8pp, still RED on family spread, which is open
+item 4's question and not this pass's), and `sweep/determinism.lua 40` passes
+under both regimes with the grown memHash.
+
+**Tests.** `tools/fogtest.lua` grew from 464 to **667 checks** - a section per
+card (16 Divination, 17 Omen, 18 Veil incl. the precedence rule route by
+route, 19 the pulse), the three-layer composition pinned case by case (20),
+the tower/card compositions from both seats plus carded memory determinism
+(21), and **section 22, the MUTATION suite: a copy of `fog/Fog.lua` with one
+effect surgically disabled is loaded from /tmp (never the tree) and the named
+checks that effect carries must flip** - divination-off, omen-off (its raw
+`pendingDeploys` filter must keep working, proving the mutation surgical),
+veil-off, pulse-off, and watchtower-off, each with a needle-count assertion so
+a refactor cannot silently defuse the mutation. All 667 pass under Lua 5.5
+and LuaJIT 2.1.
+
+**The M3 gate: `tools/m3.sh`** (a sibling of `ci.sh` and `m2.sh`; its header
+argues why, and `tools/m3gate.lua` is the implementation). Part E's milestone
+verbatim, three steps and a verdict:
+
+1. **Each of the 40 cards individually**, full 6,000 ticks, fixed seeds, in
+   TWO pairings - both run through straight/replay/REORDERED-queueing/MID-RUN-
+   ARRIVAL and the generator's own interleaved run as a fifth pattern:
+   * *card-vs-empty* - the minimal delta from the proven M1 game (a desync
+     implicates the one card) and the ASYMMETRIC install case, where a
+     side-biased Discord write or hook registration would hide; A.2-mirrored
+     to prove it reads the same from both seats.
+   * *card-mirror* - two live copies of one mechanism: S5 arbitrating with
+     itself, Discord crossing both ways, the wheel edge at its exact mirror
+     zero, every hook registered twice.
+   The three VERB cards get seeded verb atoms INJECTED (owner side plus a
+   no-card fizzle from the other seat), because the generator deliberately
+   issues no verbs and a verb card whose verb never fires would pass
+   vacuously; injected logs are re-trimmed to their new true end so all four
+   arrival modes see the identical atom set (which costs those three cards
+   the fifth pattern - the generator's own run did not contain the injected
+   atoms, so its hash is dropped rather than compared against a different
+   match).
+2. **200 random legal 5-card loadouts on BOTH sides** from a frozen seed
+   schedule (base 930000), full length, the same four patterns, zero
+   mismatches allowed, every 8th pair A.2-mirrored, verbs injected wherever a
+   drawn side holds a verb card (115 of the 200 pairs did).
+3. **The clamp-saturation report** over the same 200 drawn pairs: per channel,
+   the per-side summed potential - the STATIC sum measured off the installed
+   sim's own `sd.chan` (Discord's cross-write included) plus the maximum the
+   loadout's conditional/time-varying cards can add, derived from the hashed
+   card table - against the Q4 clamp, with every saturating combination named
+   and counted. `slotCap` is compared as the ABSOLUTE `SLOT_CAP + points` the
+   sim itself clamps. Plus the **applied-value probe**: every drawn side that
+   saturates `unitCost` (statically, or past Late Levy's gate) deploys real
+   Spears at tick 25 and tick 3,005 on a fresh sim of its own pair, and the
+   cost the sim charged must equal the tool's own independently clamped
+   arithmetic - the step observes the sim APPLYING the clamp, with the exact
+   per-channel clamp arithmetic pinned by selftest section 13. (The step's
+   first revision instead clamped a number inside the tool and tested it
+   against the same bounds - "0 of 6,000 outside their clamp" would have
+   printed 0 with `Sim`'s `clampCh` deleted; the probe goes red under exactly
+   that mutation, 11 failures on this draw.)
+4. **Verdict** with hard exit codes, and the caveats printed on the green
+   path: the perception effects are proved by `fogtest` inside the M1 gate,
+   not here; cross-machine needs a second machine; balance is M2's question;
+   and a green run proves the cards compute IDENTICALLY on both clients, not
+   that they compute what D.3 says - a card wrong the same way on both
+   machines sails through every hash, and D.3 conformance is the selftest's
+   job (one exact pin per card mechanism, inside `ci.sh`).
+
+**Measured results, shipped tree** (`sh tools/m3.sh 200` and the same under
+`"$(which luajit)"`; the two interpreters' outputs agree hash for hash):
+
+| step | Lua 5.5 (native integers) | LuaJIT 2.1 (5.1 semantics, doubles) |
+|---|---|---|
+| cards: 80 matches (40 x 2 pairings), 360 runs | **SUITE HASH 116896602 (`xlhzu`)**, 0 failures | **116896602** - identical |
+| loadouts: 200 matches, 825 runs | **SUITE HASH 448422185 (`ez8rt`)**, 0 failures | **448422185** - identical |
+| clamp: applied-value probe (19 sides: 11 saturating + 8 controls, 2 skipped for S5) | **every charged cost = clamped arithmetic** | **byte-identical report** |
+| verdict | **M3 GATE: GREEN (3/3)** | **M3 GATE: GREEN (3/3)** |
+
+The suite hashes fold every run's terminal stateHash, terminal tick, logDigest
+and accept tally, so "identical" above means every integer of every one of the
+1,185 runs agreed across the two numeric models. 6 of the 80 card matches and
+22 of the 200 loadout matches ran the full 6,000 ticks; all 280 terminated.
+
+**Where saturation actually occurs, from the report** (all of it LEGAL - D.2
+calls saturation the structural replacement for the old headcount cap - and
+all of it clamped: the report's job is the loadout UI's "channel saturated"
+warning population):
+
+| channel | clamp | sides touched (of 400) | min | max | saturating |
+|---|---|---|---|---|---|
+| unitCost | [-20, 40] | 173 | -40 | +15 | **13 low** (breedingPits+lateLevy x8, breedingPits+chaff x3, chaff+lateLevy x2) |
+| unitDmg | [-35, 35] | 162 | 0 | +70 | **23 high** (every pair drawn from noRetreat / tideOfBodies / vanguard / warDrums) |
+| levyTick | [-30, 40] | 164 | -30 | +60 | **10 high** (goldenAge+pressGang x6, goldenAge+granaryReserves x4) |
+| march | [-40, 50] | 89 | 0 | +65 | **2 high** (raidingParty+scentTrails) |
+| all others | - | - | inside | inside | **0** |
+
+The Raider damage stack and the Swarm cost stack saturate exactly as D.2
+warned (its Vanguard+War Drums and Chaff+Breeding Pits examples both occurred
+in the draw - 3 sides each - and every occurrence is inside the counts above);
+`goldenAge+pressGang` at +60 over a +40 clamp is the same phenomenon on
+levyTick that D.2 did not list, worth a line in the loadout UI's warning
+table. `repelRefund` is untouched because no card writes it (Counterwall pays
+through its own accumulator, not the channel).
+
+**`tools/ci.sh` stays the fast pre-commit gate and is unchanged in meaning**:
+still GREEN at 1,000 logs under both interpreters on part 1's goldens
+(`SUITE HASH 1912059909`), with `fogtest`'s 667 checks now inside it. `m3.sh`
+is its own entry point, run to certify the milestone.
+
+---
+
+## M3 fix pass - closing the adversarial review (2026-08-21)
+
+An adversarial review signed off the determinism half of M3 (every gate
+reproduces under both interpreters) and required four fixes before the
+milestone closes. All four are landed. **Nothing executable in `sim/` moved -
+the one `sim/` file touched is `Rules.lua`, comments only - so `rulesHash` is
+still `767294897` (`cotsj5`) and all four goldens are exactly part 1's.**
+
+1. **The wheel-on-structures contradiction: the CODE was right; the record and
+   the test were wrong, and both are fixed with no golden moving.** The code
+   has applied the wheel to everything a unit deals - units, buildings, the
+   keep - since part 1, and Q3's normative sentence backs it ("applied as a
+   single final multiplier on damage dealt"; Q12 repeats "6% damage dealt at
+   maximum focus").
+   But `Rules.lua` INTERPRETATIONS 9 said "UNIT damage only", this README
+   echoed it, and the selftest's "proof" passed only by floor coincidence at
+   spear scale: the spear's halved structure figure is 8, and
+   `floor(8 * 1.06)` is 8 again, so the check could not tell the two readings
+   apart. A favourable matchup razing structures ~6% faster is coherent with
+   Q12's quiet global edge. INTERPRETATIONS 9 is rewritten to the Q3 reading,
+   the README echo above is corrected, and the selftest now pins the scope at
+   HORSE scale, where floor cannot hide it: a max-edge horse deals **23** per
+   resolve to a palisade and to the keep (not the unwheeled 22), and **46**
+   into a spear (44 unwheeled) beside the -6% side's 24 -> **22** - every
+   number verified by driving the sim under both interpreters before pinning.
+2. **Investment's payout was under-pinned.** The selftest asserted
+   `earned >= e0 + 90`, which a payout mutated to 360% also satisfies - the
+   review proved the doubled payout passed every gate. The check is now EXACT
+   in the neighbouring Plunder check's style: earned minus the counted
+   window's own income (13 Levy ticks at 10 apiece) must equal 90 to the
+   Levy. Re-running the review's own mutation against the new check goes red
+   ("got 180, want 90"), the only failure of 641.
+3. **The clamp gate's "effective values outside their clamp: 0 of 6,000" line
+   was a tautology** - `tools/m3gate.lua` clamped a number itself and tested
+   it against the same bounds, so it printed 0 even with `Sim`'s `clampCh`
+   deleted. Replaced by the applied-value probe described in step 3 above,
+   which deploys real Spears and compares the charged cost against
+   independently clamped arithmetic; under exactly that `clampCh` mutation
+   the probe fails 11 times on this draw and the step exits red.
+4. **Prose arithmetic:** "Plunder replacing 67 Spoils with 120" was palisade
+   math (`floor(90 * 75%)`) quoted against the check's 100-cost granary
+   fixture; the correct replaced figure is **75**, and the README line and
+   the selftest comment now say so. The assertion itself was already exact.
+
+`tools/m3.sh` additionally states on its green path the caveat the review
+asked for: **a green M3 proves the cards compute IDENTICALLY on both clients,
+not that they compute what D.3 says** - a card wrong the same way on both
+machines sails through every hash - and D.3 conformance is the selftest's job.
+
+**The one accepted deviation, stated rather than implied: open item 26.**
+Watchfires' Q9b REVEAL half ("reveal their lane out to that range") is
+UNSHIPPED, because `IDLE_BATTLE_FOG.md` - later and binding - restates Q9b's
+table without that row; the RANGE half is live and pinned (the tower reaches
+480), and `fog/Fog.lua`'s tail block names the gap. M3 closes carrying
+exactly this one known deviation from D.3/Q9b, pending the doc owner's
+ruling on open item 26.
+
+Post-fix numbers, identical under both interpreters: selftest **641** checks
+(was 638), fogtest **667**, `ci.sh 1000` green on unchanged goldens
+(`SUITE HASH 1912059909`), `m3.sh 200` green 3/3 with the cards/loadouts
+suite hashes unchanged (`116896602` / `448422185` - the fix touched no sim
+arithmetic and no gate seed).
+
+---
+
 ## Where this sits in the build order (Part E)
 
 - **P** - the Probe. Half a day in a real raid, off the critical path, calibrates every rate
@@ -2117,6 +2635,21 @@ and `tools/comptest.sh` 0 failures over both.
 - **M3** - all 40 modifiers with the S1-S10 stacking machinery, still headless. **The second
   risk.** M1's bit-identical test must still pass for each card alone and for 200 random
   5-card loadouts per side. The hook points at the bottom of `Sim.lua` are where they land.
+  **Status: DONE and GREEN, in two parts.** Part 1 (the sim side): the hashed card table,
+  loadouts, stacking, all seventeen `[Rule]` runtimes including the verbs, and the wheel;
+  the M1 gate at 1,000 logs (half carded) under both interpreters on the regenerated
+  goldens. Part 2 (the perception side and the gate): Divination, Omen, Veil and the
+  Shrine pulse live in `fog/Fog.lua` and the policy view, `tools/fogtest.lua` at 667
+  checks including a mutation suite, and **`tools/m3.sh` runs Part E's milestone verbatim
+  - each card alone in two pairings, 200 random dual loadouts, the clamp-saturation
+  report - GREEN 3/3 under both Lua 5.5 and LuaJIT with bit-identical suite hashes**
+  (cards `116896602`, loadouts `448422185`; both M3 sections above), and the
+  adversarial review's four required fixes are landed (the M3 fix pass section). **The
+  milestone closes with exactly ONE accepted deviation, named rather than implied:
+  open item 26 - Watchfires' Q9b reveal half is unshipped because the binding fog doc
+  omits the row; its range half is live and pinned.** What M3 does NOT
+  include, by open item 24: the post-M3 BALANCE re-measure, which needs the doc owner to
+  say which roster and regime judge it.
 - **M4** - two sims in one client through a fake lossy transport; rollback; `Q` full-log
   replay from tick 0.
 - **M5** - first playable over the wire. `OPEN`/`JOIN`/`S`/`C`/`H`, party scope.
@@ -2132,13 +2665,19 @@ and `tools/comptest.sh` 0 failures over both.
 
 ## Open items for the decisions-doc owner
 
-Eighteen things need a ruling or an acknowledgement in `dev/docs/IDLE_BATTLE_DECISIONS.md`
-or in `dev/docs/IDLE_BATTLE_FOG.md`. Items 1 and 8 are closed. Item 2 came out of M1 and
-does not block it - the implementation has chosen and recorded a defensible answer, in
-`Rules.lua`'s INTERPRETATIONS block. **Items 3 to 12 came out of M2. Item 3 is the one that
-blocks the milestone, and it asks Part E to say something it never said rather than to
+Twenty-six things need a ruling or an acknowledgement in `dev/docs/IDLE_BATTLE_DECISIONS.md`
+or in `dev/docs/IDLE_BATTLE_FOG.md`. Items 1, 8, 13 and 16 are closed. Item 2 came out of
+M1 and does not block it - the implementation has chosen and recorded a defensible answer,
+in `Rules.lua`'s INTERPRETATIONS block. **Items 3 to 12 came out of M2. Item 3 is the one
+that blocks the milestone, and it asks Part E to say something it never said rather than to
 change a number. Items 13 to 17 came out of implementing `IDLE_BATTLE_FOG.md` and three of
-them are about that document rather than about the decisions doc.** They are stated here
+them are about that document rather than about the decisions doc. Items 20 to 24 came out
+of M3 part 1: every one is implemented under a recorded interpretation
+(`Rules.lua` INTERPRETATIONS 13-28) and none of them blocks, but four are places where
+two normative sentences disagree and the doc should pick. Items 25 to 27 came out of M3
+part 2 - the perception effects - and none blocks either: each is implemented under a
+recorded reading, pinned by a fogtest section, and cheap to overturn; item 24 is now the
+only thing between M3 and a balance measurement.** They are stated here
 rather than edited into either document because the documents are the authority and this
 directory is not.
 
@@ -2428,7 +2967,19 @@ directory is not.
     break** (checklist item 5). The ruling needed is whether to keep it as a selector, give
     it a section-denominated successor, or retire it at the next deliberate break.
 
-16. **FOG: the three M3 information sources are named but not specifiable yet.** Section 6
+16. **CLOSED BY M3, IN TWO HALVES, AND IMPLEMENTED.** The pulse cadence landed in part 1
+    as the hashed `SHRINE_PULSE_EVERY = 200` / `SHRINE_PULSE_TICKS = 30` (D.2's own
+    correction of "every 20 s for 3 s" into sim ticks), and part 2 implemented all four
+    sources in `fog/Fog.lua`'s EFFECTS block - including Omen's own TEMPORAL channel into
+    the policy view (`foe.lanes[l].omen` / `omenN`, lane and count only, a filter over the
+    shared command queue), which is exactly the channel this item said the section model
+    could not carry. `tools/fogtest.lua` sections 16-22 pin every rule and mutation-test
+    each effect. The "strict under-estimate in four places" caveat is retired from
+    `fog/Fog.lua`'s tail block; what remains outside the model is named there and in open
+    items 19c, 25 and 26. The original text follows so a reader of the earlier version
+    does not go looking.
+
+    ~~**FOG: the three M3 information sources are named but not specifiable yet.**~~ Section 6
     lists Shrine's reveal pulse (*"Periodically, briefly"* - no cadence, no duration),
     Divination and Omen. Two of them fit the section model; **Omen does not fit it at all**
     - *"enemy deploy orders surfaced as they are issued: lane and count only"* is TEMPORAL
@@ -2573,6 +3124,113 @@ directory is not.
       anything in a tower's range is usually in the observer's own half and free -- but not
       always, and the renderer will have to answer it in M7 anyway.
 
+20. **M3: Q4 S5 and D.3's Swarm note give two different scopes for "one free deployment",
+    and Conscription's own wording contradicts one of them.** S5 says at most one free
+    effect fires "per EVENT"; the Swarm note says "per DEPLOY ORDER"; and Conscription's
+    card text promises "the 3rd, 6th, 9th... costs 0", which a 9-unit batched order can
+    only honour under the per-event reading (it contains the 3rd, 6th AND 9th). The note
+    is the more specific gloss and the one that bounds the Swarm cost stack, so the
+    implementation follows it: at most ONE free unit per deploy order, whichever effect
+    fires first in ascending card id, and a blocked Conscription entitlement is LOST
+    rather than deferred (deferral would need a pending-freebie mechanism no document
+    describes). `Rules.lua` INTERPRETATIONS 15/16, pinned by selftest section 15. **The
+    ruling needed is one sentence: is S5's event the deploy order or the individual
+    unit?** A 9-spear order currently costs 80, not 60.
+
+21. **M3: Scorched Earth's "Structures take the standard x0.5" is dead wording.** D.3
+    defines its targets as "the up to three enemy UNITS in that lane nearest your own
+    keep", so no structure can ever be hit and the sentence has nothing to apply to. It
+    is implemented as written - units only, the clause inert - and recorded
+    (INTERPRETATIONS 18). If the intent was for the burst to also strike buildings or
+    the keep in that lane, that is a different card and needs a target rule (which
+    slots? before or after the units?), a ruling, and a compatibility break.
+
+22. **M3: the per-card affinity splits are unspecified for 39 of the 40 cards, and one
+    is forced.** Q3 rules that every card carries 3 points, 3/0 or 2/1 across at most
+    two types - and no document says WHICH cards split. The single derivable assignment
+    is Granary Reserves = 2 Fortress / 1 Boom: section 9's Turtle Bank must total 8F/7B
+    with pure Boom, "its own secondary", as its worst matchup, and only that split
+    reproduces both (INTERPRETATIONS 14; the -120 worked example is a selftest golden).
+    Every other card ships pure 3/0 in its home archetype, which is the conservative
+    reading, not a claim of intent. **If the design wants more hybrid cards - and Q3's
+    "2-2-1 is the most common build shape" suggests it pictured them - the owner should
+    assign the splits**; each one is a hashed data edit and a deliberate compatibility
+    break, cheap now and never cheaper.
+
+23. **M3: five smaller card wordings needed a reading each; all five are implemented,
+    recorded, and cheap to overturn.** (a) Counterwall's "that lane was last clear of
+    enemy units" is read as the WHOLE lane, both halves - a defender facing an enemy
+    that permanently garrisons its own half of the lane never gets the burst
+    (INTERPRETATIONS 17). (b) Ward's "pre-mitigation damage" is read as the attacker's
+    damage after its own unitDmg channel, before the structure multiplier and the wheel
+    (INTERPRETATIONS 22). (c) War Drums' "any kill by any source of yours" is read as
+    enemy UNIT deaths only - razing a building does not start the drums
+    (INTERPRETATIONS 21). (d) Investment "credited at that Levy tick" is read as the
+    first Levy tick at or after exec + 450, since exec + 450 is generally not on the
+    Levy grid (INTERPRETATIONS 19). (e) Miasma's "x < 1000" is read in the CARD OWNER's
+    frame, because the older doc says "inside your half of a lane" and the D.3 letter
+    would otherwise damage enemies in their own half instead (INTERPRETATIONS 23). Each
+    wants one confirming sentence in D.3; none blocks anything.
+
+24. **M3: which roster and which regime is the post-M3 balance re-measure judged on?**
+    M2's seventeen lines know nothing about cards, and Part E says every one of the 40
+    modifiers "will be judged against the same statistics". That needs either lines
+    that play loadouts (a large policy-layer work item with the same
+    calibrated-instrument questions as Findings 7-10) or a ruling that the M3 balance
+    pass is measured some other way (fixed archetype loadouts? the D.2 saturation
+    table?). Part 2 cannot start the measurement before this is answered; the sim side
+    is ready either way. **UPDATE, M3 part 2: the CORRECTNESS half of the milestone is
+    done and green (`tools/m3.sh`, the M3 part 2 section), the policy view now carries
+    every card-shaped field a carded line would need (omen channel, occupancy, marks,
+    scan flag), and no line reads any of them - so this item is now the ONLY thing
+    between M3 and a balance measurement. It still needs the ruling.**
+
+25. **M3 part 2: does Veil hide a building from a PLAIN unit-lit section? Two binding
+    sentences disagree and the implementation had to choose.** `IDLE_BATTLE_FOG.md`
+    section 6 says a veiled side's buildings are *"exempt from every disclosure route
+    ABOVE"* - its table's rows: Watchtower, Shrine pulse, Divination - which does NOT
+    include the base section rule of sections 2-3. D.3's card wording says *"suppresses
+    display of your buildings ... from EVERY SOURCE except contact reveal and
+    destruction"*, which read literally beats the section rule too - but that sentence
+    predates the section model (it was written against Q9a's disclosure-trigger list,
+    where "every source" could not have meant a rule that did not exist). **Implemented:
+    a body standing in the section SEES a veiled building; remote routes (tower light,
+    scry, scan) do not.** Reasons: it is the only reading satisfying the fog doc's own
+    scoping; the alternative deletes the base model's section rule for one card; and it
+    would reintroduce the grinding-a-wall-you-cannot-see absurdity that 3a exists to
+    remove, since a body at the wall is usually also in its section. The full argument
+    is at `veiled()` in `fog/Fog.lua`; `tools/fogtest.lua` section 18 pins both the
+    rule and the tower-light negation. **The ruling needed is one sentence: is the
+    section rule a "disclosure route" Veil beats?** (On "destruction" as D.3's second
+    exception: under this model a never-seen veiled building has nothing to disclose on
+    death - the slot reads empty either way - so destruction-as-disclosure is an M7
+    presentation question, like the self-announcement marks.)
+
+26. **M3 part 2: Watchfires' REVEAL half exists in Q9b and not in the binding fog doc,
+    and is implemented as the binding doc writes it - which is not at all.** Q9b's table
+    gives Watchfires *"your defensive buildings gain +50% damage range AND REVEAL THEIR
+    LANE OUT TO THAT RANGE"*; `IDLE_BATTLE_FOG.md` section 6 - later, binding, and
+    claiming to restate Q9b *"so the two cannot drift"* - has no such row. The RANGE
+    half is sim-side and landed in part 1; the reveal half is not modelled, and
+    `fog/Fog.lua`'s tail block names the gap. If the reveal is wanted, the doc owner
+    should add the row (and say whether it is section-scoped like the Watchtower or
+    range-scoped like nothing else in the model - the two differ exactly at a section
+    boundary); it is a small, isolated addition to the EFFECTS block once specified.
+
+27. **M3 part 2: the Shrine pulse does not light sections or mark ground explored, and
+    the fog doc's own phrasing can be read either way.** Section 6's row says the pulse
+    reveals *"every section of every lane, plus enemy building occupancy only (not
+    identity, not HP)"*; Q9b's row says *"all enemy units in all lanes at full detail,
+    plus enemy building occupancy only"*. The two compose only if "every section" means
+    the CONTENTS the other clauses grant - units at full detail, buildings at occupancy
+    - because a pulse that genuinely lit sections would stamp the FULL memory record
+    (identity + HP) through the section rule, contradicting "occupancy only" in the
+    same sentence. **Implemented: the pulse reveals units and occupancy, lights no
+    section, and leaves `seen`/exploration untouched** - same shape as contact being
+    entity-scoped, and pinned by `tools/fogtest.lua` section 19. If the intent was that
+    a scanned lane also counts as EXPLORED (the renderer's "you have seen this ground"
+    state), that is one sentence for the doc and a small change here.
+
 ## Cross-implementation verification (M1 verification pass)
 
 The suite has been run under **two Lua implementations with different numeric
@@ -2585,13 +3243,30 @@ is not a golden.
 their committed constants**, so a mismatch on a second machine goes red on its own rather
 than needing to be spotted in this table.
 
+**M3 values (current):**
+
 | from `sh tools/ci.sh 1000` | Lua 5.5 (native 64-bit integers) | LuaJIT 2.1 (Lua 5.1 semantics, doubles) |
 |---|---|---|
-| `rulesHash` (`Rules.rulesHash`) | 333968378 | 333968378 |
-| `stateHash` (`hand.iblog` at tick 260, `GOLDEN_STATE`) | 1822913174 | 1822913174 |
+| `rulesHash` (`Rules.rulesHash`) | 767294897 | 767294897 |
+| `stateHash` (`hand.iblog` at tick 260, `GOLDEN_STATE`) | 1939244196 | 1939244196 |
 | `logDigest` (same log, `GOLDEN_LOGDIGEST`) | 1455081792 | 1455081792 |
-| `SUITE HASH` (1,000 logs, `GOLDEN_SUITE`) | **2005649413** | **2005649413** |
-| selftest | 305 checks pass | 305 checks pass |
+| `SUITE HASH` (1,000 logs, half carded, `GOLDEN_SUITE`) | **1912059909** | **1912059909** |
+| selftest | 641 checks pass | 641 checks pass |
+| fogtest (M3 part 2) | 667 checks pass | 667 checks pass |
+
+| from `sh tools/m3.sh 200` (M3 part 2) | Lua 5.5 | LuaJIT 2.1 |
+|---|---|---|
+| `M3 CARDS SUITE HASH` (80 matches, 360 runs) | **116896602** (`xlhzu`) | **116896602** |
+| `M3 LOADOUTS SUITE HASH` (200 matches, 825 runs) | **448422185** (`ez8rt`) | **448422185** |
+| clamp report | byte-identical text | byte-identical text |
+
+These two M3 suite hashes are not committed goldens (no file asserts them --
+they certify a milestone rather than guard a commit); they are recorded here so
+a second machine's `sh tools/m3.sh 200` is a mechanical diff.
+
+*The pre-M3 record, superseded when the forty cards entered the hashed ruleset
+(regenerated together on 2026-08-21): rulesHash 333968378, stateHash 1822913174,
+logDigest 1455081792, SUITE HASH 2005649413, 305 checks.*
 
 **The `SUITE HASH` row is keyed to the 1,000-log milestone run and to nothing else.**
 `harness/fuzz.lua` only asserts `GOLDEN_SUITE` when the run is exactly the milestone
@@ -2621,5 +3296,5 @@ line when the interpreter is LuaJIT; the hashes above are the real evidence.
 
 **Still genuinely unproven: a second physical machine.** Everything above ran on
 one host (Darwin arm64). To close it, run `sh tools/ci.sh 1000` on another
-machine - ideally the Windows gaming PC - and confirm `SUITE HASH 2005649413`
-and `rulesHash 333968378`. Different CPU, different OS, same numbers.
+machine - ideally the Windows gaming PC - and confirm `SUITE HASH 1912059909`
+and `rulesHash 767294897`. Different CPU, different OS, same numbers.
