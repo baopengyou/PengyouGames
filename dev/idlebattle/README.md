@@ -161,7 +161,10 @@ produce. `tools/mechanics.lua` covers the comparison logic by hand-building term
 states. That is a real gap in the *milestone*, closed by a different test, and it is stated
 here rather than implied away.
 
-`rulesHash` at that time was `297242539` (`4wyxt7`). If you see a different value, the
+`rulesHash` at that time was `297242539` (`4wyxt7`); on 2026-08-13 the A.11.2 wire-letter
+ruling landed (contiguous `a`-`l` catalogue, uppercase `I`/`E`/`L` verbs) and it became
+`333968378` (`5iu3ne`), with every golden regenerated together in the same commit - the
+worked example of the paragraph below. If you see a different value than 333968378, the
 ruleset changed; that is a deliberate compatibility break (A.11.1) and every recorded
 match log from before the change is invalid - and `harness/selftest.lua` will go **red**
 until `GOLDEN_RULESHASH`, `GOLDEN_STATE`, `GOLDEN_LOGDIGEST` and `harness/fuzz.lua`'s
@@ -176,7 +179,7 @@ the same process, so it must never silently switch itself off.
    *statically* by `tools/comptest.sh` (which rejects every 5.2+/5.3+/5.4+ construct) plus
    *dynamically* under **LuaJIT 2.1, which implements 5.1 semantics with doubles**:
    `sh tools/ci.sh 1000 $(which luajit)` is **GREEN (5/5 steps, 1000 logs)** with
-   `SUITE HASH 1404498451`, bit-identical to the Lua 5.5 run. That is the numeric model
+   `SUITE HASH 2005649413`, bit-identical to the Lua 5.5 run. That is the numeric model
    WoW uses and it is the half that matters most. What is still missing is PUC 5.1 itself,
    whose standard library differs from LuaJIT's in a few corners; installing `lua5.1` and
    running `tools/ci.sh 1000 $(which lua5.1)` would close it completely.
@@ -2161,13 +2164,13 @@ directory is not.
    `git log -1 -- dev/docs/IDLE_BATTLE_DECISIONS.md` to establish who made it and confirm
    the boundary held. Nothing under `dev/idlebattle/` wrote it.
 
-2. **Building wire letters deviate from A.11.2.** A.11.2 assigns `a`-`l` to the
-   12-building catalogue *and* `i` to Investment and `l` to Ley Line. Those collide.
-   `Rules.lua` resolves it in favour of unambiguous kinds - the catalogue skips `i` and `l`
-   and runs `a b c d e f g h j k m n`. The alternative is to move the three verbs to unused
-   uppercase codes and keep `a`-`l` contiguous. **This needs to be ruled on before M5
-   freezes `proto`**, because the letter assignment is wire format and changing it
-   afterwards is a compatibility break.
+2. **Building wire letters - RULED AND LANDED (2026-08-13).** The owner delegated the
+   call; the ruling (recorded in `IDLE_BATTLE_DECISIONS.md` A.11.2) is CASE IS THE
+   NAMESPACE: uppercase kinds target a lane (units `S`/`H`/`B`, verbs `I` Investment,
+   `E` Scorched Earth, `L` Ley Line), lowercase kinds target a slot (the catalogue,
+   contiguous `a`-`l`). Implemented in `Rules.lua` and `Sim.lua` after the M2 sweep
+   finished; `rulesHash` moved to `333968378` and the goldens were regenerated together.
+   The decoder is case-sensitive; never `lower()` an incoming kind. M5 can freeze `proto`.
 
 3. **THE BLOCKING ONE, AND IT IS NOT THE ONE THIS README NAMED LAST TIME. Which
    INFORMATION REGIME is M2 measured under?** Part E's milestone gives four numbers and
@@ -2584,10 +2587,10 @@ than needing to be spotted in this table.
 
 | from `sh tools/ci.sh 1000` | Lua 5.5 (native 64-bit integers) | LuaJIT 2.1 (Lua 5.1 semantics, doubles) |
 |---|---|---|
-| `rulesHash` (`Rules.rulesHash`) | 297242539 | 297242539 |
-| `stateHash` (`hand.iblog` at tick 260, `GOLDEN_STATE`) | 353655329 | 353655329 |
+| `rulesHash` (`Rules.rulesHash`) | 333968378 | 333968378 |
+| `stateHash` (`hand.iblog` at tick 260, `GOLDEN_STATE`) | 1822913174 | 1822913174 |
 | `logDigest` (same log, `GOLDEN_LOGDIGEST`) | 1455081792 | 1455081792 |
-| `SUITE HASH` (1,000 logs, `GOLDEN_SUITE`) | **1404498451** | **1404498451** |
+| `SUITE HASH` (1,000 logs, `GOLDEN_SUITE`) | **2005649413** | **2005649413** |
 | selftest | 305 checks pass | 305 checks pass |
 
 **The `SUITE HASH` row is keyed to the 1,000-log milestone run and to nothing else.**
@@ -2618,5 +2621,5 @@ line when the interpreter is LuaJIT; the hashes above are the real evidence.
 
 **Still genuinely unproven: a second physical machine.** Everything above ran on
 one host (Darwin arm64). To close it, run `sh tools/ci.sh 1000` on another
-machine - ideally the Windows gaming PC - and confirm `SUITE HASH 1404498451`
-and `rulesHash 297242539`. Different CPU, different OS, same numbers.
+machine - ideally the Windows gaming PC - and confirm `SUITE HASH 2005649413`
+and `rulesHash 333968378`. Different CPU, different OS, same numbers.

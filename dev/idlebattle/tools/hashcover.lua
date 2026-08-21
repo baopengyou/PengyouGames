@@ -69,7 +69,7 @@ local function midgame()
   end
   q(1, 70, "a", 1, 1)      -- Trap Pit, lane 1 front
   q(2, 70, "a", 3, 1)      -- Trap Pit, lane 2 front
-  q(1, 320, "j", 2, 1)     -- Levy Post, lane 1 back
+  q(1, 320, "i", 2, 1)     -- Levy Post, lane 1 back
   q(2, 320, "d", 4, 1)     -- Granary, lane 2 back
   -- Symmetric deployments, so neither keep falls and the match is still live
   -- when the probes run. The probes need a NON-terminal state, otherwise the

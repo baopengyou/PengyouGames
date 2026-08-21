@@ -463,7 +463,7 @@ local function execCommand(sim, c)
   elseif c.cls == CLS_BUILD then
     execBuild(sim, sd, c)
   else
-    -- M3 verbs: i Investment, s Scorched Earth, l Ley Line. Until they exist a
+    -- M3 verbs: I Investment, E Scorched Earth, L Ley Line. Until they exist a
     -- verb is a defined no-op, counted as a fizzle so the hash still moves.
     if sim.hooks.execVerb then
       sim.hooks.execVerb(sim, sd, c)
@@ -1129,7 +1129,8 @@ end
 -- cmd = { side = 1|2, seq = n, tick = execTick, kind = "S"|"H"|"B"|<letter>,
 --         target = n, count = n, issueTick = n (optional) }
 -- `kind` is the wire atom's kind field: S, H, B deploy units; a building letter
--- builds; i, s, l are the M3 verbs. `target` is a lane 1-3 for units and verbs,
+-- builds; I, E, L are the M3 verbs (uppercase: case is the namespace, per the
+-- A.11.2 ruling). `target` is a lane 1-3 for units and verbs,
 -- a slot 1-6 for buildings. `issueTick`, when present, is the tick the order was
 -- clicked on, and the ORDER_DELAY window is enforced against it. Returns ok, err.
 --
@@ -1161,9 +1162,11 @@ function Sim:queueCommand(cmd)
     local bi = R.BUILDING_BY_LETTER[kind]
     if bi then
       cls, idx = CLS_BUILD, bi
-    elseif kind == "i" or kind == "s" or kind == "l" then
+    elseif kind == "I" or kind == "E" or kind == "L" then
+      -- A.11.2 ruling: verbs are UPPERCASE (case is the namespace - uppercase
+      -- targets a lane, lowercase targets a slot). Case-sensitive on purpose.
       cls = CLS_VERB
-      idx = (kind == "i") and 1 or ((kind == "s") and 2 or 3)
+      idx = (kind == "I") and 1 or ((kind == "E") and 2 or 3)
     else
       return false, "kind"
     end

@@ -482,10 +482,10 @@ So: verbs become `I` (Investment), `E` (Scorched Earth — `S` is Spear), `L` (L
 catalogue returns to a contiguous `a`–`l`. No collisions remain: uppercase holds `S H B I E L`,
 lowercase holds `a`–`l`. Costs zero bytes, removes the skip rule, and is self-documenting.
 
-*Implementation is deferred until the M2 sweep finishes, purely to avoid changing `rulesHash`
-underneath a running measurement — the letters are hashed, so editing them mid-sweep would
-invalidate the committed goldens. It must land before M5 freezes `proto`, and the decoder must
-be case-sensitive (never `lower()` an incoming `K`).*
+*Implementation LANDED 2026-08-13, after the M2 sweep finished (it was deferred so the hashed
+letters would not move underneath a running measurement). The catalogue is contiguous `a`–`l`,
+the verbs are uppercase `I`/`E`/`L`, the decoder is case-sensitive, and the goldens were
+regenerated together with the new `rulesHash 333968378`. M5 can freeze `proto` on this.*
 
 The atom did not need to change because v1 already got the hard part right. **The three Tier-3
 verbs Ruling 5 restored cost one letter each in the `K` field and nothing else** — this is the

@@ -343,8 +343,8 @@ sec("3  the hand-written log, asserted tick by tick")
 -- only cross-machine check off. A ruleset change is a deliberate act (G.4 makes
 -- it a hard compatibility break), so it must go RED until all three values are
 -- regenerated in the same commit -- the failure path prints the new numbers.
-local GOLDEN_RULESHASH = 297242539     -- 4wyxt7
-local GOLDEN_STATE = 353655329         -- stateHash of hand.iblog at tick 260
+local GOLDEN_RULESHASH = 333968378     -- 5iu3ne, wire letters per the A.11.2 ruling
+local GOLDEN_STATE = 1822913174         -- stateHash of hand.iblog at tick 260
 local GOLDEN_LOGDIGEST = 1455081792
 
 do
@@ -785,7 +785,7 @@ do
 
   local gate = fresh(36)
   grant(gate.sides[1], 5000)
-  q(gate, 1, 1, 0, "n", 2, 1)         -- caravan is card-gated until M3
+  q(gate, 1, 1, 0, "l", 2, 1)         -- caravan is card-gated until M3
   gate:tick()
   eq(gate.sides[1].slots[2], false, "a card-gated building was raised without the card")
   eq(gate.sides[1].cmdsFizzled, 1, "the card gate did not fizzle")
@@ -849,7 +849,7 @@ do
   ok = sim:queueCommand({ side = 2, seq = 1, tick = 30, kind = "S", target = 1, count = 1 })
   eq(ok, true, "per-sender sequencing is not per sender")
   -- The M3 verbs parse and fizzle, rather than being refused.
-  ok = sim:queueCommand({ side = 2, seq = 2, tick = 30, kind = "i", target = 1, count = 1 })
+  ok = sim:queueCommand({ side = 2, seq = 2, tick = 30, kind = "I", target = 1, count = 1 })
   eq(ok, true, "an M3 verb was refused at queue time")
   runTo(sim, 20)
   eq(sim.sides[2].cmdsFizzled, 1, "an M3 verb did not fizzle in M1")

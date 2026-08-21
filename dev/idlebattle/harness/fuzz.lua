@@ -383,11 +383,11 @@ print(string.format("SUITE HASH            %s   <- compare this between machines
 -- an arithmetic difference between this machine and the one that recorded it --
 -- which is precisely the failure the milestone exists to detect, and which no
 -- amount of intra-process comparison can see.
-local GOLDEN_SUITE_RULESHASH = 297242539
+local GOLDEN_SUITE_RULESHASH = 333968378
 local GOLDEN_SUITE_LOGS = 1000
 local GOLDEN_SUITE_SEED = 700001
 local GOLDEN_SUITE_CHAOS = 100     -- the chaos pass folds into stat.suite too
-local GOLDEN_SUITE = 1404498451     -- 879xv
+local GOLDEN_SUITE = 2005649413     -- 640zp, wire letters per the A.11.2 ruling
 local atMilestone = (NLOGS == GOLDEN_SUITE_LOGS and TICKS == Rules.C.MATCH_TICKS
   and BASE_SEED == GOLDEN_SUITE_SEED and EPOCH == Rules.C.SNAPSHOT_EPOCH
   and CHAOS == GOLDEN_SUITE_CHAOS and MIRROR == true and FINE == 25)

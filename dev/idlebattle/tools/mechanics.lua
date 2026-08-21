@@ -124,7 +124,7 @@ end
 -- ---------------------------------------------------------------------------
 do
   local sm = newRich()
-  local order = { { "a", 1 }, { "d", 2 }, { "b", 3 }, { "j", 4 }, { "c", 5 }, { "k", 6 } }
+  local order = { { "a", 1 }, { "d", 2 }, { "b", 3 }, { "i", 4 }, { "c", 5 }, { "j", 6 } }
   for i = 1, 6 do
     sm:queueCommand({ side = 1, seq = i, tick = 20 + i, kind = order[i][1],
                       target = order[i][2], count = 1 })

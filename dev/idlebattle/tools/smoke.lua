@@ -204,7 +204,7 @@ local function scripted(seed)
                         kind = kinds[Rand.range(r, 1, 3)],
                         target = Rand.range(r, 1, 3), count = Rand.range(r, 1, 9) })
     else
-      local letters = { "a", "b", "c", "d", "e", "j" }
+      local letters = { "a", "b", "c", "d", "e", "i" }
       sm:queueCommand({ side = side, seq = seq[side], tick = t,
                         kind = letters[Rand.range(r, 1, 6)],
                         target = Rand.range(r, 1, 6), count = 1 })

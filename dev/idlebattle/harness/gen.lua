@@ -392,7 +392,7 @@ function M.trimToMatch(log)
 end
 
 -- A deliberately ILLEGAL log: unaffordable orders, occupied slots, wrong slot
--- class, lane 4, count 12, the three M3 verbs. Not part of the milestone run --
+-- class, lane 4, count 12, the three M3 verbs (uppercase I/E/L per A.11.2). Not part of the milestone run --
 -- every one of these is a fizzle, which is a much weaker test -- but the fizzle
 -- path is still sim code and both clients must fizzle identically, so the
 -- fuzzer runs a smaller chaos pass over it.
@@ -405,7 +405,7 @@ function M.makeChaos(seed, opts)
   local seq = { 0, 0 }
   local letters = {}
   for i = 1, #Rules.BUILDINGS do letters[i] = Rules.BUILDINGS[i].letter end
-  local verbs = { "i", "s", "l" }
+  local verbs = { "I", "E", "L" }
   local n = Rand.range(r, 20, 200)
   local list = {}
   for i = 1, n do

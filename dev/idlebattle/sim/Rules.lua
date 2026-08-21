@@ -135,11 +135,12 @@ end
 -- ---------------------------------------------------------------------------
 -- C.4 buildings.
 --
--- WIRE LETTER NOTE, and this is a real conflict in the decisions doc: A.11.2
--- assigns the command atom's kind field `a`-`l` to the 12-building catalogue AND
--- `i` to Investment and `l` to Ley Line. Those collide. Resolved here in favour
--- of unambiguous kinds: the catalogue skips `i` and `l` and runs
--- a b c d e f g h j k m n. Flagged for the doc owner.
+-- WIRE LETTERS, per the A.11.2 ruling of 2026-08-12 (implemented 2026-08-13,
+-- deferred past the M2 sweep so the goldens would not move mid-measurement):
+-- CASE IS THE NAMESPACE. Uppercase kinds target a LANE (units S/H/B, verbs
+-- I Investment, E Scorched Earth, L Ley Line - E because S is Spear);
+-- lowercase kinds target a SLOT (this catalogue, contiguous a-l, no gaps).
+-- The decoder is case-sensitive on purpose; never lower() an incoming kind.
 --
 -- slotClass is enforced when C.ENFORCE_SLOT_CLASS is 1.
 -- defensive is the flag Bastion Walls and Watchfires scope to (M3).
@@ -197,12 +198,12 @@ M.BUILDINGS = {
      auraUnitDmg = 25 },
   B{ key = "fletcher",   letter = "h", cost = 110, hp = 1200, build = 150, slotClass = "back",  defensive = 0,
      auraCostUnit = 3, auraCostPct = -30, auraBowRange = 6 },
-  B{ key = "levyPost",   letter = "j", cost = 120, hp = 1400, build = 150, slotClass = "back",  defensive = 0,
+  B{ key = "levyPost",   letter = "i", cost = 120, hp = 1400, build = 150, slotClass = "back",  defensive = 0,
      levyFlat = 2, firstPlayable = 1 },
-  B{ key = "stables",    letter = "k", cost = 120, hp = 1200, build = 150, slotClass = "back",  defensive = 0,
+  B{ key = "stables",    letter = "j", cost = 120, hp = 1200, build = 150, slotClass = "back",  defensive = 0,
      auraMarch = 50, auraCostUnit = 2, auraCostPct = -30 },
-  B{ key = "shrine",     letter = "m", cost = 140, hp = 1200, build = 180, slotClass = "back",  defensive = 0 },
-  B{ key = "caravan",    letter = "n", cost = 120, hp =  400, build = 120, slotClass = "back",  defensive = 0,
+  B{ key = "shrine",     letter = "k", cost = 140, hp = 1200, build = 180, slotClass = "back",  defensive = 0 },
+  B{ key = "caravan",    letter = "l", cost = 120, hp =  400, build = 120, slotClass = "back",  defensive = 0,
      levyFlat = 4, cardGated = 1 },
 }
 
