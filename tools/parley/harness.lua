@@ -146,7 +146,7 @@ local function mockFrame()
     elseif k == "SetHeight" then fn = function(s, v) s.h = v end
     elseif k == "CreateFontString" or k == "CreateTexture" then
       fn = function() return mockFrame() end
-    elseif k == "SetScrollChild" then fn = function() end
+    elseif k == "SetScrollChild" then fn = function(s2, c) s2.child = c end
     elseif k == "Get" then fn = function() return "group" end
     elseif k == "SetScript" then fn = function(s, ev, f2) s["__" .. ev] = f2 end
     else fn = function() return nil end end
@@ -175,6 +175,14 @@ function H.checkboxes()
     if e.kind == "CheckButton" then out[#out + 1] = e.frame end
   end
   return out
+end
+
+-- The one ScrollFrame the card builder makes, so a test can ask how tall its
+-- child actually is.
+function H.scrollFrame()
+  for _, e in ipairs(H.created) do
+    if e.kind == "ScrollFrame" then return e.frame end
+  end
 end
 
 -- The card list is a FIXED POOL of rows, shown and hidden rather than created

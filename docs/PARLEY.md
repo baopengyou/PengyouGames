@@ -115,6 +115,14 @@ came back, fall back, and have an honest bottom:
 
 1. the runtime memo
 2. `db.mp.bosses[mapId]`, resolved or learned on a previous session
+0. **the journal has to be loaded first.** `Blizzard_EncounterJournal` is a
+   load-on-demand addon: the `EJ_*` functions live in the base client and answer calls all day,
+   but their *data* does not exist until it has been loaded once. On a client where the player
+   has not opened the journal this session — which is most clients, most of the time — the tier
+   walk returns an empty list and every dungeon reports UNKNOWN. It is loaded lazily on the
+   first roster question rather than at login, because it is a real chunk of memory to spend on
+   a mode nobody may open. **This was missing from 1.4.0 and is the whole reason per-boss lines
+   never appeared.**
 3. **the journal, by the map you are standing in.** `C_Map.GetBestMapForUnit` →
    `EJ_GetInstanceForMap` → `EJ_GetInstanceInfo`: one call each, no iteration. This is tried
    *before* the tier walk because it is both cheaper and sturdier, and it is available at
@@ -126,6 +134,11 @@ came back, fall back, and have an honest bottom:
    the dungeon it happened in, committed on completion if nothing better answered
 6. nil — and the per-boss lines are simply not offered, with the card page saying so and saying
    what fixes it ("run it once and the parley learns them")
+
+Steps 3 and 4 match **exactly first, then case- and punctuation-insensitively** —
+"Operation: Floodgate" against "Operation Floodgate". Normalisation is applied to both sides, so
+it can never make two genuinely different dungeons compare equal, and a real mismatch still
+falls through to the learned-from-a-run path.
 
 Steps 3 and 4 **both verify by name**, and that check is load-bearing rather than defensive:
 standing in a dungeon proves nothing about which challenge map the *picker* has selected, and a

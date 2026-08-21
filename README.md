@@ -71,7 +71,7 @@ addon installed; group members without it are simply never bothered.
 | `/pg dnd` | Toggle Do Not Disturb (suppresses popups and toasts) |
 | `/pg settings` | Open settings (sounds, DND, minimap button, combat hiding, window scale, layout reset) |
 | `/pg minimap` | Show/hide the minimap button |
-| `/pg keys` | What the Mythic Parley can see: the season's dungeons, which of them it knows the bosses of, and where it learned them |
+| `/pg keys` | What the Mythic Parley can see: the Encounter Journal's state, the season's dungeons, which of them it knows the bosses of, and where it learned them |
 | `/pg comm` | Report the messaging and audience state (why is Public greyed out?) |
 | `/pg rolls` | Report whether this client can read `/roll` results, and the last few it saw |
 | `/pg debug` | Toggle local debug output |

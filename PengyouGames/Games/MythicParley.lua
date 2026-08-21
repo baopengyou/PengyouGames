@@ -229,8 +229,7 @@ local recent, recentQ = {}, {}
 
 local dlg, stakeBox, statusHead, statusFS, noteFS
 local configWidgets, liveWidgets, picker, lockBtn, cancelBtn, openBtn
-local boardRows, cardRows, dungeonFS, dungeonNote, cardHead
-local bookieNPC
+local boardRows, cardRows, cardBody, dungeonFS, dungeonNote, cardHead
 local regTicker, tickN = nil, 0
 
 local refreshDialog, freezeDialog, thawDialog, ensureTicker, sendRES
@@ -463,6 +462,37 @@ local function normalizeRoster(list)
   return out
 end
 
+-- THE ENCOUNTER JOURNAL IS LOAD-ON-DEMAND, and this is the line that was
+-- missing. The EJ_* functions live in the base client and answer calls all day,
+-- but their DATA does not exist until Blizzard_EncounterJournal has been loaded
+-- once - so on a client where the player has not opened the journal this
+-- session (which is most of them, most of the time) the tier walk returns an
+-- empty list and every dungeon reports its bosses as unknown. Loaded lazily, on
+-- the first roster question rather than at login, because it is a real chunk of
+-- memory to spend on a mode nobody may open.
+local ejTried = false
+
+local function ensureJournal()
+  if ejTried then return end
+  ejTried = true
+  local loader = (C_AddOns and C_AddOns.LoadAddOn) or _G.LoadAddOn
+  if type(loader) == "function" then
+    pcall(loader, "Blizzard_EncounterJournal")
+  end
+end
+
+-- Case- and punctuation-insensitive comparison, used only after an exact match
+-- has failed. Both strings come from the same client in the same locale so they
+-- normally agree exactly; this catches the cases where one side spells a
+-- separator differently ("Operation: Floodgate" against "Operation Floodgate").
+-- Applied to BOTH sides, so it never makes two genuinely different dungeons
+-- compare equal.
+local function normName(v)
+  local str = tostring(v or ""):lower()
+  str = str:gsub("[^%w]", "")
+  return str
+end
+
 -- The encounters of one journal instance. dungeonEncounterID is the one that
 -- matters and the one that is easy to get wrong: journalEncounterID is the
 -- journal's own key and does NOT match what ENCOUNTER_END reports, so a roster
@@ -492,6 +522,7 @@ local function journalRoster(mapId)
     or type(EJ_SelectTier) ~= "function" then
     return nil
   end
+  ensureJournal()
   local okT, nTiers = pcall(EJ_GetNumTiers)
   if not (okT and type(nTiers) == "number" and nTiers > 0) then return nil end
   local saved
@@ -499,20 +530,25 @@ local function journalRoster(mapId)
     local ok, t = pcall(EJ_GetCurrentTier)
     if ok then saved = t end
   end
-  local found
+  local wantN = normName(want)
+  local found, fuzzy
   for tier = 1, nTiers do
     if not pcall(EJ_SelectTier, tier) then break end
     for i = 1, 60 do
       local ok, instanceID, instName = pcall(EJ_GetInstanceByIndex, i, false)
       if not ok or not instanceID then break end
-      if PG.SafeStr(instName) == want then
+      local nm = PG.SafeStr(instName)
+      if nm == want then
         found = instanceID
         break
+      elseif not fuzzy and nm and normName(nm) == wantN then
+        fuzzy = instanceID
       end
     end
     if found then break end
   end
   if saved then pcall(EJ_SelectTier, saved) end
+  found = found or fuzzy
   if not found then return nil end
   return encountersOf(found)
 end
@@ -532,6 +568,7 @@ end
 local function journalRosterHere(mapId)
   local want = mapName(mapId)
   if not want then return nil end
+  ensureJournal()
   if not (C_Map and C_Map.GetBestMapForUnit) then return nil end
   if type(EJ_GetInstanceForMap) ~= "function"
     or type(EJ_GetInstanceInfo) ~= "function" then return nil end
@@ -541,7 +578,8 @@ local function journalRosterHere(mapId)
   local okI, instanceID = pcall(EJ_GetInstanceForMap, u)
   if not (okI and instanceID) then return nil end
   local okN, nm = pcall(EJ_GetInstanceInfo, instanceID)
-  if not (okN and PG.SafeStr(nm) == want) then return nil end
+  nm = okN and PG.SafeStr(nm) or nil
+  if not nm or (nm ~= want and normName(nm) ~= normName(want)) then return nil end
   return encountersOf(instanceID)
 end
 
@@ -856,7 +894,7 @@ local function flushToasts(rep, rec)
   end
 end
 
-local function emitReport(rep, rec, title, emote)
+local function emitReport(rep, rec, title)
   if rep.paid < 1 or not (PG.Theme and PG.Theme.RevealQueue) then
     flushToasts(rep, rec)
     return
@@ -877,7 +915,8 @@ local function emitReport(rep, rec, title, emote)
     title = title, subtitle = rep.sub, rows = rows,
     marquee = "STAKE " .. PG.Money(rec.stake) .. " A BET",
     burst = "tickets", burstCount = 10, sound = "settled",
-    npc = bookieNPC, emote = emote,
+    -- no npc/emote: there is no goblin on this window (see buildDialog), and
+    -- the stage type-checks the handle and drops the emote with it anyway
   }
   payload.validate = function() return stageValidate(payload) end
   queueReveal(payload)
@@ -1603,7 +1642,7 @@ local function settleParley(rec, res)
     settleLine(rec, i, pick, lineNoun(rec, e) .. " bet", rep, why)
   end
 
-  emitReport(rep, rec, "THE PARLEY SETTLES", "excited")
+  emitReport(rep, rec, "THE PARLEY SETTLES")
 
   local closing
   if wrongKey then
@@ -2238,11 +2277,17 @@ local function buildDialog()
   local scroll = CreateFrame("ScrollFrame", nil, dlg, "UIPanelScrollFrameTemplate")
   scroll:SetPoint("TOPLEFT", K.INSET, G.CARD_LIST_TOP)
   scroll:SetSize(G.BOARD_W - K.INSET - G.SCROLLBAR_RESERVE, G.CARD_LIST_H)
-  local body = CreateFrame("Frame", nil, scroll)
-  body:SetSize(G.BOARD_W - K.INSET - G.SCROLLBAR_RESERVE, G.MAX_CARD_ROWS * G.CARD_ROW_H)
-  scroll:SetScrollChild(body)
+  cardBody = CreateFrame("Frame", nil, scroll)
+  -- Sized to the POOL here and re-sized to the offered rows on every repaint
+  -- (refreshCard). The pool is 25 rows because a six-boss dungeon needs them;
+  -- a dungeon with no known bosses offers five. Leaving the child at pool
+  -- height gave the scrollbar 550px of travel over 110px of content - two and a
+  -- half pages of nothing, which is exactly what it looked like.
+  cardBody:SetSize(G.BOARD_W - K.INSET - G.SCROLLBAR_RESERVE,
+    G.MAX_CARD_ROWS * G.CARD_ROW_H)
+  scroll:SetScrollChild(cardBody)
   cardRows = {}
-  for r = 1, G.MAX_CARD_ROWS do cardRows[r] = buildCardRow(body, r) end
+  for r = 1, G.MAX_CARD_ROWS do cardRows[r] = buildCardRow(cardBody, r) end
 
   local cardHint = dlg:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall") -- S
   cardHint:SetPoint("TOPLEFT", K.INSET, G.CARD_LIST_TOP - G.CARD_LIST_H - 8)
@@ -2308,23 +2353,24 @@ local function buildDialog()
 
   liveWidgets = { statusHead, statusFS, noteFS }
 
-  -- The goblin bookie is CONFIG-ONLY decor: the board spends its width on
-  -- option buttons and its height on rows, and decor yields to copy. The handle
-  -- still rides on every reveal payload after he is hidden, exactly as the Pull
-  -- Book's does - Emote self-gates on visibility.
-  if PG.Theme and PG.Theme.NPC then
-    local npc = PG.Theme.NPC(dlg, "bookie")
-    bookieNPC = npc
-    npc.frame:SetSize(72, 90)
-    npc.frame:ClearAllPoints()
-    npc.frame:SetPoint("BOTTOMRIGHT", -8, 50)
-    configWidgets[#configWidgets + 1] = npc.frame
-    dlg:HookScript("OnShow", function()
-      if not npc.frame:IsShown() then return end
-      npc:Emote("greet")
-      if PG.Theme.Sound then PG.Theme.Sound("greet") end
-    end)
-  end
+  -- THERE IS NO GOBLIN ON THIS WINDOW, and the Pull Book having one is the
+  -- reason to say why.
+  --
+  -- The first cut put him bottom-right and hid him whenever a parley went live,
+  -- because the board spends its full width on option buttons and its full
+  -- height on rows and there is genuinely nowhere for him to stand. Hiding him
+  -- meant putting his container in configWidgets, so every repaint toggled it -
+  -- and Theme.NPC hooks OnShow on that container to RE-PROBE a model load that
+  -- a hide interrupted (SetDisplayInfo again, camera and rotation re-applied on
+  -- the next OnModelLoaded). SKIN.md A10 is explicit that the hide path makes
+  -- no model call; a surface that hides him on every state change is not a
+  -- surface that can have him. The visible result was a goblin spinning in the
+  -- corner.
+  --
+  -- So he is not here at all rather than here-and-toggled, and the reveal
+  -- payload carries no npc handle: the stage type-checks it and drops the emote
+  -- along with it, so a nil would have been silently ignored - a field that
+  -- reads as if a goblin exists is worse than no field.
 
   if PG.Theme then
     openBtn:HookScript("OnClick", function()
@@ -2352,6 +2398,11 @@ refreshCard = function()
   if not (dlg and cardRows) then return end
   local avail = availableLines()
   local n = tickedCount()
+  -- the scroll child is exactly as tall as the rows on offer, never as tall as
+  -- the pool: a scrollbar that travels past the last row is a page of nothing
+  if cardBody then
+    cardBody:SetHeight(math.max(G.CARD_LIST_H, #avail * G.CARD_ROW_H))
+  end
   cardHead:SetText("THE CARD   " .. n .. " / " .. K.MAX_LINES)
   dungeonFS:SetText(setup.mapId and (mapName(setup.mapId) or ("Dungeon " .. setup.mapId))
     or "no dungeons this season")
@@ -2659,11 +2710,47 @@ local SRC_WORD = {
   map = "Encounter Journal (this map)", learned = "learned from a run",
 }
 
+-- "bosses UNKNOWN" on every dungeon has several very different causes, and a
+-- diagnostic that cannot tell them apart is not one. This reports the journal
+-- itself: whether the load-on-demand addon came in, which entry points exist,
+-- and how much the tier walk can actually see.
+local function journalStatus()
+  ensureJournal()
+  local missing = {}
+  for _, n in ipairs({ "EJ_GetNumTiers", "EJ_SelectTier", "EJ_GetInstanceByIndex",
+                       "EJ_GetEncounterInfoByIndex" }) do
+    if type(_G[n]) ~= "function" then missing[#missing + 1] = n end
+  end
+  if #missing > 0 then
+    return "journal: MISSING " .. table.concat(missing, ", ")
+  end
+  local loaded = "?"
+  local isLoaded = (C_AddOns and C_AddOns.IsAddOnLoaded) or _G.IsAddOnLoaded
+  if type(isLoaded) == "function" then
+    local ok, v = pcall(isLoaded, "Blizzard_EncounterJournal")
+    if ok then loaded = tostring(v and true or false) end
+  end
+  local okT, nTiers = pcall(EJ_GetNumTiers)
+  nTiers = (okT and tonumber(nTiers)) or 0
+  local seen = 0
+  for tier = 1, nTiers do
+    if not pcall(EJ_SelectTier, tier) then break end
+    for i = 1, 60 do
+      local ok, id = pcall(EJ_GetInstanceByIndex, i, false)
+      if not ok or not id then break end
+      seen = seen + 1
+    end
+  end
+  return "journal: addonLoaded=" .. loaded .. "  tiers=" .. nTiers
+    .. "  dungeons visible=" .. seen
+end
+
 function PG.MP.Diagnose()
   local out = {}
   out[#out + 1] = "lockdown=" .. tostring(PG.Comm.Locked())
     .. "  activeKey=" .. tostring(activeMapId())
     .. "  slotted=" .. tostring(slottedMapId())
+  out[#out + 1] = journalStatus()
   local maps = seasonMaps()
   out[#out + 1] = #maps .. " dungeon(s) this season"
     .. (#maps == 0 and " - asked the server again just now" or "")

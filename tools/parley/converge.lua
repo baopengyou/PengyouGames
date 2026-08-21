@@ -342,4 +342,99 @@ check("a journal instance whose NAME disagrees is refused",
   zd:find("UNKNOWN", 1, true) ~= nil, zd)
 _G.EJ_GetNumTiers = realTiers
 
+-------------------------------------------------------------------------------
+print()
+print("== D. the three bugs from the first live run ==")
+-------------------------------------------------------------------------------
+
+-- (1) The scroll child was sized to the ROW POOL (25 rows, 550px) rather than
+-- to the rows on offer, so the card scrolled through two and a half pages of
+-- nothing.
+local function cardChildHeight(C)
+  H.created = {}
+  C.PG.MP.OpenDialog()
+  local sc = H.scrollFrame()
+  local child = sc and rawget(sc, "child")
+  return child and rawget(child, "h") or nil, #H.shownChecks()
+end
+
+local S1 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+H.slotted = 391
+local h16, n16 = cardChildHeight(S1)
+check("a 16-line card's scroll child is 16 rows tall, not the 25-row pool",
+  h16 == math.max(300, 16 * 22), tostring(h16) .. " for " .. n16 .. " rows")
+
+-- (2) The Encounter Journal is LOAD-ON-DEMAND: its data does not exist until
+-- Blizzard_EncounterJournal has been loaded, so on a client where the player
+-- has not opened the journal this session every dungeon reported UNKNOWN and
+-- only the five run-level lines were offered. This reproduces exactly that.
+local realTiers = _G.EJ_GetNumTiers
+local journalLoaded, loadCalls = false, 0
+_G.EJ_GetNumTiers = function() return journalLoaded and 2 or 0 end
+_G.C_AddOns = {
+  LoadAddOn = function(n)
+    loadCalls = loadCalls + 1
+    if n == "Blizzard_EncounterJournal" then journalLoaded = true end
+    return true
+  end,
+  IsAddOnLoaded = function() return journalLoaded end,
+}
+_G.C_Map = nil    -- and we are not standing in the dungeon, so no by-map path
+
+local S2 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+H.created = {}
+S2.PG.MP.OpenDialog()
+check("the journal addon is loaded on demand", loadCalls > 0, loadCalls)
+check("...and the per-boss lines appear because of it",
+  #H.shownChecks() == 16, #H.shownChecks())
+local d2 = table.concat(S2.PG.MP.Diagnose(), " / ")
+check("/pg keys reports the journal state", d2:find("addonLoaded=true", 1, true) ~= nil, d2)
+
+-- ...and if the journal genuinely cannot be loaded, the report says so rather
+-- than just "UNKNOWN"
+journalLoaded = false
+_G.C_AddOns.LoadAddOn = function() return false end
+local S3 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+local d3 = table.concat(S3.PG.MP.Diagnose(), " / ")
+check("an unloadable journal is reported as such",
+  d3:find("addonLoaded=false", 1, true) ~= nil and d3:find("UNKNOWN", 1, true) ~= nil, d3)
+
+_G.EJ_GetNumTiers = realTiers
+_G.C_AddOns = nil
+journalLoaded = true
+
+-- names that differ only in punctuation still match
+H.MAPS[391].name = "Operation: Floodgate"
+local realByIndex = _G.EJ_GetInstanceByIndex
+_G.EJ_GetInstanceByIndex = function(i, isRaid)
+  local id, nm = realByIndex(i, isRaid)
+  if id == 101 then return id, "Operation Floodgate" end
+  return id, nm
+end
+local S4 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+H.created = {}
+S4.PG.MP.OpenDialog()
+check("a name differing only in punctuation still resolves",
+  #H.shownChecks() == 16, #H.shownChecks())
+_G.EJ_GetInstanceByIndex = realByIndex
+H.MAPS[391].name = "Ara-Kara, City of Echoes"
+
+-- but a genuinely different name does not
+_G.EJ_GetInstanceByIndex = function(i, isRaid)
+  local id, nm = realByIndex(i, isRaid)
+  if id == 101 then return id, "Somewhere Else Entirely" end
+  return id, nm
+end
+local S5 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+H.created = {}
+S5.PG.MP.OpenDialog()
+check("a genuinely different name is still refused",
+  #H.shownChecks() == 5, #H.shownChecks())
+_G.EJ_GetInstanceByIndex = realByIndex
+
 H.done()

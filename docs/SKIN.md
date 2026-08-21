@@ -371,9 +371,14 @@ strobe it.
   restraint rather than decoration (rule 6.3).
 - **Stamps (A8):** `PARLEY OPEN` on open, `NO MORE BETS` on lock, `SETTLED` on the frozen
   report.
-- **The goblin bookie is config-only** and hidden the moment a parley is live: the board
-  spends its width on buttons and its height on rows. His handle still rides every reveal
-  payload, because `Emote` self-gates on visibility.
+- **There is no goblin bookie on this window**, and the Pull Book having one is the reason to
+  say why. The first cut put him bottom-right and hid him whenever a parley went live, because
+  the board spends its full width on buttons and its full height on rows. Hiding him meant
+  toggling his container on every repaint — and `Theme.NPC` hooks `OnShow` there to **re-probe a
+  model load a hide interrupted**, re-applying `SetDisplayInfo` and the camera. A10 is explicit
+  that the hide path makes no model call, so a surface that hides him on every state change is
+  not a surface that can have him. The visible result was a goblin spinning in the corner. He is
+  absent rather than present-and-toggled, and the reveal payload carries no handle at all.
 
 ### 2.9 Ledger window (key "ledger") + Settle Up + confirm
 

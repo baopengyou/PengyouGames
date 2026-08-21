@@ -87,6 +87,7 @@ This is the whole of 0.1 and 0.4 in one place, and it is the first thing to run:
 
 ```
 PengyouGames keys: lockdown=false  activeKey=nil  slotted=391
+PengyouGames keys: journal: addonLoaded=true  tiers=11  dungeons visible=142
 PengyouGames keys: 8 dungeon(s) this season
 PengyouGames keys:   Ara-Kara, City of Echoes - 3 bosses, Encounter Journal
 PengyouGames keys:   The Dawnbreaker - bosses UNKNOWN, per-boss lines not offered
@@ -96,8 +97,11 @@ PengyouGames keys: 7/8 resolved. An unknown dungeon learns its bosses the first 
 
 - **`0 dungeon(s) this season`** right after login is expected for a few seconds; run it again.
   If it never fills, the parley still works with the five run-level lines and says so.
-- **Any `UNKNOWN` line** is the bug report, and it needs the dungeon name exactly as printed.
-  Those dungeons offer run-level lines only until you run them once.
+- **`addonLoaded=false` or `dungeons visible=0`** means the Encounter Journal did not come in.
+  That is the whole bug report on its own - no dungeon will resolve until it does.
+- **Any `UNKNOWN` line** with the journal healthy is a per-dungeon name mismatch; it needs the
+  dungeon name exactly as printed. Those dungeons offer run-level lines only until you run them
+  once.
 - **Walk to an unknown dungeon's entrance and run `/pg keys` again.** It should flip to
   `Encounter Journal (this map)` - that is chain step 3, which does not depend on the tier walk
   that step 4 does. If step 4 is broken on your client but step 3 works, per-boss lines are
