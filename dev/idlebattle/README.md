@@ -39,6 +39,12 @@ tools/m3.sh                  # the whole M3 gate: every card alone (x2 pairings)
                              #   200 random dual loadouts, the clamp report. ~1 min
 tools/m3.sh 20               # same gate, 20 loadout pairs, a smoke test
 tools/m3.sh 200 "$(which luajit)"   # the 5.1-semantics half; compare SUITE HASHes
+
+tools/m4.sh                  # the whole M4 gate: the A.11 codec, then 177 net
+                             #   matches (2 sims through the lossy transport)
+                             #   across four scenarios. ~30 s
+tools/m4.sh "$(which luajit)"    # the 5.1-semantics half; compare the four
+                             #   per-step SUITE HASHes
 ```
 
 **They are two gates, not one, and both must be run.** `tools/m2.sh`'s header gives
@@ -91,6 +97,15 @@ lua tools/m3gate.lua cards       # M3: each of the 40 cards individually,
                                  #   vs-empty + mirrored, 4 arrival patterns
 lua tools/m3gate.lua loadouts 200   # M3: 200 random dual loadouts, full length
 lua tools/m3gate.lua clamp 200   # M3: the clamp-saturation report
+lua harness/m4run.lua codec      # M4: A.11 encode/decode round-trip, the
+                                 #   byte-size table, malformed-input fuzz
+lua harness/m4run.lua milestone 100   # M4: THE MILESTONE -- 10% loss, 1..30-
+                                 #   tick jitter, hashes equal at every epoch
+lua harness/m4run.lua rollback 40    # M4: late commands REQUIRED per run,
+                                 #   every A.12 boundary case must occur
+lua harness/m4run.lua deep 12    # M4: forced desync -> detect -> Q -> rebuild
+lua harness/m4run.lua stress 25  # M4: 30% loss; escalation allowed, but
+                                 #   convergence still asserted
 lua harness/selftest.lua         # the committed golden hashes
 lua harness/fuzz.lua 1000        # the milestone + mid-run arrival + invariants
 lua sweep/sweep.lua 6            # M2: the C.6 cross-check, metric by metric, with
@@ -385,6 +400,13 @@ tools/               checkers and the first test suite. NOT held to the sim's de
                      probe (real Spear deploys against independently clamped
                      arithmetic; M3 fix pass, item 3) as the step's
                      falsifiable half.
+  m4.sh              THE M4 GATE, beside its three siblings: greps + comptest
+                     over net/ (the strict sim mode), luac, then
+                     harness/m4run.lua's five steps. Its header argues why it
+                     is a sibling of ci.sh and prints what a green run does
+                     NOT prove (no real channel, no halt/resume, one
+                     process). Run it twice and compare the four per-step
+                     SUITE HASHes.
 
 harness/             the SECOND suite, and not redundant with tools/. Three things live
                      ONLY here, and the M1 gate is dishonest without them:
@@ -410,6 +432,61 @@ harness/             the SECOND suite, and not redundant with tools/. Three thin
   logfmt.lua         the .iblog text format, parse and render.
   greps.lua          the harness's own independent implementation of the greps.
   logs/hand.iblog    the hand-written replay artifact the goldens are keyed to.
+  m4run.lua          M4's implementation: net matches (two Net endpoints over
+                     one Transport, driven off harness/gen.lua logs at
+                     issue = exec - ORDER_DELAY), the three-way comparison
+                     (ep1 == ep2 == a no-netcode reference run of the SAME
+                     issued atoms, at every epoch), the codec/malformed fuzz,
+                     the forced-desync hook, and the per-step suite hashes.
+
+net/                 M4. THE WIRE AND THE RELIABILITY SHIM, headless. HELD TO
+                     THE SIM'S DETERMINISM RULES in full (greps + comptest run
+                     over it in tools/m4.sh), because every file here decides
+                     sim outcomes: the codec decides what a peer's atom says,
+                     the transport decides WHEN it says it, and the shim
+                     decides how the sim is repaired when it says it late.
+                     Nothing in sim/ was touched to build any of it.
+  Wire.lua           the A.11 codec: the 6-byte EEE/K/T/N atom (base-36 exec
+                     tick, CASE-SENSITIVE kind letters per A.11.2 -- the
+                     unit and building letter tables are DERIVED from the
+                     hashed ruleset; the three verb letters I/E/L are the one
+                     hand-written set, in Wire, Sim and m4run alike - drift
+                     there is loud (encode error / refused atoms) but it is a
+                     copy, review finding 4), the 5-byte prologue, and encode/decode for
+                     S C H X K G N M Q V. Encode raises on out-of-range
+                     fields and on anything past the 200-byte budget (a
+                     construction-time guarantee); decode NEVER raises on
+                     wire input -- malformed is rejected with a reason.
+                     OPEN/JOIN are deferred to M5 (they are the addon
+                     layer's rows); X/K/G/V round-trip here but nothing in
+                     M4 acts on them (M6).
+  Transport.lua      the fake lossy channel: two endpoints in one process,
+                     per-message verdicts (drop / delay 1..30 ticks /
+                     reorder-past-the-jitter-window / duplicate) drawn from
+                     per-direction sim/Rand.lua streams, so every run is a
+                     pure function of the seed. Enforces the real channel's
+                     shape: a message over 255 bytes is a hard ERROR at
+                     send, never a delivery. Jitter is SIM TICKS of the
+                     harness clock; no wall clock exists here.
+  Snap.lua           A.12's snapshot: layout-aware full-sim copy and
+                     IN-PLACE restore, OUTSIDE sim/ (the file's header
+                     argues why). bucket and seen are REBUILT from the
+                     copied log rather than copied, so there is no second
+                     copy of the canonical order to drift; per-phase scratch
+                     is reset, which fuzz mode B already proves harmless.
+                     EVERY restore re-hashes and errors unless the restored
+                     sim equals the captured hash -- the copy-coverage guard
+                     that makes an outside-the-sim snapshot safe to trust.
+  Net.lua            the A.12 shim: per-sender seqs and dedup, ackThru on
+                     every message, receiver-driven N (spanning the missing
+                     range) plus the 2-heartbeat sender backstop, the
+                     ORDER_DELAY input contract, bounded rollback off the
+                     snapshot ring (SNAPSHOT_EPOCH x SNAPSHOT_KEEP, C.1),
+                     epoch-hash exchange with the SETTLED-comparison rule,
+                     and the Q full-log recovery: fresh S + fresh H + the
+                     entire own-command history as verbatim C batches, the
+                     requester rebuilding from tick 0 out of (rules, seed,
+                     BOTH loadouts, everything retained + replayed).
 
 policy/              M2. The scripted hands on the mouse. HELD TO THE SIM'S
                      DETERMINISM RULES, because a policy WRITES the command log:
@@ -2600,6 +2677,237 @@ arithmetic and no gate seed).
 
 ---
 
+## M4 - two sims, one client: the wire and the reliability shim (2026-08-21)
+
+Part E states the milestone:
+
+> Two instances of the sim in one addon session, fed the same log through a fake
+> transport that can drop, delay and reorder messages on command. **MILESTONE:
+> state hashes match at every epoch for 6,000 ticks with 10% packet loss and up
+> to 3 s of jitter. Rollback repairs every late command. A forced deep desync is
+> repaired by the `Q` full-log replay path from tick 0 - which requires both
+> loadouts, and is the concrete demonstration that Ruling 1 made recovery real.
+> This proves the reliability shim before a single real message is sent.**
+
+**How to tell: run `tools/m4.sh` and read the last line.** It prints `M4 GATE:
+GREEN` or `M4 GATE: RED` with the failing steps named. Run it twice - once per
+interpreter - and compare the four per-step `SUITE HASH` lines, exactly like the
+M1 fuzz's one number.
+
+**WHAT WAS BUILT, AND WHERE THE ONE DESIGN DECISION LANDED.** Three modules
+under `net/` (the codec, the fake channel, the shim - the file-layout section
+describes each) plus `net/Snap.lua`, which is the decision: **A.12's rollback
+snapshot lives OUTSIDE `sim/`, and `sim/` was not touched by M4 at all.** The
+snapshot is consumer state - the sim never rolls back, its caller does, the way
+the renderer owns fog memory - and everything it must carry is either hashed
+state (whose layout `Hash.state` fixes), a named derived cache, or the
+accepted-command log. The risk of an outside copy - a future sim field the copy
+misses - is answered by a guard an inside implementation would not have needed
+and this one gets for free: **every restore re-hashes the restored sim and
+errors unless it equals the captured hash**, so a hashed field this file fails
+to carry fails the very next rollback loudly, and an unhashed one is exactly
+what `runner.invariants` (run on both terminal sims of every M4 match) exists
+to catch. Two further structural choices inside the copy: `bucket` and `seen`
+are REBUILT from the copied log rather than copied (the log is already in
+canonical order, so there is no second copy of A.4's ordering to drift), and
+restore is IN PLACE (hook closures keep reading the sim they were installed
+on; `sim/Mods.lua`'s own header planned for exactly this).
+
+**THE GAME DID NOT CHANGE, PROVED THREE WAYS.** `rulesHash` is `767294897`
+before and after; `tools/ci.sh 1000` and `tools/m3.sh 200` are GREEN on the
+unchanged committed goldens under both interpreters; and every M4 net match is
+compared not only endpoint-against-endpoint but against a **no-netcode
+reference run** of the same issued atoms through `harness/runner.lua` - the
+M1 lens - at every epoch, at the terminal hash, the terminal tick and the
+logDigest. A shim that agreed with itself but changed the game cannot pass
+that third comparison.
+
+**HOW A NET MATCH IS DRIVEN.** A `harness/gen.lua` legal log (the generator M1
+trusts) is split into each side's orders; an atom with exec tick E is issued by
+its own endpoint at sim tick `E - ORDER_DELAY` (the fastest legal client, the
+M2 driver's reading), queued locally through `Sim:queueCommand` with its
+`issueTick`, and shipped as an A.11.2 atom. The two endpoints' sims start when
+their handshake completes (T0 skew is real and modelled, per A.11.1), tick on
+the shared harness clock, and end when both are terminal, the channel is
+drained and nothing is outstanding. An endpoint whose sim believes the match is
+over stops issuing - a hand cannot click on a finished match - so the ISSUED
+set, which all three comparisons share, is the ground truth of that run.
+
+### The gate, step by step (`tools/m4.sh`, ~30 s per interpreter)
+
+| step | what it is | what it asserts |
+|---|---|---|
+| checkers | greps + comptest over `net/`, strict sim mode | 0 hits, 0 failures - the transport and shim are held to every determinism rule |
+| codec | 3,087 checks: round-trip every row, the A.11.3 byte table, malformed fuzz | every size exact (C at n=8 is 70 bytes, the protocol's largest); decode NEVER raises (pcall over corpus + 2,000 seeded garbage strings); case-sensitivity (`s` rejected where `S` parses); the transport 255-byte hard error; the transport schedule reproducing from its seed |
+| MILESTONE | 100 runs at 10% loss, 1..30-tick jitter, 10% reorder | hashes equal at EVERY epoch, ep1 = ep2 = reference; **every late command repaired by bounded rollback; zero escalations, zero mismatches**; detection live in every run |
+| rollback | 40 runs at 25% reorder + 5% duplication; **a run with no late command is re-seeded** (fixed +7777 rule) because it proves nothing | every A.12 boundary case OCCURRED and was survived: duplicates delivered, resends after originals, acks lost (backstop fired), commands lost until resent (N answered) |
+| deep | 12 runs, carded loadouts; ep2's sim corrupted OUTSIDE the shim from tick 2,600, RECURRING until detected; every second run also wipes ep2's held peer history, re-seeded until the wiped span is past N's reach | epoch-hash exchange detects; M and Q fire; the replay is answered; **both sides rebuild from tick 0 and the rebuilt sims carry BOTH handshake loadouts** (asserted field by field); detection inside 15 epochs; final state bit-identical to the reference - the corruption is gone |
+| stress | 25 runs at 30% loss, 1..40 jitter, 20% reorder, 10% dup | the full A.12 ladder may escalate (N -> backstop -> hash adjudication -> Q rebuild) and did; **convergence to the reference is still absolute** |
+
+### Measured results (both interpreters; every number below is bit-identical under Lua 5.5 and LuaJIT 2.1)
+
+| step | runs | late commands -> repaired by rollback | beyond depth -> repaired by Q rebuild | mismatches detected | Q sent/answered | rebuilds | dup atoms | largest message | SUITE HASH |
+|---|---|---|---|---|---|---|---|---|---|
+| milestone | 100 | **6,659 -> 6,659** | 0 | 0 | 0/0 | 0 | 1,930 | 58 B | **1353990724 (`e4pxg`)** |
+| rollback | 40 | **2,628 -> 2,628** | 0 | 0 | 0/0 | 0 | 1,127 | 46 B | **630668562 (`fhez6`)** |
+| deep | 12 | 1,012 -> 1,012 | 0 | **8** | **20/19** | **19** | 950 | **70 B** | **1794064162 (`o50rm`)** |
+| stress | 25 | 1,851 -> 1,809 | **42 -> 42** | 0 | 43/36 | 42 | 2,413 | 70 B | **1907532503 (`jp1hz`)** |
+
+Totals across the four scenarios: **177 net matches, 23,481 atoms issued,
+11,304 epochs compared three ways each, 12,150 late commands - 12,108
+repaired by bounded rollback (max rewind 299 ticks) and the 42 beyond-depth
+arrivals repaired by full-log rebuild, 19 forced-desync recoveries, 9,908
+settled hash comparisons, 0 unexplained mismatches, 0 messages over 70
+bytes** against the 200-byte
+budget and 255-byte hard limit. 60,626 messages crossed the fake channel;
+8,246 were dropped by it and 8,170 delivered out of order. The milestone
+floors are enforced, not observed: the step fails if fewer than 2 late
+commands occur per run on average, if too few runs reach the full 6,000
+ticks (15 of 100 did), if no delivery was ever inverted, or if either
+endpoint of any run never performed a settled hash comparison.
+
+### Four findings worth the doc owner's time
+
+1. **Rollback is the COMMON path at these settings, not the exception.** With
+   `ORDER_DELAY` 20 and 1..30-tick jitter, roughly half of all delivered
+   command-bearing messages arrive after their exec tick (6,659 late over 100
+   milestone matches - ~66 rollbacks per match, every one repaired inside the
+   snapshot window). The shim's rollback is not an error handler; it is the
+   normal receive path, which is the strongest argument for having proved it
+   at M4 rather than discovering it at M5.
+2. **A one-off state corruption is HEALED BY ROUTINE ROLLBACK before the hash
+   exchange can see it.** The first forced-desync design flipped ep2's bank
+   once; the next late command restored a pre-corruption snapshot and
+   re-simulated, erasing the corruption as a side effect, and the match ended
+   clean with zero detections. That is an emergent robustness property of
+   A.12's own machinery (a real transient bit-flip inside the rollback window
+   self-repairs), and it forced the test to model what a real desync is - a
+   code path that KEEPS disagreeing - as a recurring mutation. Detection then
+   fires within a few epochs, every time.
+3. **A.12's resend ladder needs repair traffic outside the C bucket, and
+   A.11.4 already says so.** With N answers and backstop resends queued behind
+   the order-coalescing bucket (capacity 4, refill 1 per 4 s), a ~1-in-5,000
+   loss chain pushed a command past the 300-tick snapshot depth at 10% loss -
+   escalation in a scenario that should stay bounded. A.11.4's own budget
+   table lists `resends` and `repair` as their OWN rows beside `C commands`;
+   letting them ride that budget (capped at 4 messages per flush) removed the
+   tail completely: 9,287 within-depth late commands at milestone+rollback
+   settings, zero beyond. At 30% loss the tail is real and the ladder's last
+   rung catches it: 42 beyond-depth arrivals, 42 full-log rebuilds, zero
+   divergence at the end.
+4. **The `Q` rebuild genuinely needs both loadouts, and the gate would notice
+   if it did not.** The deep scenario runs carded (one card of each family per
+   side); the rebuilt sims' `sd.loadout` arrays are asserted against the
+   handshake field by field, and the rebuild call is
+   `Sim.new(rules, seed, loadout1, loadout2)` - the exact triple A.11.1's
+   handshake carries. This is 0.1 item 4 made concrete: under v1's private
+   state this path could not have existed, because the loadout needed to
+   rebuild the opponent's half was never on this client.
+
+**AND THE GATE HAS TEETH, ASSERTED BY MUTATION RATHER THAN CLAIMED**, in the
+house style. Two surgical breaks of `net/`, each run and each reverted:
+
+| mutation | result |
+|---|---|
+| rollback disabled (a late atom is silently dropped) | RED six independent ways on the first seed: terminal mismatch, divergence from the no-netcode reference, epoch-trace divergence at tick 2,640, the late-vs-rollbacks accounting, spurious hash mismatches, and forbidden escalations |
+| `Snap` stops copying `bank` (a hashed field missed by the outside-the-sim copy) | the restore hash-guard ERRORS on the very first rollback: "restored sim hashes to X, captured Y -- a sim field this file does not copy" |
+
+The second is the one worth having: it is the exact failure mode that makes an
+outside-the-sim snapshot dangerous, and it cannot survive one rollback, let
+alone a gate run.
+
+### INTERPRETATIONS (M4) - where A.11/A.12 were silent and this implementation chose
+
+Recorded here because `Rules.lua`'s block is for ruleset readings and none of
+these touch the ruleset. Each is cheap to overturn.
+
+1. **The `Q` replay ships the RESPONDER'S OWN command history**, as verbatim
+   `C` batches (same seqs, same exec ticks), prefixed by a fresh `S` (its
+   loadout - the both-loadouts dependency made explicit) and a fresh `H`
+   (whose `lastSeq` is the completion watermark). A.12's "replays its entire
+   command log" cannot mean both halves: `C` carries per-SENDER seqs and no
+   side field, so the requester's own half is unshippable in the message
+   table as ruled - and unnecessary, since the requester retains everything
+   it ever issued (A.12's own retention rule).
+2. **On a settled hash mismatch, BOTH sides request `Q` and BOTH rebuild.**
+   A.12 has one peer ship the full log but names no way for either client to
+   know which one is healthy, and there is none - so log-truth is the only
+   arbiter, both rebuild from tick 0, and both land on the same state
+   whichever was wrong. Costs one redundant rebuild, removes a leader
+   election.
+3. **"`currentTick - E <= 300`" is implemented structurally**: repairable iff
+   a kept snapshot exists at or before E (the ring keeps `SNAPSHOT_KEEP`
+   epoch snapshots, plus tick 0 while filling), which is 240..300 ticks of
+   depth depending on phase. Beyond it "escalates" (A.12's word) to the `Q`
+   path.
+4. **`H`'s 1-char epoch field is the absolute epoch mod 36**, recovered from
+   the prologue tick (`floor(tick/60)`) and checked; `M`'s disputed epoch is
+   recovered as the nearest epoch at or below the sender's tick matching the
+   residue. 100 epochs do not fit one base-36 char any other way.
+5. **A `C` batch is a consecutive-seq run** (`<seq 2>` is the first atom's),
+   so a resend of non-adjacent seqs costs one message per run; "piggybacked"
+   is read as "carried on the next send window", not as a new message shape.
+6. **A hash comparison is trusted only when the epoch is SETTLED**: I hold
+   the peer's whole history up to the `lastSeq` its `H` claims, and nothing
+   of mine the peer lacks (above its `ackThru`) can execute at or before the
+   epoch tick. Anything else is light still in flight, not a desync. This
+   rule produced zero false positives in 9,908 settled comparisons over
+   lossy channels.
+7. **Repair traffic (N answers, backstop resends) bypasses the C bucket**
+   (finding 3 above; A.11.4 budgets it in its own rows); the `Q` replay is
+   paced at 10 messages per 100 ticks - A.12's "pace them across two burst
+   windows" read against its own 10-token burst.
+8. **Decode validates structure, not legality**: framing, alphabet, kind
+   letters (case-sensitive, derived from the hashed tables), targets the
+   wire itself defines (lane 1-3 / slot 1-6 by case), counts >= 1. A count
+   of 35 decodes; the sim clamps it at the exec tick, because A.4 puts
+   legality in the sim, on both clients, never in a decoder that could
+   disagree with its twin.
+9. **The transport's `reorder` verdict is extra delay past the jitter
+   window** (a guaranteed inversion against the following window), and the
+   gate counts REALISED inversions and fails if none occurred - the knob is
+   measured, not trusted. `dup` delivers twice; the duplicate copy is never
+   itself dropped, so "duplicated" always means "the dedup path ran".
+10. **T0 skew is modelled, not idealised**: each sim starts when its endpoint
+    holds both loadouts (A.11.1), so the two clocks are offset by handshake
+    latency; nothing anywhere corrects for it, because atoms and hashes live
+    in shared sim-tick time - which is A.11.1's own claim, now exercised.
+11. **`S` is offered on a 60-tick cadence until the peer is PROVEN built** by
+    its first `H` or `C` (either side's `S` can be lost; a reply-to-S rule
+    can ping-pong against the `Q` answer's fresh `S`, so the cadence keys
+    off evidence instead). A.11 does not specify handshake loss at all -
+    M5's OPEN/JOIN layer will own the real version of this.
+12. **Received atoms carry no `issueTick`** (the wire has no such field), so
+    the ORDER_DELAY window is enforced at the issuer and the receiving sim
+    takes the atom on its exec tick alone - the sim's documented contract.
+    Stated plainly (review finding 8): this makes the window UNENFORCEABLE
+    against a hostile peer, whose modified client could schedule atoms with
+    less than the delay. Accepted for the same reason full state sharing
+    was: this is a social game and a cheating client is out of scope.
+
+**A layering note from the adversarial review (finding 5):** end-to-end duplicate
+idempotence is enforced TWICE - the shim dedups, and the sim's own `(side,seq)`
+seen-set refuses anything that slips through. The gate proves the property, not
+the layer: removing the shim's dedup alone stays green because the sim absorbs
+it. That is defence in depth working as designed, recorded here so nobody
+mistakes the shim's counter for load-bearing.
+
+### What a green M4 does NOT prove
+
+- **No real channel.** The transport is a seeded model. Real refusal codes,
+  the Comm-layer bucket, lockdown boundaries and true loss rates are M5's
+  problem, informed by the Probe.
+- **No halt/resume.** `X`/`K`/`G`/`V` round-trip through the codec and are
+  counted when received; nothing acts on them until M6.
+- **One process, one host.** Two endpoints share one interpreter. The
+  cross-interpreter hash agreement above is the strongest split available
+  before M5; the cross-machine clause still needs a second machine, exactly
+  as M1's does.
+- **The sim itself is not re-proved here.** `tools/ci.sh` owns that; this
+  gate proves the shim DELIVERS that sim over a hostile channel unchanged.
+
+---
+
 ## Where this sits in the build order (Part E)
 
 - **P** - the Probe. Half a day in a real raid, off the critical path, calibrates every rate
@@ -2651,7 +2959,17 @@ arithmetic and no gate seed).
   include, by open item 24: the post-M3 BALANCE re-measure, which needs the doc owner to
   say which roster and regime judge it.
 - **M4** - two sims in one client through a fake lossy transport; rollback; `Q` full-log
-  replay from tick 0.
+  replay from tick 0. **Status: DONE and GREEN** (`tools/m4.sh`, 8/8 steps, both
+  interpreters, the four per-step suite hashes bit-identical - the M4 section above).
+  The A.11 codec, the seeded lossy transport and the A.12 shim live under `net/`,
+  held to the sim's own determinism rules; `sim/` is untouched and every gate
+  before this one is green on unchanged goldens. 177 net matches: every epoch
+  hash equal between both endpoints AND a no-netcode reference, 12,108 late
+  commands repaired by bounded rollback, forced deep desyncs detected by the
+  epoch-hash exchange and repaired by the `Q` rebuild from tick 0 with both
+  loadouts (asserted). What it deliberately does not prove: no real channel, no
+  halt/resume (X/K/G/V decode but nothing acts on them), one process. Twelve
+  A.11/A.12 readings are recorded in the M4 INTERPRETATIONS block.
 - **M5** - first playable over the wire. `OPEN`/`JOIN`/`S`/`C`/`H`, party scope.
 - **M6** - halt and resume, symmetric and asymmetric.
 - **M7** - fog as a render filter, and the four greps again on a full build.
@@ -3263,6 +3581,22 @@ than needing to be spotted in this table.
 These two M3 suite hashes are not committed goldens (no file asserts them --
 they certify a milestone rather than guard a commit); they are recorded here so
 a second machine's `sh tools/m3.sh 200` is a mechanical diff.
+
+| from `sh tools/m4.sh` (M4) | Lua 5.5 | LuaJIT 2.1 |
+|---|---|---|
+| codec | 3,087 checks pass | 3,087 checks pass |
+| `MILESTONE SUITE HASH` (100 runs) | **1353990724** (`e4pxg`) | **1353990724** |
+| `ROLLBACK SUITE HASH` (40 runs) | **630668562** (`fhez6`) | **630668562** |
+| `DEEP SUITE HASH` (12 runs) | **1794064162** (`o50rm`) | **1794064162** |
+| `STRESS SUITE HASH` (25 runs) | **1907532503** (`jp1hz`) | **1907532503** |
+
+The M4 suite hashes fold every run's terminal state, terminal tick, logDigest,
+settle tick, repair counters (late, rollbacks, dups, N, backstop, Q, rebuilds),
+message counts and the channel's drop/inversion/byte-max statistics -- so two
+interpreters printing the same four numbers agreed on every repair decision of
+every net match, not merely on where the matches ended. Like the M3 pair they
+are milestone certificates rather than committed goldens; a second machine's
+`sh tools/m4.sh` is a mechanical diff against this table.
 
 *The pre-M3 record, superseded when the forty cards entered the hashed ruleset
 (regenerated together on 2026-08-21): rulesHash 333968378, stateHash 1822913174,
