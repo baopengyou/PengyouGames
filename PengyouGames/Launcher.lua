@@ -85,9 +85,11 @@ local ROW_LABEL_W = 280     -- 24 + 280 + gutter + 76 + 24 = 420 with room over
 -- silently drops every invitation for that game - so when a seventh game lands,
 -- these are the first two lines to edit.
 local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors", PB = "Pull Book",
-                    DR = "Death Roll", GB = "The Gambler", QZ = "Quiz" }
+                    DR = "Death Roll", GB = "The Gambler", QZ = "Quiz",
+                    MP = "Mythic Parley" }
 local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book",
-                     DR = "Death Roll", GB = "Gambler", QZ = "Quiz" }
+                     DR = "Death Roll", GB = "Gambler", QZ = "Quiz",
+                     MP = "Parley" }
 -- CONCURRENCY.md 5.10 rule 1 lists opens "at every scope including group", so
 -- the label set is wider than SCOPE.md 6.3's Guild|Public table.
 local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
@@ -161,6 +163,10 @@ local PROJECTIONS = {
   QZ = function() return PG.QZ and PG.QZ.OpenGames and PG.QZ.OpenGames() end,
   -- note the name: the Pull Book projects OpenBooks, not OpenGames
   PB = function() return PG.PB and PG.PB.OpenBooks and PG.PB.OpenBooks() end,
+  -- the Pull Book's other mode, and the one place the family split shows here:
+  -- MP is its own module code with its own registry, so it projects and joins
+  -- like any other game and shares nothing with PB but a tile
+  MP = function() return PG.MP and PG.MP.OpenGames and PG.MP.OpenGames() end,
 }
 
 local function reconcile()
@@ -248,6 +254,7 @@ local JOINERS = {
   GB = function(e) if PG.GB and PG.GB.JoinOpen then PG.GB.JoinOpen(e.key) end end,
   QZ = function(e) if PG.QZ and PG.QZ.JoinOpen then PG.QZ.JoinOpen(e.key) end end,
   PB = function(e) if PG.PB and PG.PB.JoinBook then PG.PB.JoinBook(e.host, e.token) end end,
+  MP = function(e) if PG.MP and PG.MP.JoinOpen then PG.MP.JoinOpen(e.key) end end,
 }
 
 local function joinEntry(entry)
@@ -508,6 +515,154 @@ local function tileClick(tile)
     if PG.UI.RaiseWindow(WIN_KEY[code]) then return end
   end
   openSetup(code)
+end
+
+-------------------------------------------------------------------------------
+-- THE PULL BOOK SUBMENU (setup:PB), 1.4.0
+--
+-- The Pull Book keeps two books now, and they are not variants of one game:
+--
+--   Raid Pull      bets on the boss in front of you, opened on a strip at every
+--                  ready check or pull timer, settled from ENCOUNTER_END.
+--   Mythic Parley  bets on a whole keystone, committed BEFORE it starts,
+--                  settled from one broadcast after it ends - because inside an
+--                  active key this addon cannot talk to itself AT ALL, for the
+--                  entire run (PARLEY.md 1).
+--
+-- So the Pull Book tile pushes this page instead of opening a dialog, and the
+-- Games grid stays at six tiles. `openSetup` above already prefers a registered
+-- "setup:<CODE>" page over a game's OpenDialog, which is the S5 bridge working
+-- exactly as it was built to: nothing in the tile path had to change.
+--
+-- THE PAGE LIVES HERE, not in either game file, and that is deliberate. It is
+-- navigation chrome, and chrome has to exist and explain itself even when the
+-- thing behind it did not load - the same reason the shell declares its own nav
+-- band instead of deriving it from whatever registered. A page owned by
+-- PullBook.lua would simply be absent if PullBook.lua failed, and the tile would
+-- fall back to opening a dialog that is not there.
+-------------------------------------------------------------------------------
+
+local MODES = {
+  { code = "PB", label = "Raid Pull",
+    sub  = "Kill, first death, boss HP",
+    blurb = "Bets open on a strip at every ready check and every pull timer, and "
+      .. "settle the moment the boss dies or you wipe. Party only." },
+  { code = "MP", label = "Mythic Parley",
+    sub  = "Timed, deaths, wipes, first wall",
+    blurb = "Bets on the whole key, placed before you start it - your addons go "
+      .. "silent for the entire run. Party or guild." },
+}
+
+local modeTiles = {}
+
+-- The page is 420 x 548 and every number below is spent against that, because
+-- the blurb under each tile is real copy and not a caption: at a 16px gap it
+-- rendered straight through the second tile.
+--
+--    -8  page pad (p.__pgTop)
+--   -14  TWO BOOKS            T, BRASS, centred
+--   -34  one-line blurb       S, 2 lines
+--   -76  tile 1               372 x 132   -> bottom -208
+--  -214  its blurb            S, 2 lines, 30 tall -> bottom -244
+--  -258  tile 2               372 x 132   -> bottom -390
+--  -396  its blurb            -> bottom -426
+--  -444  the "why two books" note, S, 5 lines, 66 tall -> bottom -510
+--       = 38 to spare
+local MODE_TILE_W, MODE_TILE_H = 372, 132
+local MODE_Y0 = -76
+local MODE_BLURB_GAP, MODE_BLURB_H = 6, 30
+local MODE_PITCH = MODE_TILE_H + MODE_BLURB_GAP + MODE_BLURB_H + 14
+local MODE_NOTE_Y = MODE_Y0 - 2 * MODE_PITCH - 4
+
+local function modeLoaded(code)
+  local m = PG[code]
+  return type(m) == "table" and type(m.OpenDialog) == "function"
+end
+
+-- SetState rewrites the tile's sub-line on every call (it takes state, sub and
+-- reason together, because on the Games grid those three always change at
+-- once). A mode tile's sub-line is FIXED copy rather than live status, so it has
+-- to be handed back in on every repaint or the first refresh silently blanks it.
+local function refreshModeTiles()
+  for i = 1, #modeTiles do
+    local t = modeTiles[i]
+    if modeLoaded(t.__pgCode) then
+      t:SetState("ready", t.__pgModeSub)
+    else
+      t:SetState("off", t.__pgModeSub, "This mode did not load. Reload your interface.")
+    end
+  end
+end
+
+local function buildPullBookPage(p)
+  local C = (PG.Theme and PG.Theme.C) and PG.Theme.C() or nil
+  local Font = (PG.Theme and PG.Theme.FontTemplate) or nil
+  local top = p.__pgTop or -8
+
+  local head = p:CreateFontString(nil, "OVERLAY", Font and Font("T") or "GameFontNormal")
+  head:SetPoint("TOPLEFT", INSET, top - 6)
+  head:SetPoint("TOPRIGHT", -INSET, top - 6)
+  head:SetJustifyH("CENTER")
+  head:SetWordWrap(false)
+  head:SetMaxLines(1)
+  head:SetText("TWO BOOKS")
+  if C then head:SetTextColor(C.BRASS[1], C.BRASS[2], C.BRASS[3]) end
+  if PG.Theme and PG.Theme.Shadow then PG.Theme.Shadow(head) end
+
+  local blurb = p:CreateFontString(nil, "OVERLAY", Font and Font("S")
+    or "GameFontHighlightSmall")
+  blurb:SetPoint("TOPLEFT", INSET, top - 26)
+  blurb:SetPoint("TOPRIGHT", -INSET, top - 26)
+  blurb:SetJustifyH("CENTER")
+  blurb:SetWordWrap(true)
+  blurb:SetMaxLines(2)
+  blurb:SetText("Same bookie, two very different bets. Pick the one you are "
+    .. "about to run.")
+  if C then blurb:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
+
+  for i = 1, #MODES do
+    local mode = MODES[i]
+    local t = PG.UI.GameTile(p, {
+      code = mode.code, label = mode.label,
+      width = MODE_TILE_W, height = MODE_TILE_H,
+      onClick = function(self)
+        local m = PG[self.__pgCode]
+        if type(m) == "table" and type(m.OpenDialog) == "function" then m.OpenDialog() end
+      end,
+    })
+    t:SetPoint("TOP", p, "TOP", 0, MODE_Y0 - (i - 1) * MODE_PITCH)
+    t.__pgModeSub = mode.sub
+    modeTiles[i] = t
+
+    local line = p:CreateFontString(nil, "OVERLAY", Font and Font("S")
+      or "GameFontHighlightSmall")
+    line:SetPoint("TOPLEFT", t, "BOTTOMLEFT", 2, -MODE_BLURB_GAP)
+    line:SetPoint("TOPRIGHT", t, "BOTTOMRIGHT", -2, -MODE_BLURB_GAP)
+    line:SetJustifyH("LEFT")
+    line:SetJustifyV("TOP")
+    line:SetHeight(MODE_BLURB_H)
+    line:SetWordWrap(true)
+    line:SetMaxLines(2)
+    line:SetText(mode.blurb)
+    if C then line:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
+  end
+
+  -- The "why is this two things" answer, on the page where the question is
+  -- asked, in player language and with no addon jargon in it.
+  local note = p:CreateFontString(nil, "OVERLAY", Font and Font("S")
+    or "GameFontHighlightSmall")
+  note:SetPoint("TOPLEFT", INSET, MODE_NOTE_Y)
+  note:SetPoint("TOPRIGHT", -INSET, MODE_NOTE_Y)
+  note:SetJustifyH("CENTER")
+  note:SetJustifyV("TOP")
+  note:SetHeight(66)
+  note:SetWordWrap(true)
+  note:SetMaxLines(5)
+  note:SetText("Blizzard switches addon chat off for the whole of a Mythic+ run, "
+    .. "so nothing can be agreed, changed or cancelled once the key is in. That "
+    .. "is why the parley is a separate book: everything is settled before you "
+    .. "start, and the result comes back when the key ends.")
+  if C then note:SetTextColor(C.CHGRAY[1], C.CHGRAY[2], C.CHGRAY[3]) end
 end
 
 -- "Tonight: +340g across 4 games." - the one line of ledger on the home page.
@@ -836,6 +991,18 @@ PG.RegisterInit(function()
     PG.UI.Shell.RegisterPage("games", {
       build = buildGamesPage,
       onShow = showGamesPage,
+    })
+    -- Level 2, behind the Games nav item: the Pull Book tile pushes it and Back
+    -- (or a right-click) comes straight back out to the grid. Registered
+    -- unconditionally - if BOTH modes failed to load, the page still opens and
+    -- both tiles say so, which beats a tile that does nothing when clicked.
+    PG.UI.Shell.RegisterPage("setup:PB", {
+      title = "Pull Book",
+      level = 2,
+      nav = "games",
+      accent = "PB",
+      build = buildPullBookPage,
+      onShow = refreshModeTiles,
     })
     PG.UI.Shell.OnBuild(buildFooter)
   end

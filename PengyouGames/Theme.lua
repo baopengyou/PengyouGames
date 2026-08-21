@@ -124,6 +124,12 @@ local ASSETS = {
   book      = { { file = "Interface\\Icons\\INV_Misc_Book_09" },
                 { file = "Interface\\Spellbook\\Spellbook-Icon" },
                 color = { 0.82, 0.72, 0.55, 1 } },   -- PARCH
+  -- 1.4.0, the Mythic Parley's mark. INV_Relics_Hourglass is the icon Blizzard
+  -- puts on the Mythic Keystone item itself, so it is both the right picture
+  -- and one of the oldest paths in the client - no atlas guess needed.
+  keystone  = { { file = "Interface\\Icons\\INV_Relics_Hourglass" },
+                { file = "Interface\\Icons\\INV_Misc_PocketWatch_01" },
+                color = { 0.45, 0.32, 0.68, 1 } },   -- VIOLET
   -- Game tile art (PLAN 2.8). Shipped as PATHS, never file ids: paths are the
   -- durable addressing scheme (the 12.1 manifest keeps existing entries; only
   -- new filenames stop being published), and a miss degrades through Theme.Tex
@@ -147,6 +153,9 @@ local ASSETS = {
                 { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
                 color = { 0.07, 0.08, 0.10, 1 } },
   tile_qz   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-TheAcademy" },
+                { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
+                color = { 0.07, 0.08, 0.10, 1 } },
+  tile_mp   = { { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-TheNecroticWake" },
                 { file = "Interface\\EncounterJournal\\UI-EJ-DUNGEONBUTTON-Default" },
                 color = { 0.07, 0.08, 0.10, 1 } },
 }
@@ -212,6 +221,15 @@ local ACCENT = {
   DR  = { mark = "skull",     color = COLORS.CHRED,   tile = "tile_dr"  },
   GB  = { mark = "greedcoin", color = COLORS.BRASS,   tile = "tile_gb"  },
   QZ  = { mark = "quiz",      color = COLORS.CHGOLD,  tile = "tile_qz"  },
+  -- The Mythic Parley wears the PULL BOOK'S VIOLET on purpose, and it is the
+  -- only accent in the table that is not unique. It is not a seventh game: it
+  -- is the Pull Book's second mode, reached through the Pull Book's own tile,
+  -- and the two belong to one family everywhere they are seen side by side -
+  -- the submenu, the Rules tab strip, an Ask popup. The MARK is what tells them
+  -- apart (a keystone against a ticket), which is the distinction that carries
+  -- meaning; a seventh hue would only have asserted a separation that is not
+  -- there.
+  MP  = { mark = "keystone",  color = COLORS.VIOLET,  tile = "tile_mp"  },
   -- The house accent: hub windows, and any caller that names no game.
   PG  = { mark = "ticket",    color = COLORS.CHGOLD,  tile = "tile_pb"  },
 }

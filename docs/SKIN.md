@@ -347,6 +347,34 @@ pre-existing, kept). Theming:
   composes with Theme.Sound's own checks.)
 - No added animation: the toast's existing fade is its entire motion budget.
 
+### 2.11 MP parley window (`buildDialog` in MythicParley.lua, window key "parley")
+
+520 wide, and the only window in the suite with **two heights**: 620 for the card builder,
+`124 + 44n + 130` for an n-line board. The reason is in `PARLEY.md` 7.2; the presentation
+consequence is that the height change is a real state transition, so it gets an A1 pop
+(`Theme.Pop`) fired on the transition only — never from a repaint, or an inbound bet would
+strobe it.
+
+- **Setup side.** Stake row, a `<` name `>` dungeon picker (never a dropdown, SCOPE.md 5.1),
+  the audience picker, then the card: a scrolling checkbox list under a `goldheader` plate.
+  The plate is the only art on this surface and it is positioned whether or not it renders,
+  per 2.6's rule. Parchment is deliberately NOT used behind the list: Blizzard's own
+  `UICheckButtonTemplate` art sits on it badly and chalk-on-parchment stops being readable.
+- **Board side.** One row per card line: accent emblem, chalk label, backer tally *under* the
+  label (a six-option boss row needs the full width), and a right-aligned block of card-face
+  buttons. Blocks right-align to a common edge whatever they hold, so rows of two and rows of
+  six read as one column; rows of four or more step down to the S font, because a
+  ten-character boss name does not fit a 72px card at display size. Boss buttons carry the
+  short name with the full one on the tooltip.
+- **Motion budget: one animation.** A2 on the just-locked button, and nothing else. The board
+  can be on screen for the whole walk to the portal, and a surface that lives that long earns
+  restraint rather than decoration (rule 6.3).
+- **Stamps (A8):** `PARLEY OPEN` on open, `NO MORE BETS` on lock, `SETTLED` on the frozen
+  report.
+- **The goblin bookie is config-only** and hidden the moment a parley is live: the board
+  spends its width on buttons and its height on rows. His handle still rides every reveal
+  payload, because `Emote` self-gates on visibility.
+
 ### 2.9 Ledger window (key "ledger") + Settle Up + confirm
 
 - Size 400x440 unchanged. Theme `"neutral"`. Title "Pengyou Ledger" Morpheus 20 GOLD.
@@ -383,7 +411,7 @@ snap to base state instantly; never `Finish`).
 | # | Moment | Trigger (code site) | Target | Comp | Loop | OnHide/Stop behavior |
 |---|--------|--------------------|--------|------|------|----------------------|
 | A1 | Window pop-in | OnShow hook of every skinned window/Ask | window | Scale 0.92->1.0 /0.18/OUT/1 + Alpha 0.6->1 /0.15/OUT/1 | NONE | Stop; base state is final state (SetToFinalAlpha true) |
-| A2 | Button lock pop | LG doPick ok; PB lock onSent | the clicked button | Scale 1->0.94 /0.06/IN/1 then 0.94->1 /0.06/OUT/2 | NONE | Stop; button scale snaps to 1 |
+| A2 | Button lock pop | LG doPick ok; PB lock onSent; **MP bet lock onSent** | the clicked button | Scale 1->0.94 /0.06/IN/1 then 0.94->1 /0.06/OUT/2 | NONE | Stop; button scale snaps to 1 |
 | A3 | Chest glow | LG applyResult/applyEnd (win shown) | glow tex (ADD) | Alpha 0->0.7 /0.25/OUT/1 + Alpha 0.7->0 /0.45/IN/2 (endDelay 0.5 on order 1) | NONE | Stop; alpha snaps 0; texture hidden |
 | A4 | Starburst | same as A3 | starburst tex (ADD) | Scale 0.5->1.4 /0.35/OUT/1 + Alpha 0->0.9 /0.12/NONE/1 + Alpha ->0 /0.2/IN/2 | NONE | Stop; hidden |
 | A5 | Coin shower | Theme.CoinBurst (LG reveal/end) | 12 pooled coin texs | per coin: Path(SMOOTH,2cp) /0.9/NONE/1 + Rotation +-200deg /0.9/NONE/1 + Alpha 1->0 /0.3 startDelay 0.6 /NONE/1; per-coin startDelay 0.05*i | NONE | Stop all 12 groups; all coins hidden; pool reusable immediately |
@@ -427,7 +455,15 @@ strings/numbers only (SecretArguments=NotAllowed rule).
 
 Structural guarantee: PB bet-strip interactions occur only during ready check/countdown,
 where Theme.Sound's gates make every key silent — the strip is a silent surface by
-construction, not by discipline. `fanfare` and `cheer` may both fire at END: play
+construction, not by discipline.
+
+**The Mythic Parley's board does NOT have that structure and is silent by DISCIPLINE.**
+Betting happens at the dungeon door, out of combat, with every one of Theme.Sound's gates
+clear, so a key played on a bet click would actually sound — which is why the click plays
+nothing at all and A2's pop is the whole feedback. `MP` plays exactly three keys, the same
+three `PB` does: `greet` (window show), `stamp` (open / lock bets), `bookclose` (the bookie
+cancelling, manual only). Anything that happens *to* a parley — a timeout, an abandoned key,
+a settlement — is silent on the window and speaks only through the shared results stage. `fanfare` and `cheer` may both fire at END: play
 `fanfare` only, then `cheer` VO 0.8 s later via gen-checked timer (skipped if hidden).
 
 ---

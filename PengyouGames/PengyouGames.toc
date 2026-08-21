@@ -1,8 +1,8 @@
 ## Interface: 120007, 120100
 ## Title: Pengyou Games
-## Notes: Six raid-downtime minigames in one window, with a shared virtual-gold ledger. /pg to start.
+## Notes: Six raid-downtime minigames plus a pre-key Mythic+ parley, in one window, with a shared virtual-gold ledger. /pg to start.
 ## Author: Pengyou
-## Version: 1.3.0
+## Version: 1.4.0
 ## SavedVariables: PengyouGamesDB
 
 # ORDERING RATIONALE
@@ -27,6 +27,16 @@
 # 1.1.0 games are appended after them: that IS a behaviour statement (it fixes
 # init-callback order), so it is deliberate rather than alphabetical tidying.
 #
+# MythicParley.lua (1.4.0) sits directly under PullBook.lua rather than at the
+# end, and that placement is the ONE thing about it worth arguing over. It is
+# not a seventh game: it is the Pull Book's second mode, it is reached only
+# through the Pull Book's tile, and the two files are read together whenever
+# either is read. Grouping is what this list is FOR (see above), so the pair
+# stays adjacent. It costs the three 1.1.0 games one position each in
+# init-callback order; none of them registers anything that another module's
+# init reads, so the shift is inert - which is exactly the property the header
+# above spends thirty lines establishing.
+#
 # The one hard rule about this file is its FIRST LINE: it must be a `##`
 # directive, never a bare `#` comment, or 12.0.7 skips every directive in the
 # file (SPEC 2.13). That is why this block sits below the directives.
@@ -41,6 +51,7 @@ Widgets.lua
 Data\QuizData.lua
 Games\LootGoblins.lua
 Games\PullBook.lua
+Games\MythicParley.lua
 Games\RockPaperScissors.lua
 Games\DeathRoll.lua
 Games\Gambler.lua

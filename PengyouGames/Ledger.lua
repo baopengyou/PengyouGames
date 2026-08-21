@@ -61,7 +61,8 @@ local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
 -- every row they write carries a redundant per-entry label string.
 local GAME_LABEL = { LG = "Loot Goblins", PB = "Pull Book",
                      RPS = "Rock Paper Scissors", DR = "Death Roll",
-                     GB = "The Gambler", QZ = "Quiz" }
+                     GB = "The Gambler", QZ = "Quiz",
+                     MP = "Mythic Parley" }
 
 -- forward declaration: the core refreshes an open window after a write
 local Refresh

@@ -2,7 +2,9 @@
 
 Raid-downtime minigames for World of Warcraft (patch 12.1). Six games -- **Loot Goblins**,
 **The Pull Book**, **Rock Paper Scissors**, **Death Roll**, **The Gambler** and **Quiz**
--- run over invisible addon messages while your raid waits between pulls. All gold is
+-- run over invisible addon messages while your raid waits between pulls. The Pull Book
+keeps two books: the raid one, and **the Mythic Parley**, which takes bets on a whole
+Mythic+ key before you put it in. All gold is
 virtual: the addon keeps a shared ledger and, at the end of the night, shows a "Settle Up"
 screen telling players who should pay whom by trade or mail. The addon never touches real
 gold, never posts to chat itself, and hides all of its UI the instant anything
@@ -58,7 +60,8 @@ addon installed; group members without it are simply never bothered.
 | `/pg` or `/pengyou` | Toggle the launcher window |
 | `/pg help` | List every command in your own chat frame |
 | `/pg lg` | Open the Loot Goblins start dialog |
-| `/pg book` | Open the Pull Book dialog |
+| `/pg book` | Open the Pull Book dialog (raid pulls) |
+| `/pg parley` or `/pg mp` | Open the Mythic Parley (bets on a Mythic+ key) |
 | `/pg rps` | Open the Rock Paper Scissors start dialog |
 | `/pg dr` or `/pg deathroll` | Open the Death Roll start dialog |
 | `/pg gb` or `/pg gambler` | Open The Gambler start dialog |
@@ -68,6 +71,7 @@ addon installed; group members without it are simply never bothered.
 | `/pg dnd` | Toggle Do Not Disturb (suppresses popups and toasts) |
 | `/pg settings` | Open settings (sounds, DND, minimap button, combat hiding, window scale, layout reset) |
 | `/pg minimap` | Show/hide the minimap button |
+| `/pg keys` | What the Mythic Parley can see: the season's dungeons, which of them it knows the bosses of, and where it learned them |
 | `/pg comm` | Report the messaging and audience state (why is Public greyed out?) |
 | `/pg rolls` | Report whether this client can read `/roll` results, and the last few it saw |
 | `/pg debug` | Toggle local debug output |
@@ -103,11 +107,19 @@ only be played by people who can see the thing it is scored from.
 | Quiz | Party, Guild, Public |
 | Death Roll | Party, Guild, Public |
 | The Gambler | Party, Guild, Public |
-| The Pull Book | Party only -- scored from the pull you are personally standing in |
+| The Pull Book (raid pulls) | Party only -- scored from the pull you are personally standing in |
+| The Mythic Parley | Party, Guild |
 
 The Pull Book is now the only exception, and it is a real one: the book is settled by the
 boss fight you are personally standing in, so there is nothing a guildmate in a city could
 see.
+
+The Mythic Parley is the same bookie and the opposite situation, which is why it is the one
+Pull Book mode your guild can play. A key gives one clear answer at one moment -- timed or
+not, this many deaths, this many boss wipes -- so a guildmate in a city can take that bet
+without needing to see anything. It stays off Public: a stranger on the realm channel
+calling a gold outcome out of a dungeon nobody can see is a different proposition to a
+guildmate doing it.
 
 The two `/roll` games used to be listed here as party-only for a similar-sounding reason
 -- a `/roll` line reaches your own party and nowhere else. That reason is gone. Each
@@ -129,8 +141,9 @@ the tooltip tells you which game you are in.
 
 Two things are *not* blocked:
 
-- **The Pull Book runs alongside anything.** It is passive betting on your own pulls, so
-  it never takes your one seat and its invitations are never greyed out.
+- **The Pull Book runs alongside anything**, in both modes. It is passive betting, so
+  neither the raid book nor the Mythic Parley takes your one seat, and their invitations
+  are never greyed out.
 - **You can always host.** Starting a game is never blocked by another game: if you are
   already playing something, you run the new one for everybody else without playing in it
   yourself. You take no stake, take no turn, and get no ledger row -- you just hold the
@@ -224,6 +237,57 @@ winners is void -- stakes returned. Results arrive as a quiet toast once combat 
 
 The book stays open pull after pull until the bookie closes it.
 
+### The Mythic Parley
+
+The Pull Book's other book, on the Pull Book tile's submenu (or `/pg parley`). One player
+opens the parley as bookie, picks the dungeon, and posts a **card** of up to five lines.
+
+About the run:
+
+- **Timed?** -- YES / NO.
+- **Deaths** -- OVER / UNDER the line.
+- **Boss wipes** -- OVER / UNDER the line. A wipe is any boss attempt that is not a kill.
+- **Time left** -- OVER / UNDER so many minutes on the dungeon timer.
+- **First death** -- TANK / HEALER / DPS.
+
+About the bosses -- and they are **named, not numbered**, because a route can take them in
+any order it likes. Open on the last boss and wipe, and you walled on *that boss*:
+
+- **First wall** -- which boss do you first wipe on?
+- **Worst boss** -- which one takes the most attempts?
+- ***Boss* one-shot?** -- YES / NO, on one named boss.
+- ***Boss* attempts** -- OVER / UNDER, on one named boss.
+- ***Boss* deaths** -- OVER / UNDER, on one named boss.
+
+Landing exactly on a line counts as UNDER, every time.
+
+**Five lines, no more, and that is a betting limit rather than a screen one.** A line pays by
+splitting the losers' stakes between the winners, so it needs somebody on both sides or it
+voids -- spread five people across a dozen lines and most of them pay nobody.
+
+The dungeon list is this season's, read live from the client, and the boss names come from
+your own Encounter Journal. A dungeon whose bosses cannot be resolved simply offers the
+run-level lines, and learns its bosses the first time you run it.
+
+**Every bet has to be in before the key starts, and that is not a design choice.** Blizzard
+switches addon chat off for the whole of a Mythic+ run -- not just in combat, the entire
+key -- so nothing can be agreed, changed or cancelled once the key is in. Bets lock the
+instant the key starts, the run happens in silence, and the result comes back when the
+addons can talk again. Settlement is parimutuel exactly as in the raid book: losers pay a
+stake each, winners split the pot, a market with fewer than two bettors or everyone on one
+side is void.
+
+**An abandoned key voids everything and returns every stake**, even lines that look decided.
+If a given-up run still paid out, the five people in the dungeon could always end it on
+whichever result they were holding. Posting a card for one dungeon and running a different one
+voids the whole card the same way, for the same reason -- a card is priced against one
+dungeon's timer and one dungeon's bosses, and a group that could void only the lines it was
+losing would have a lever.
+
+The bookie's client is the one that reads and reports the run, because it is the only one
+that watched it -- guild bettors are not in the dungeon at all. One parley covers one key
+and closes when it settles.
+
 ### Rock Paper Scissors
 
 The no-gold game: pure points, pure pride. Anyone starts a match (best of 3 by default);
@@ -300,9 +364,9 @@ can. This is a game for people who would rather not.
 
 ## Virtual gold and settling up
 
-Three games write to the ledger -- **Loot Goblins**, **Death Roll** and **The Gambler**.
-Rock Paper Scissors and Quiz are points-only and never touch it, so they cannot cost
-anybody a copper.
+Four games write to the ledger -- **Loot Goblins**, **Death Roll**, **The Gambler** and
+**the Pull Book in both of its modes**. Rock Paper Scissors and Quiz are points-only and
+never touch it, so they cannot cost anybody a copper.
 
 No gold ever moves through the addon. Every win and loss lands in a local ledger, keyed
 by day. Open it with `/pg ledger`:
@@ -316,12 +380,20 @@ by day. Open it with `/pg ledger`:
 
 ## Known limitations
 
-Pull Book bets are broadcast to the whole group and every client resolves them from its
-own recorded bet set. If someone's client missed a BET broadcast (they logged in late,
+Pull Book and Mythic Parley bets are broadcast to everyone and every client resolves them
+from its own recorded bet set. If someone's client missed a BET broadcast (they logged in late,
 relogged, or a message was dropped by the server), their ledger can disagree with
 everyone else's for that attempt. The ledger is a social scorekeeper, not an
 authoritative bank -- when screens disagree, the raid decides. A reconciliation protocol
 is planned for a later version.
+
+The Mythic Parley narrows that window rather than closing it: bets stop being *sent* the
+moment the bookie locks the table and stop being *accepted* two seconds later, so every
+bet in flight when the key starts lands everywhere or nowhere. A client that misses the
+lock message entirely is still the exception above. Two other parley limits are worth
+knowing: if the bookie disconnects mid-key nobody else can see the run, so the parley
+times out after 90 minutes and every stake comes back; and the result is whatever the
+bookie's client read, because it is the only client that watched.
 
 Death Roll and The Gambler go the other way, and are the most auditable games here: every
 client's ledger is worked out from the same publicly visible rolls, so screens do not
@@ -361,3 +433,8 @@ person.
   this completely: nothing is sent, no bet windows open, and anything that could not be
   delivered is dropped rather than retried. These games are for raid downtime -- trash
   combat in a raid does not interfere.
+- **The Mythic Parley is the one game built around that block rather than stopped by it.**
+  Everything is agreed before the key goes in; the run happens with the addon completely
+  silent; the result is reported once the block lifts. Nothing is sent during the key and
+  no side channel is used to fake it -- Blizzard closes those deliberately, and this addon
+  will not go looking for one.

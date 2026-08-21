@@ -104,8 +104,16 @@ local DB_DEFAULTS = {
     -- half-seeded table invites the next reader to conclude the missing games
     -- have no picker at all. copyDefaults only fills nils, so no existing user
     -- preference is touched either way.
+    --
+    -- MP (the Mythic Parley, 1.4.0) is Party + Guild - the first Pull Book mode
+    -- with an audience wider than the group, because a key produces one discrete
+    -- machine-read result at one known moment and a raid pull does not
+    -- (PARLEY.md 3.3). It is seeded to "group" like everything else: the
+    -- narrowest audience is the rule, not a per-game fact, and the whole point
+    -- of the rule is that a first-time host never lands in front of two hundred
+    -- people before they knew the picker existed.
     scope = { LG = "group", RPS = "group", PB = "group",
-              DR = "group", GB = "group", QZ = "group" },
+              DR = "group", GB = "group", QZ = "group", MP = "group" },
   },
   ledger = { sessions = {}, lifetime = {} },
 }
@@ -583,6 +591,12 @@ local function onSlash(msg)
     if PG.LG and PG.LG.OpenDialog then PG.LG.OpenDialog() end
   elseif cmd == "book" then
     if PG.PB and PG.PB.OpenDialog then PG.PB.OpenDialog() end
+  -- The Pull Book's other mode. It gets its OWN command rather than routing
+  -- through the submenu, for the same reason every other game has one: a slash
+  -- command exists to skip the navigation, and "/pg book, then click twice" is
+  -- not skipping it.
+  elseif cmd == "mp" or cmd == "parley" then
+    if PG.MP and PG.MP.OpenDialog then PG.MP.OpenDialog() end
   elseif cmd == "rps" then
     if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
   -- Two-letter code AND a word for each of the 1.1.0 games: lg/book/rps
@@ -627,6 +641,26 @@ local function onSlash(msg)
       DEFAULT_CHAT_FRAME:AddMessage("PengyouGames scope: " .. table.concat(parts, "  ")
         .. "  publicIndex=" .. (idx and tostring(idx) or "none"))
     end
+  elseif cmd == "keys" then
+    -- The Mythic Parley leans on four things about this client that no amount of
+    -- reading the code can confirm: that the season list arrived, that the
+    -- Encounter Journal can be matched to a challenge map, that the comms
+    -- lockdown behaves, and which dungeons it therefore knows the bosses of.
+    -- Every one of them FAILS SAFE - a line is quietly not offered - which is
+    -- exactly why it needs a command: a safe failure and a broken addon look
+    -- identical from the outside. Same job as /pg comm and /pg rolls.
+    if not (PG.MP and PG.MP.Diagnose) then
+      DEFAULT_CHAT_FRAME:AddMessage("PengyouGames keys: the Mythic Parley did not load.")
+    else
+      local ok, lines = pcall(PG.MP.Diagnose)
+      if not ok or type(lines) ~= "table" then
+        DEFAULT_CHAT_FRAME:AddMessage("PengyouGames keys: diagnostic failed.")
+      else
+        for i = 1, #lines do
+          DEFAULT_CHAT_FRAME:AddMessage("PengyouGames keys: " .. tostring(lines[i]))
+        end
+      end
+    end
   elseif cmd == "rolls" then
     -- The /roll parser is built from this client's own RANDOM_ROLL_RESULT and
     -- self-tests at init (BRIEF 3.2). When it fails, Death Roll and Gambler
@@ -659,10 +693,11 @@ local function onSlash(msg)
     f:AddMessage("PengyouGames commands (everything prints only to you):")
     f:AddMessage("  /pg                                    open the launcher")
     f:AddMessage("  /pg lg | book | rps | dr | gb | quiz   start that game")
+    f:AddMessage("  /pg parley                             bet on a Mythic+ key")
     f:AddMessage("  /pg rules                              how to play")
     f:AddMessage("  /pg ledger                             tonight's nets and Settle Up")
     f:AddMessage("  /pg settings                           sounds, DND, minimap, scale")
-    f:AddMessage("  /pg dnd | minimap | comm | rolls | debug")
+    f:AddMessage("  /pg dnd | minimap | comm | rolls | keys | debug")
   elseif cmd == "debug" then
     PG.debug = not PG.debug
     DEFAULT_CHAT_FRAME:AddMessage("PengyouGames: debug " .. (PG.debug and "ON" or "OFF"))

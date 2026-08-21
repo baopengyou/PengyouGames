@@ -60,6 +60,33 @@ distribution rather than parsed out of text.
 
 ---
 
+## 0c. Mythic Parley delta (2026-08-21) - a seventh module, and the first Pull Book mode with a wide scope
+
+`1.4.0` adds **`MP`, the Mythic Parley** (`docs/PARLEY.md`, binding) - the Pull Book's second
+mode, in its own file with its own module code and its own registry. Selecting *Pull Book* on the
+Games page now pushes a two-tile submenu (*Raid Pull* / *Mythic Parley*) instead of opening a
+dialog; the Games grid stays at six tiles.
+
+`PG.MP.SCOPES = { group = true, guild = true, public = false }`
+
+| Section | Delta |
+|---|---|
+| 1.2's table, and 0a's extension of it | **Seven module codes now.** `LG` `RPS` `QZ` `DR` `GB` all three; `PB` party only; **`MP` party + guild**. `PB` is still the only game with a single segment. |
+| 1.2's ruling that "The Pull Book is Party only" | **Unchanged for `PB`, and not extended to `MP`.** The reasoning ("the outcome is inseparable from the raid the bookie is physically standing in") is still exactly right about the raid book, and the raid book is still party-only. It does not carry to a keystone, and the difference is not a matter of degree: a key produces **one discrete machine-read result at one known moment** - `onTime`, a death count, a wipe count - where a raid book produces a running stream of encounter events with a new settlement every pull. There is one thing to report and one moment to report it, which is what makes a spectator audience coherent here and incoherent there. Owner decision, 2026-08-21; full argument in `PARLEY.md` 3.3. |
+| 1.2's public segment | `MP` is **not** on Public, and this is the residual half of 1.2's original risk analysis surviving intact. At public scope `Ledger.Commit` demands a witnessed roster and there is no independent source to check a name against; a stranger on the realm channel dictating a gold outcome from a dungeon nobody can see is the unbounded version of exactly what 1.2 refused. The segment renders disabled with its own reason string. |
+| 1.3's live-query rule, applied to a season | `MP`'s dungeon list is `C_ChallengeMode.GetMapTable()`, re-read on every repaint rather than cached, for 1.3's reason one level up: a season can roll over under a running client exactly as a group can dissolve under an open dialog. Nothing about the rotation is shipped data. |
+| 2.3, all 1:1 traffic goes by whisper | **Unchanged and newly trivial.** `MP` has NO 1:1 traffic: every message it sends is a broadcast. Its boss names ride a broadcast `ROSTER` rather than being resolved per client, so one authority names the bosses and every board reads the same. |
+| 3.4 / `WIRE_VERSION` | **No bump. Still `4`.** A bump exists to stop two clients producing divergent ledgers for ONE game. A 1.3.0 client has no `MP` handler registered, so `Comm`'s router drops every `MP` message at the `moduleHandlers` lookup: it never joins, never bets, never appears in a bet map and never writes a row. Nobody is scored as a no-show and nobody pays for a message they could not send - which is the failure the v3→v4 bump was made for. Additive module codes are the one protocol change that does not need a version. |
+| 4.3, trust predicates | `MP` registers `function() return false end`, the `PB` line for a different reason. `PB` vouches for nobody because every legal sender is already covered by Comm's group test; `MP` because it has **no 1:1 traffic at all** - every message it sends is a broadcast, so a whisper claiming to be `MP` is by construction not ours. |
+| 4.4, `meta.vouch` | `MP` passes one at every scope, built from the names in its own bet map - the roster this client itself watched fill up, one server-vouched `BET` at a time. It is not *required* at guild scope (the guild cache is an independent source) but a cold guild roster is real, and a `"vouch"` refusal would read as a bug rather than a cache miss. |
+| 6.2, wide-scope heartbeats | `MP` uses `HB_MISS_SECS = 50` at group scope and `HB_MISS_WIDE = 300` at guild, for 0b's reason. It adds one rule those games have no need for: **while a parley is `locked`, the liveness deadline is suspended entirely.** A locked bookie is inside the M+ comms lockdown by definition and cannot heartbeat for the whole run; a client that timed it out at 50 seconds would kill every parley 50 seconds into every key. The bound while locked is `LOCK_MAX` (90 minutes), and it voids rather than settles. |
+| Group-scope facts inside the game | `MP`'s gate `j` for `BET` is `inGroupNow(sender)` at group scope and **the delivery distribution itself** at guild scope - only an actual guildmate can send on `GUILD`, which is strictly stronger than a roster lookup against a cache that may be cold. Its self-lock on `RESTRICT_ON` is likewise gated on `scope == "group"`: outside the group our own restriction says nothing about the bookie's, and the lock is final, so an ungated one would let a guildmate who pulls a raid boss lock themselves out of a table that is still wide open. |
+| 4.4's participation gate, at the edges | `MP` has two whole-card voids that write NOTHING to the ledger rather than writing a refund: an abandoned key, and a key that is not the one the card was posted for. Both are anti-manipulation rules rather than readability ones - the facts are perfectly readable in each case - and both are stated in `PARLEY.md` 3.1 and 3.5. |
+| 6.3's five-row list | A `MP` row leaves the *Open games* list the moment its parley LOCKS, rather than at TTL: its bets are shut, so a Join would hand the player a table they can only watch. Any `PG.UI.Ask` it raised is dismissed at the same instant (`CONCURRENCY.md` 5.6 rule 4). |
+| 6.3, the invite budget | Guild-scope `OPEN` never auto-adopts (I7 is a wide-scope rule and this is the first Pull Book mode that has a wide scope). It raises a `PG.UI.Ask` within `GuildAskOK`/`GuildAskSpend`, and over budget it falls back to the launcher's *Open games* row plus one throttled toast, exactly as `LG` and `RPS` do. Party-scope `OPEN` still adopts on hearing, for the Pull Book's reason: you are in the group that is about to run the key, and there is nothing to consent to until you click a pick. |
+
+---
+
 ## 0. What is being built, in one paragraph
 
 Each game's start dialog gains an **Audience** control with three segments — *Party*, *Guild*,

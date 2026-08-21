@@ -180,6 +180,74 @@ local PAGES = {
       { "p", "The book is scored from the boss fight you are standing in, so "
         .. "only your own group can see the same result you do. Unlike the "
         .. "other games, it cannot be played guild-wide or publicly." },
+      { "h", "The other book" },
+      { "p", "The Pull Book tile opens a menu with two books in it. This is the "
+        .. "raid one. The Mythic Parley is the other: bets on a whole Mythic+ "
+        .. "key, placed before you start it, and that one your whole guild can "
+        .. "get in on. It has its own page here." },
+    },
+  },
+  MP = {
+    title = "Mythic Parley",
+    tagline = "Call the key before you put it in.",
+    blocks = {
+      { "h", "The idea" },
+      { "p", "One player opens the parley, picks the dungeon and posts a CARD: "
+        .. "up to five things to bet on. Everyone picks a side - and then the "
+        .. "key starts, and nobody can change anything." },
+      { "h", "Why it works this way" },
+      { "p", "Blizzard switches addon chat off for the whole of a Mythic+ run. "
+        .. "Not just in combat - the entire key, start to finish. So every bet "
+        .. "has to be in before the key goes in, and the result comes back "
+        .. "afterwards, when the addons can talk again. There is no betting "
+        .. "once you are inside, and there is no changing your mind." },
+      { "h", "Lines about the whole run" },
+      { "b", "Timed? YES or NO." },
+      { "b", "Deaths - OVER or UNDER the line." },
+      { "b", "Boss wipes - OVER or UNDER the line. A wipe is any boss attempt "
+        .. "that does not end in a kill." },
+      { "b", "Time left - OVER or UNDER so many minutes on the timer." },
+      { "b", "First death - TANK, HEALER or DPS: who goes down first?" },
+      { "h", "Lines about the bosses" },
+      { "b", "First wall - which boss do you first wipe on?" },
+      { "b", "Worst boss - which one takes the most attempts?" },
+      { "b", "One-shot? - does a named boss go down first try, YES or NO?" },
+      { "b", "Attempts - OVER or UNDER, on one named boss." },
+      { "b", "Deaths - OVER or UNDER, on one named boss." },
+      { "p", "The bosses are named, not numbered, and that is on purpose: a "
+        .. "route can take them in any order it likes. If you open on the last "
+        .. "boss and wipe, you walled on THAT boss - not on 'boss one'." },
+      { "p", "Landing exactly on a line counts as UNDER, every time. Under 6 "
+        .. "deaths means six deaths or fewer." },
+      { "h", "The card" },
+      { "p", "Five lines, no more. Not a screen limit - a betting one. Each "
+        .. "line pays out by splitting the losers' stakes between the winners, "
+        .. "so a line needs somebody on both sides or it voids and the gold "
+        .. "goes back. Spread five people across a dozen lines and most of them "
+        .. "pay nobody." },
+      { "p", "Click to bet; your first click on a line locks it in. Bet on as "
+        .. "few lines as you like." },
+      { "h", "If the key is abandoned" },
+      { "p", "Every line voids and every stake comes back - even the ones that "
+        .. "look decided. If a given-up run still paid out, the five people in "
+        .. "the dungeon could always end it on the result they were holding. "
+        .. "Nobody can steer a refund." },
+      { "p", "The same goes if you post a card for one dungeon and run a "
+        .. "different one - the whole card voids, not just the boss lines. A "
+        .. "card is priced against one dungeon: its timer, its bosses, its "
+        .. "difficulty. Under 6 deaths in a three-boss key is not the same bet "
+        .. "as under 6 in a four-boss one." },
+      { "h", "Party or guild" },
+      { "p", "This is the one book your guild can play. A key gives one clear "
+        .. "answer at one moment - timed or not, this many deaths - so people "
+        .. "who are not in the dungeon can still take the bet. The party runs "
+        .. "the key; everybody else watches the gold." },
+      { "p", "The result is read and reported by whoever opened the parley, "
+        .. "because they are the one whose client watched the run." },
+      { "h", "About the gold" },
+      { "p", "All gold here is virtual and the addon never moves a single "
+        .. "copper. The Ledger tab tallies who owes whom; settling up is on "
+        .. "you." },
     },
   },
   DR = {
@@ -580,6 +648,12 @@ end
 local TAB_ORDER = {
   { "LG", "Loot Goblins" }, { "PB", "Pull Book" }, { "RPS", "Rock Paper" },
   { "DR", "Death Roll" }, { "GB", "The Gambler" }, { "QZ", "Quiz" },
+  -- 1.4.0. The Mythic Parley gets its own page rather than a section on the
+  -- Pull Book's, because the two share a bookie and nothing else a player needs
+  -- to know: different markets, different bet window, different audience, and a
+  -- different reason for every one of those. Its tab sits directly under the
+  -- Pull Book's, which is where the third row starts anyway.
+  { "MP", "Mythic Parley" },
 }
 
 -- UIPanelScrollFrameTemplate anchors its bar OUTSIDE the frame at x=+6, so a
@@ -633,7 +707,12 @@ local function build(pageFrame)
 
   -- scroll area. Both insets are derived: the left is the page inset, the right
   -- is the page inset plus the scrollbar's own width.
-  local stripH = TAB_PITCH * 2 - M.LINE
+  -- Derived, not the literal 2 it used to be: the strip was six tabs in two
+  -- rows of three, and a seventh silently rendered a third row ON TOP of the
+  -- scroll frame. math.ceil, and math.floor above, because WoW Lua is 5.1 and
+  -- has no integer-division operator.
+  local TAB_ROWS = math.ceil(#TAB_ORDER / 3)
+  local stripH = TAB_PITCH * TAB_ROWS - M.LINE
   scroll = CreateFrame("ScrollFrame", nil, win, "UIPanelScrollFrameTemplate")
   scroll:SetPoint("TOPLEFT", M.INSET, M.FIRST - stripH - M.SECTION)
   scroll:SetPoint("BOTTOMRIGHT", -SCROLLBAR_RESERVE, M.FOOTER)
