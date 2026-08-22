@@ -637,16 +637,38 @@ local function learnBoss(mapId, encounterID, encounterName)
   learning[id][math.floor(eid)] = nm
 end
 
-local function commitLearned(mapId)
+-- MERGES what this run has seen into whatever is already known, and is safe to
+-- call after every single boss rather than only at completion. Three properties
+-- earn it that:
+--
+--   * it never destroys `learning`, so a two-boss dungeon still reaches the
+--     two-entry minimum a roster needs;
+--   * it unions with the saved list, so a key that is abandoned after one boss
+--     still contributes that boss, and next week's run adds the rest;
+--   * it will not overwrite a JOURNAL roster, which has the canonical boss
+--     order - a learned list is sorted by id, which is stable but arbitrary.
+local function flushLearned(mapId)
   local id = PG.SafeNum(mapId)
   if not id then return end
   id = math.floor(id)
   local seen = learning[id]
-  learning[id] = nil
   if not seen then return end
-  if rosterOf(id) then return end   -- already known; do not overwrite
+  if rosterSrc[id] == "journal" or rosterSrc[id] == "map" then return end
+  local byId = {}
+  local existing = rosterMemo[id]
+  if type(existing) ~= "table" then
+    local db = mpdb()
+    existing = db and db.bosses[id]
+  end
+  if type(existing) == "table" then
+    for i = 1, #existing do
+      local e = existing[i]
+      if type(e) == "table" and e.id then byId[e.id] = e.name end
+    end
+  end
+  for eid, nm in pairs(seen) do byId[eid] = nm end
   local list = {}
-  for eid, nm in pairs(seen) do list[#list + 1] = { id = eid, name = nm } end
+  for eid, nm in pairs(byId) do list[#list + 1] = { id = eid, name = nm } end
   table.sort(list, function(a, b) return a.id < b.id end)
   local norm = normalizeRoster(list)
   if not norm then return end
@@ -1296,6 +1318,18 @@ end
 
 local function onEncounterEnd(_, encounterID, encounterName, _, _, success)
   pcall(function()
+    -- LEARNING IS ALWAYS ON and needs no parley. Every keystone this character
+    -- runs teaches its client that dungeon's bosses, by identity and by name,
+    -- whether or not anybody is betting. This is what makes the mode self-heal
+    -- on a client whose Encounter Journal never answers: play your keys as
+    -- normal and the per-boss lines turn up on their own, one dungeon at a
+    -- time. Flushed per boss rather than at completion, so an abandoned key
+    -- still contributes what it showed us.
+    local liveMap = activeMapId()
+    if liveMap then
+      learnBoss(liveMap, encounterID, encounterName)
+      flushLearned(liveMap)
+    end
     local rec = myParley()
     if not (rec and rec.isBookie and rec.phase == "locked") then return end
     local run = runOf(rec)
@@ -1303,7 +1337,6 @@ local function onEncounterEnd(_, encounterID, encounterName, _, _, success)
     local id = PG.SafeNum(encounterID)
     if not id then return end
     id = math.floor(id)
-    learnBoss(rec.actualMapId or rec.mapId, id, encounterName)
     local succ = PG.SafeNum(success)
     -- succ nil (secret or unreadable) counts as neither a kill nor a wipe: an
     -- encounter this client could not read is not evidence of anything, and
@@ -1462,7 +1495,7 @@ local function onChallengeCompleted()
     if run.done then return end
     run.done = true
     run.active = false
-    commitLearned(rec.actualMapId or rec.mapId)
+    flushLearned(rec.actualMapId or rec.mapId)
     scheduleRES(rec, readCompletion(rec))
   end)
 end
@@ -2413,8 +2446,8 @@ refreshCard = function()
   elseif roster then
     dungeonNote:SetText(#roster .. " bosses known - per-boss lines are available.")
   else
-    dungeonNote:SetText(P.chgray .. "Bosses unknown for this dungeon, so only the "
-      .. "run-level lines are offered. Run it once and the parley learns them.|r")
+    dungeonNote:SetText(P.chgray .. "Bosses unknown here - run-level lines only. "
+      .. "Just run this key once and they appear; /pg keys says why.|r")
   end
   for r = 1, G.MAX_CARD_ROWS do
     local row = cardRows[r]

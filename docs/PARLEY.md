@@ -130,8 +130,16 @@ came back, fall back, and have an honest bottom:
    are about to run
 4. **the journal, by walking its tiers**, matched to the challenge map **by name** (both strings
    come from the same client in the same locale, so they agree)
-5. what a completed run taught us: every `ENCOUNTER_END` during a key records `(id, name)` for
-   the dungeon it happened in, committed on completion if nothing better answered
+5. **what any key you run teaches this client.** `ENCOUNTER_END` during an active keystone
+   records `(id, name)` for the dungeon it happened in — **always, with or without a parley
+   open**, and flushed after every boss rather than at completion. It *merges* rather than
+   replaces, so a key abandoned after one boss still contributes that boss and next week's run
+   adds the rest, and it will not overwrite a journal roster (which has the canonical order,
+   where a learned list is sorted by id — stable, but arbitrary).
+
+   This is the path that does not depend on the Encounter Journal at all, and it is why a
+   client whose journal never answers still ends up with per-boss lines: play your keys as
+   normal and the dungeons fill in one at a time.
 6. nil — and the per-boss lines are simply not offered, with the card page saying so and saying
    what fixes it ("run it once and the parley learns them")
 

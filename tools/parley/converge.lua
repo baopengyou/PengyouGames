@@ -437,4 +437,66 @@ check("a genuinely different name is still refused",
   #H.shownChecks() == 5, #H.shownChecks())
 _G.EJ_GetInstanceByIndex = realByIndex
 
+-------------------------------------------------------------------------------
+print()
+print("== E. learning works with no journal at all ==")
+-------------------------------------------------------------------------------
+
+-- The journal-free path: a client whose Encounter Journal answers NOTHING must
+-- still end up knowing a dungeon's bosses, just by running keys. No parley is
+-- involved in any of this.
+local realTiers2 = _G.EJ_GetNumTiers
+local realForMap = _G.EJ_GetInstanceForMap
+_G.EJ_GetNumTiers = function() return 0 end
+_G.EJ_GetInstanceForMap = nil
+_G.C_Map = nil
+
+local L = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+H.created = {}
+L.PG.MP.OpenDialog()
+check("with no journal, only the run-level lines are offered",
+  #H.shownChecks() == 5, #H.shownChecks())
+
+-- run a key with NO parley open at all
+H.keyActive = 391
+fire(L, "ENCOUNTER_END", 2926, "Avanoxx", 8, 5, 1)
+check("one boss is not yet a roster", (L.PG.db.mp.bosses[391] == nil), "stored too early")
+fire(L, "ENCOUNTER_END", 2900, "Ki'katal the Harvester", 8, 5, 0)
+check("two bosses is", type(L.PG.db.mp.bosses[391]) == "table"
+  and #L.PG.db.mp.bosses[391] == 2, L.PG.db.mp.bosses[391] and #L.PG.db.mp.bosses[391])
+
+-- the key is ABANDONED here - no CHALLENGE_MODE_COMPLETED - and what it taught
+-- us survives anyway
+H.keyActive = nil
+L.PG.MP.OpenDialog()   -- NB: no H.created reset - the window already exists and
+                       -- builds nothing on a second open, so the recorder from
+                       -- the first open is the only one there will ever be
+check("an abandoned key still taught the client two bosses",
+  #H.shownChecks() == 5 + 2 + 2 * 3, #H.shownChecks())
+
+-- a later run adds the third
+H.keyActive = 391
+fire(L, "ENCOUNTER_END", 2906, "Anub'zekt", 8, 5, 1)
+H.keyActive = nil
+L.PG.MP.OpenDialog()
+check("a later run adds the boss the first one skipped",
+  #H.shownChecks() == 5 + 2 + 3 * 3, #H.shownChecks())
+local ld = table.concat(L.PG.MP.Diagnose(), " / ")
+check("/pg keys credits the run", ld:find("learned from a run", 1, true) ~= nil, ld)
+
+-- and a journal answer, when one arrives, is not clobbered by later runs
+_G.EJ_GetNumTiers = realTiers2
+_G.EJ_GetInstanceForMap = realForMap
+local J2 = H.newClient(ROOT, "Ann-R")
+H.ME = "Ann-R"
+J2.PG.MP.OpenDialog()
+local before = J2.PG.db.mp.bosses[391]
+H.keyActive = 391
+fire(J2, "ENCOUNTER_END", 2926, "Avanoxx", 8, 5, 1)
+H.keyActive = nil
+check("a journal roster is not overwritten by a run",
+  J2.PG.db.mp.bosses[391] == before
+    and table.concat(J2.PG.MP.Diagnose(), " "):find("Encounter Journal", 1, true) ~= nil)
+
 H.done()
