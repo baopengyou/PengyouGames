@@ -1,0 +1,8 @@
+## Interface: 120007, 120100
+## Title: Pengyou Probe
+## Notes: Passive field logger: when addon messages actually lock down, and what send results come back. Wear it for one raid night, then /probe export.
+## Author: Pengyou
+## Version: 0.1.0
+## SavedVariables: PengyouProbeDB
+
+Probe.lua
