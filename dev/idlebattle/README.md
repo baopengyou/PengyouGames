@@ -45,6 +45,14 @@ tools/m4.sh                  # the whole M4 gate: the A.11 codec, then 177 net
                              #   across four scenarios. ~30 s
 tools/m4.sh "$(which luajit)"    # the 5.1-semantics half; compare the four
                              #   per-step SUITE HASHes
+
+tools/syncaddon.sh           # M5: copy the engine into the DEV addon
+                             #   (dev/PengyouGamesDev/IdleBattle/), regenerate
+                             #   the derived HandLog.lua, run the loadtest
+tools/syncaddon.sh --check   # M5 drift gate: non-zero if any addon copy
+                             #   differs byte-for-byte from its original here,
+                             #   the derived file from its sources, or the
+                             #   .toc engine order no longer loads
 ```
 
 **They are two gates, not one, and both must be run.** `tools/m2.sh`'s header gives
@@ -407,6 +415,17 @@ tools/               checkers and the first test suite. NOT held to the sim's de
                      NOT prove (no real channel, no halt/resume, one
                      process). Run it twice and compare the four per-step
                      SUITE HASHes.
+  syncaddon.sh       M5: the ONE bridge between this tree and the DEV addon.
+                     Copies the eight engine files the addon mounts into
+                     dev/PengyouGamesDev/IdleBattle/ (byte-identical),
+                     generates HandLog.lua there from harness/logs/hand.iblog
+                     plus the committed goldens in harness/selftest.lua, and
+                     LOADTESTS the addon's actual .toc order headless with
+                     require() disabled. --check proves all of it instead of
+                     writing it. THE HEADLESS TREE IS EDITED AND THE ADDON IS
+                     SYNCED, NEVER THE REVERSE -- an edit made in the copies
+                     is a second, untested game that no gate here reads, and
+                     --check exists to turn that state into a red build.
 
 harness/             the SECOND suite, and not redundant with tools/. Three things live
                      ONLY here, and the M1 gate is dishonest without them:
@@ -2908,6 +2927,178 @@ mistakes the shim's counter for load-bearing.
 
 ---
 
+## M5 part 1 - the engine mounted in the DEV addon, and the real-channel bridge (2026-08-21)
+
+Part E's M5 is "first playable, over the wire: register `IB` on `Comm.lua`.
+`OPEN`/`JOIN`/`S`/`C`/`H` only. Party scope. Two real characters. Content per
+D.1." **Part 1 is the PLUMBING**: the engine mounted inside
+`dev/PengyouGamesDev/` (the DEV addon that installs alongside the live one so
+experiments can never touch real raiders), the comm bridge onto the addon's
+real channel, matchmaking through the shipped session system, the tick driver,
+and an in-game determinism selftest. **The board UI is part 2**; the match
+surface shipped here is a marked stub (session status, tick, Levy, keep HP
+both sides, one deploy and one build button - enough to drive a real match
+end-to-end between two clients). The M5 milestone (a complete 600-second match
+between two accounts, hashes matching at every heartbeat, traffic under 32
+messages/min) is **not claimed** until part 2 has run it with two real
+characters.
+
+**Nothing in the engine's behaviour changed.** `rulesHash` is still
+`767294897` (`cotsj5`), all four goldens are exactly M3's, and `tools/ci.sh
+1000` and `tools/m4.sh` are GREEN on the tree carrying the one edit below.
+
+**THE ONE HEADLESS EDIT: registration tails.** The addon files were already
+written to IMPORT through the `IB_SIM_MODULES` global
+(`IB_SIM_MODULES and IB_SIM_MODULES.Hash or require("sim.Hash")`), and that
+pattern covers every cross-file reference in the eight mounted files (verified:
+Rules->Hash; Sim->Hash,Rand,Mods; Wire->Rules,Hash; Snap->Hash;
+Net->Rules,Sim,Hash,Wire,Snap; Hash, Rand and Mods import nothing). What the
+tree did NOT have was the EXPORT half: WoW discards a chunk's return value, so
+`return M` reaches nobody inside the addon and a loader file alone has nothing
+to populate the table WITH. The arcade hit exactly this and its answer is the
+established idiom (`devarcade/PengyouArcade/sim/Fixed.lua`): each engine file
+now ends with a REGISTRATION TAIL -
+`local IB_REG = rawget(_G, "IB_SIM_MODULES"); if IB_REG then IB_REG.Hash = M end`
+- which is a no-op headless (the global does not exist), adds no state, and
+runs once at load. The full argument sits in `sim/Hash.lua`'s tail; the other
+seven point at it. `fog/Fog.lua` and `net/Transport.lua` do NOT carry tails:
+Fog mounts at M7 (give it one then), Transport never ships (the bridge in
+`Games/IdleBattle.lua` is its real-channel replacement).
+
+**What is mounted, and the sync rule.** `dev/PengyouGamesDev/IdleBattle/`
+holds byte-identical copies of `sim/Rules.lua sim/Rand.lua sim/Hash.lua
+sim/Sim.lua sim/Mods.lua net/Wire.lua net/Net.lua net/Snap.lua`, a `Loader.lua`
+that creates `IB_SIM_MODULES` (the addon's one deliberate, documented new
+global), and a generated `HandLog.lua`. `tools/syncaddon.sh` is the only
+bridge; `--check` byte-compares every copy, regenerates and compares the
+derived file, and re-executes the addon's actual `.toc` engine order headless
+with `require()` disabled - so a drifted copy, a stale derived file, a missing
+tail or a broken load order is a red build, not a login surprise. **The
+headless tree is edited and the addon is synced, never the reverse** (stated
+in `dev/PengyouGamesDev/IdleBattle/README.md` too, which marks the folder
+generated).
+
+**The in-game determinism proof: `/pgd ib selftest`.** Runs the committed
+hand-written log - `harness/logs/hand.iblog`, embedded by the sync script as
+`HandLog.lua` together with the three committed goldens EXTRACTED from
+`harness/selftest.lua` (written down once, never hand-copied twice) - inside
+the WoW client, asserts the tick-250 landmarks section 3 asserts by hand (both
+spears halted at 970 on 4 HP), and prints rulesHash + terminal stateHash +
+logDigest against `767294897 / 1939244196 / 1455081792`. One match, 260 ticks,
+no fuzz, runnable solo in well under a second: it turns "we believe WoW Lua
+matches LuaJIT" into a one-command in-game check, and a RED there means THIS
+CLIENT would desync a real match.
+
+**The comm bridge (`Games/IdleBattle.lua`), family by family.** `net/Wire.lua`
+encodes a complete envelope (`4|IB|mtype|wireToken|payload`); the addon
+channel has its own envelope and token discipline, so the bridge decomposes
+outbound strings and re-frames inbound payloads, and the engine's surface is
+consumed exactly as `harness/m4run.lua` consumes it (`Net.new{send=...}`,
+`ep:onWire(msg, now)`, `ep:step(now)`, `ep:issue(...)`):
+
+| A.11 family | addon send path | note |
+|---|---|---|
+| `OPEN` | party broadcast, addon row `OPEN\|token\|joinSecs\|matchTicks\|P` | the shipped games' matchmaking shape, session token per CONCURRENCY 3.2 |
+| `JOIN` | whisper to host, addon row | plus addon rows `BEGIN` / `CANCEL` / `NO reason` for pairing, teardown and the two A.11.1 refusals - pre-sim lifecycle is addon-layer, exactly as Wire.lua's header planned |
+| `S` `C` `H` `N` `M` | **party-scope broadcast**, payload as one field | one route, server-vouched distribution, bystanders drop at the registry in one lookup. Deviation from A.11.1's "S whispered" recorded below |
+| `Q` (request) | **whisper to the peer** | point-to-point like the shipped resync's `SYNCQ`; it concerns exactly one client |
+| `Q` (answer stream) | rides the broadcast path | it is made of ordinary fresh-`S`/`H`/verbatim-`C` rows; the bridge routes by mtype and holds no per-message context, and in a 1v1 every in-match row has exactly one consumer either way |
+| `V` | broadcast, Wire-encoded | the one wire row the ADDON acts on in M5 (Net defers X/K/G/V to M6): every mid-match interruption VOIDS |
+| `X` `K` `G` | not sent, ignored on receipt | M6 |
+
+The wire token (`Wire.token(seed)`, both ends derive it from the handshake
+seed) never travels: the on-wire identity is the registry's server-vouched
+`(host, sessionToken)` pair, which is strictly stronger, and the bridge
+re-frames inbound payloads with the match's own wire token so `Net`'s check
+can never false-positive. Every payload is pipe-free by Wire's own alphabet;
+the largest on-wire message is a C batch of 8 at ~75 bytes against the
+200-byte discipline.
+
+**The real-budget resolution (M4 finding 3's "4 per flush", resolved against
+the ACTUAL bucket in `Comm.lua`).** Net's own C bucket (capacity 4, refill 1
+per 4 s) IS A.11.4's module bucket and matches the 15/min worst row. The
+repair path's 4-per-flush cap, which against the fake channel could burst, is
+bounded on the real channel by two facts the shim lacked: the addon's shared
+bucket (capacity 10, refill 1/s) QUEUES overflow instead of refusing it, so a
+repair burst drains at 1/s without tripping the server throttle; and transit
+loss does not exist on the addon channel - messages die only at SEND time,
+where throttle entries are requeued by Comm itself and lockdown/audience drops
+VOID the match - so repair runs dry in every healthy match. Steady state is H
+10/min + C <= 15/min ~ 0.42/s per side, leaving over half the refill for the
+other games. The one transient exception: a Q recovery (~20 messages paced by
+Net at 10 per 10 s) saturates the refill for ~20 s and other modules' traffic
+queues a few seconds behind it - accepted, rare, bounded, and shared-bucket
+capacity work is explicitly out of module scope (CONCURRENCY 9.9). **No second
+bridge-side bucket was added**; adding one would delay repair for fairness the
+queue already provides losslessly.
+
+**Matchmaking rides the shipped session system.** Lite records for overheard
+OPENs (caps, TTLs, recent-token poisoning, supersession, the 4.2 decision
+table), invitation popup / launcher Open-games row per the busy rules, the
+single round-based seat claimed at accept and at hostOpen, teardown through
+`endSession` on every path. The handshake is A.11.1 through the engine's own
+codec: host pairs with the FIRST `JOIN`, both sides exchange `S` (IBPROTO,
+seed, rulesHash, matchTicks, loadout - EMPTY per D.1, but the field ships),
+each side validates before feeding its endpoint and REFUSES politely with two
+distinct strings (proto vs "your opponent is on a different balance patch",
+G.4's wording), and each sets T0 locally the moment it holds both loadouts
+(inside `Net.buildSim`) - the skew is one one-way latency and nothing corrects
+it, per A.11.1. The driver is one module-global OnUpdate frame advancing
+`ep:step` on the 100 ms grid from the local anchor; it is never registered
+with the safety layer, because raid-safety hides UI, not state.
+
+**Void on lockdown (M5 has NO halt/resume).** Triggers, all converging on a
+clean two-sided void with no ledger effect: own encounter start / addon
+restriction (PG.Safety), `PG.Comm.Locked()` observed by the driver, any queued
+IB message permanently dropped (lockdown, vanished audience, failed send -
+token-scoped per CONCURRENCY 5.5), the peer's `V`, or 35 s of peer silence
+(H arrives every 6 s). The `V` send on our own trigger is best-effort - under
+an active lockdown it drops, and the peer voids on its own trigger or the
+silence timeout. M6 mounts X/K/G on the same bridge and replaces exactly these
+triggers with the halt path; the comments name the spots.
+
+**M5 INTERPRETATIONS - where this part had to choose, each cheap to
+overturn.**
+
+1. **The export half of the loading pattern did not exist** (the files
+   anticipated only the import half), and a loader alone cannot supply it
+   because WoW discards chunk return values. Chosen: the arcade's registration
+   tails, in the headless originals, no-op headless. The alternative - a
+   temporary global `require` shim during the load window - was rejected as a
+   second global with other-addon blast radius.
+2. **`S` rides the party broadcast, not a whisper** (A.11.1 says "whispered").
+   At party scope under Ruling 1 the loadout is on every client anyway, one
+   route keeps the bridge context-free, and the broadcast distribution is
+   server-vouched where a whisper proves nothing. Revisit at M9 when wide
+   scopes make S's audience real.
+3. **An IB host must be SEATED** - hostOpen refuses, with the reason, while
+   another module holds the seat. This deviates from CONCURRENCY I4/I5's
+   letter (hosting is never blocked; referee hosting is the fallback) because
+   a 1v1 has no referee role: the host IS a combatant. The refusal names the
+   seat holder and the alternative ("finish that first").
+4. **The addon-layer rows are OPEN/JOIN/BEGIN/CANCEL/NO; V is Wire-framed.**
+   Pre-sim lifecycle has no tick/ackThru to carry, so it uses the shipped
+   games' row shapes; the in-match terminal row uses the codec so M6 inherits
+   it. `NO reason` (proto|rules|full) is the A.11.1 refusal made visible to
+   the host, who returns to the join window rather than cancelling - another
+   party member on the right build may still join.
+5. **The driver is one module-global OnUpdate frame** (plus the module ticker
+   for sweeps/deadlines at 0.5 s). CONCURRENCY I9 counts frames per SESSION;
+   this frame is per MODULE, created once, hidden when idle - the spirit
+   (bounded resources) holds, and the 100 ms grid is what the task's tick
+   driver requires.
+6. **A match that ends cleanly stops stepping at once** - trailing acks for
+   the peer's last commands may go unacked, their backstop resends stop after
+   4 heartbeats by A.12's own rule, and both sims reached tick 6,000
+   independently. Post-over ack tidiness is cosmetic and part 2 can add a
+   short linger if the diagnostic counters prove annoying.
+7. **`matchTicks` ships as `Rules.C.MATCH_TICKS` (6000) always.** The field
+   is validated and carried end-to-end, but a shorter clock would end without
+   `sim.over` (the sim's own clock finish fires at C.MATCH_TICKS), so
+   presets stay M8+ material.
+
+---
+
 ## Where this sits in the build order (Part E)
 
 - **P** - the Probe. Half a day in a real raid, off the critical path, calibrates every rate
@@ -2971,6 +3162,14 @@ mistakes the shim's counter for load-bearing.
   halt/resume (X/K/G/V decode but nothing acts on them), one process. Twelve
   A.11/A.12 readings are recorded in the M4 INTERPRETATIONS block.
 - **M5** - first playable over the wire. `OPEN`/`JOIN`/`S`/`C`/`H`, party scope.
+  **Status: PART 1 DONE (plumbing; the section above).** The engine is mounted in
+  the DEV addon (`dev/PengyouGamesDev/IdleBattle/`, byte-identical, drift-gated
+  by `tools/syncaddon.sh --check`), the `IB` module rides the addon's Comm layer
+  and session system, the OnUpdate driver ticks the A.12 endpoint on the 100 ms
+  grid, `/pgd ib selftest` proves the committed goldens inside the WoW client,
+  and every mid-match interruption VOIDS (halt/resume is M6). Part 2 is the real
+  board UI; **the M5 milestone is claimed only when part 2 has run the complete
+  600-second two-account match against it.**
 - **M6** - halt and resume, symmetric and asymmetric.
 - **M7** - fog as a render filter, and the four greps again on a full build.
 - **M8** - loadouts, `rulesHash` refusal, all 40 cards live, offline replay of a persisted

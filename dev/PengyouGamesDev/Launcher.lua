@@ -24,12 +24,13 @@ local win, dndBtn
 local MAX_OPEN_ROWS = 5     -- SCOPE.md 6.3
 local OPEN_ROW_H = 22
 local OPEN_TTL = 60         -- seconds a row is offered, however long its record lives
-local BASE_HEIGHT = 358     -- the window without the section (6 buttons + DND sign)
+local BASE_HEIGHT = 394     -- the window without the section (7 buttons + DND sign)
 local LIST_TICK = 2         -- reconcile cadence while the window is open
 
 -- ASCII only, per the source rule: SCOPE.md 6.3's separator is U+00B7.
-local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors", PB = "Pull Book" }
-local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book" }
+local GAME_NAME = { LG = "Loot Goblins", RPS = "Rock Paper Scissors", PB = "Pull Book",
+                    IB = "Idle Battle (dev)" }
+local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book", IB = "Battle" }
 -- CONCURRENCY.md 5.10 rule 1 lists opens "at every scope including group", so
 -- the label set is wider than SCOPE.md 6.3's Guild|Public table.
 local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
@@ -100,6 +101,7 @@ local PROJECTIONS = {
   RPS = function() return PG.RPS and PG.RPS.OpenGames and PG.RPS.OpenGames() end,
   -- note the name: the Pull Book projects OpenBooks, not OpenGames
   PB = function() return PG.PB and PG.PB.OpenBooks and PG.PB.OpenBooks() end,
+  IB = function() return PG.IB and PG.IB.OpenGames and PG.IB.OpenGames() end,
 }
 
 local function reconcile()
@@ -169,6 +171,8 @@ local function joinEntry(entry)
     if PG.RPS and PG.RPS.JoinOpen then pcall(PG.RPS.JoinOpen, entry.key) end
   elseif entry.game == "PB" then
     if PG.PB and PG.PB.JoinBook then pcall(PG.PB.JoinBook, entry.host, entry.token) end
+  elseif entry.game == "IB" then
+    if PG.IB and PG.IB.JoinOpen then pcall(PG.IB.JoinOpen, entry.key) end
   end
   reconcile()
   refreshList()
@@ -300,7 +304,7 @@ local function refreshDnd()
 end
 
 local function build()
-  win = PG.UI.Window("launcher", "Pengyou Games", 240, 322, "neutral")
+  win = PG.UI.Window("launcher", "Pengyou Games", 240, 358, "neutral")
   -- carnival-sign tagline under the title (decor only)
   local tagline = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
   tagline:SetPoint("TOP", 0, -40)
@@ -319,10 +323,14 @@ local function build()
     if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
   end)
   rpsBtn:SetPoint("TOP", pbBtn, "BOTTOM", 0, -10)
+  local ibBtn = PG.UI.Button(win, "Idle Battle (dev)...", 190, 26, function()
+    if PG.IB and PG.IB.OpenDialog then PG.IB.OpenDialog() end
+  end)
+  ibBtn:SetPoint("TOP", rpsBtn, "BOTTOM", 0, -10)
   local ledgerBtn = PG.UI.Button(win, markLabel("sack", "Ledger"), 190, 26, function()
     if PG.Ledger and PG.Ledger.Show then PG.Ledger.Show() end
   end)
-  ledgerBtn:SetPoint("TOP", rpsBtn, "BOTTOM", 0, -10)
+  ledgerBtn:SetPoint("TOP", ibBtn, "BOTTOM", 0, -10)
   local rulesBtn = PG.UI.Button(win, "Rules", 190, 26, function()
     if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
   end)

@@ -424,6 +424,12 @@ local function onSlash(msg)
     if PG.PB and PG.PB.OpenDialog then PG.PB.OpenDialog() end
   elseif cmd == "rps" then
     if PG.RPS and PG.RPS.OpenDialog then PG.RPS.OpenDialog() end
+  elseif cmd == "ib" then
+    -- Idle Battle (DEV, M5): "/pgd ib" opens the start dialog, "/pgd ib
+    -- selftest" runs the in-game determinism check, "/pgd ib status" the
+    -- session/netcode diagnostic.
+    local sub = tostring(msg or ""):lower():match("^%s*%S+%s+(%S+)") or ""
+    if PG.IB and PG.IB.Slash then PG.IB.Slash(sub) end
   elseif cmd == "rules" then
     if PG.Rules and PG.Rules.Toggle then PG.Rules.Toggle() end
   elseif cmd == "settings" then
