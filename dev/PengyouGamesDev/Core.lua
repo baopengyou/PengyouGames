@@ -1,8 +1,13 @@
 -- Core.lua - addon table, DB init, event hub, Safety state machine, peers, slash.
 local ADDON, PG = ...
 
-_G.PengyouGames = PG -- debugging handle; the only global table this addon creates
-                     -- (the SLASH_* names and PengyouGamesDB are platform-required)
+_G.PengyouGamesDev = PG -- debugging handle; the only global table this addon
+                     -- creates (the SLASH_* names and PengyouGamesDevDB are
+                     -- platform-required). DEV-suffixed on purpose: the fork
+                     -- installs BESIDE the live addon, and writing the live
+                     -- addon's _G.PengyouGames here silently repointed its
+                     -- debugging handle at the DEV table (M5 review, the
+                     -- beside-install collision the rename table missed).
 
 -- Flat English string table, no localization machinery in v1: PG.L["Some text"]
 -- passes the key through, so user-visible strings stay inline in English.

@@ -46,22 +46,28 @@
 -- M6 by design), because M5's answer to every mid-match interruption is VOID.
 --
 -- THE REAL-BUDGET RESOLUTION (M4 review flag: repair "4 per flush" vs
--- A.11.4). Net already meters NEW commands through A.11.4's module bucket
--- (capacity 4, refill 1 per 4 s = the 15/min worst row). Repair traffic
--- bypasses that bucket capped at 4 messages per flush, which against the FAKE
--- channel could burst; against the REAL channel it is bounded by two facts
--- the shim lacked: (1) Comm.lua's shared bucket (capacity 10, refill 1/s)
--- QUEUES overflow instead of refusing it, so an instantaneous repair burst
--- drains at 1/s and never trips the server throttle; (2) transit loss does
--- not exist on the addon channel -- messages die only at SEND time (throttle
--- entries are requeued by Comm itself; lockdown/audience drops void the match
--- below) -- so the repair path is idle in every healthy match. Steady state
--- per side is H 10/min + C <= 15/min ~ 0.42/s, inside the 1/s refill with
--- more than half left for the other games. The one transient exception is a
--- Q recovery (~20 messages paced by Net at 10 per 10 s): it saturates the
--- refill for ~20 s and other modules' traffic queues behind it by a few
--- seconds -- accepted, rare, bounded, and CONCURRENCY.md 9.9 places shared-
--- bucket capacity work outside game modules. No second bridge-side bucket.
+-- A.11.4; numbers corrected by the M5 review's measurements). Net meters
+-- NEW commands through A.11.4's module bucket (capacity 4, refill 1 per
+-- 4 s = the 15/min worst row). Repair traffic bypasses that bucket capped
+-- at 4 messages per flush; against the REAL channel it is bounded because
+-- Comm.lua's shared bucket (capacity 10, refill 1/s) QUEUES overflow
+-- instead of refusing it, and transit loss does not exist -- messages die
+-- only at SEND time (throttle entries are requeued by Comm itself;
+-- lockdown/audience drops void the match below). Repair therefore never
+-- runs from loss -- but it DOES run in a perfectly healthy match when a
+-- player sustains clicks faster than the module bucket's cadence: H
+-- announces lastSeq including bucket-queued atoms, the peer's N ships them
+-- through the repair path around the meter, plus one duplicate resend each
+-- (M5 review, measured). Steady state per side is 0.42/s at bucket-
+-- compliant clicking, ~0.58/s on the worst sustained-clicking row --
+-- converging, inside the shared 1/s refill, with ~40% headroom rather than
+-- "more than half" (carrying the FLUSHED watermark in H instead is the
+-- recorded M6 candidate). The transient exception is a Q recovery, which
+-- since the M5 review streams only what the requester's own ackThru claim
+-- says it lacks (a mid-match gap: seconds of traffic; a deep wipe: the
+-- full history, which is the point), paced at 10 rows per 10 s. Accepted,
+-- rare, bounded; CONCURRENCY.md 9.9 places shared-bucket capacity work
+-- outside game modules. No second bridge-side bucket.
 --
 -- VOID ON LOCKDOWN (M5 rule; M6 replaces this with halt/resume X/K/G). There
 -- is deliberately NO halt path here. The match VOIDS cleanly on both sides:
@@ -102,6 +108,13 @@ local HANDSHAKE_SECS = 30    -- the S offer cadence is 6 s (Net's HELLO_EVERY),
 local HB_TIMEOUT = 35        -- group scope liveness (H every 6 s), the LG/RPS number
 local MAX_CATCHUP = 2000     -- driver: max ticks advanced per frame (loading-
                              -- screen catch-up; ~200 s of stall, a few ms of CPU)
+local SETTLE_MIN = 2         -- end-of-match settle window (M5 review): seconds
+                             -- past sim.over before declaring, once the
+                             -- endpoint reports quiescent -- long enough for
+                             -- the peer's last in-window orders and closing
+                             -- acks to land and be spliced by rollback
+local SETTLE_MAX = 10        -- the hard cap on that window, so a vanished
+                             -- peer cannot hold the verdict hostage
 
 -- Registry budgets, the CONCURRENCY.md 2.1 constants verbatim.
 local MAX_LITE = 8
@@ -349,8 +362,12 @@ local function outSend(rec, s)
 end
 
 -- Best-effort V (A.11.3's terminal row; reason letter from Wire's own set).
--- Under an active lockdown the send is dropped -- fine, the peer voids on its
--- own trigger or on the 35 s silence.
+-- Under an active lockdown the send is dropped -- fine, the peer voids on
+-- its own trigger or on the 35 s silence. What MAKES it fine is voidMatch's
+-- ordering: the session is ended BEFORE this send, so the synchronous
+-- submit-time drop callback a lockdown fires re-enters voidMatch against a
+-- done session and no-ops (M5 review: the old order double-toasted and
+-- overwrote endText with the generic lockdown wording).
 local function sendVoid(rec)
   if not (rec and rec.ep and rec.ep.sim) then return end
   local ok, s = pcall(Wire.encodeV, rec.ep.token, {
@@ -365,9 +382,13 @@ end
 voidMatch = function(text, withV)
   local S = mySession()
   if not S or S.phase == "done" then return end
-  if withV then sendVoid(S) end
   toast(text, S.host)
   endSession(text)
+  -- after endSession: a submit-time drop of this V runs onDrop synchronously
+  -- and re-enters voidMatch; with the phase already "done" that is a no-op.
+  -- endSession leaves S.ep, S.token and S.scope intact, so the send has
+  -- everything it needs.
+  if withV then sendVoid(S) end
 end
 
 -------------------------------------------------------------------------------
@@ -398,6 +419,14 @@ local function finishMatch(rec)
     text = "You lose (" .. tostring(sim.reason) .. ")."
   end
   toast(text, rec.host, { priority = "result" })
+  -- the board is the verdict's home, and an IDLE battle may well be hidden
+  -- when the clock runs out: re-show it for the result unless a safety
+  -- state mandates hiding right now -- in that case __pgResume brings it
+  -- back, verdict intact, once the state clears (M5 review).
+  local s = PG.Safety and PG.Safety.state
+  if not (s and (s.inEncounter or s.readyCheck or s.countdown or s.restricted)) then
+    ShowWindow()
+  end
   endSession("Final: " .. text)
 end
 
@@ -408,9 +437,17 @@ local function onDriverUpdate()
     return
   end
   -- M5's lockdown rule, polled at the source: the instant sends are refused,
-  -- the match cannot continue and voids (M6 halts here instead).
+  -- the match cannot continue and voids (M6 halts here instead) -- unless
+  -- the sim already finished, in which case the verdict exists and is
+  -- DECLARED rather than thrown away (M5 review: the settle window below
+  -- must never turn a finished match into a void).
   if PG.Comm.Locked() then
-    voidMatch("Voided - addon messages are locked down. (M6 will pause instead.)", false)
+    local sim0 = S.ep.sim
+    if sim0 and sim0.over then
+      finishMatch(S)
+    else
+      voidMatch("Voided - addon messages are locked down. (M6 will pause instead.)", false)
+    end
     return
   end
   local now = nowTick(S)
@@ -429,7 +466,23 @@ local function onDriverUpdate()
     return
   end
   local sim = S.ep.sim
-  if sim and sim.over then finishMatch(S) end
+  if sim and sim.over then
+    -- THE SETTLE WINDOW (M5 review). The first side to finish must not slam
+    -- the door: the peer's last in-window orders may still be in flight, and
+    -- Net's rollback splices them only while this endpoint keeps stepping.
+    -- So the phase flip waits until the endpoint reports quiescent through
+    -- Net.quiescent -- everything issued acked, everything claimed held, no
+    -- recovery, no queued traffic -- with a SETTLE_MIN floor so the closing
+    -- acks can land, and SETTLE_MAX at the outside. A late row that rolls
+    -- the sim back under the clock edge cancels the countdown entirely.
+    if not S.overAt then S.overAt = GetTime() end
+    local waited = GetTime() - S.overAt
+    if (waited >= SETTLE_MIN and S.ep:quiescent()) or waited >= SETTLE_MAX then
+      finishMatch(S)
+    end
+  elseif S.overAt then
+    S.overAt = nil
+  end
 end
 
 ensureDriver = function()
@@ -611,12 +664,17 @@ local function hostOnNo(rec, sender, reason)
     why = shortOf(sender) .. " could not join."
   end
   toast(why, rec.host)
-  -- back to the join window; the deadline still applies and may cancel.
+  -- A NO ends the session (M5 review). The old "back to the join window"
+  -- recovery was unreachable: BEGIN already evicted AND poisoned every
+  -- bystander's lite record at pairing (CONCURRENCY.md 7.3), so nobody had
+  -- a popup, a launcher row, or even the ability to accept a re-delivered
+  -- OPEN -- the host would have idled in a window no one could enter until
+  -- the deadline said "nobody joined". Cancel honestly instead; the host
+  -- can open a fresh battle (new token) in two clicks.
   rec.opp = nil
   rec.ep = nil
-  rec.phase = "join"
-  if driver then driver:Hide() end
-  RefreshUI()
+  PG.Comm.Broadcast(rec.scope, "IB", "CANCEL", rec.token, "no")
+  endSession(why)
 end
 
 -------------------------------------------------------------------------------
@@ -639,10 +697,15 @@ local function clientAccept(rec)
   if cur then
     toast("you're already in " .. (cur.isHost and "your own battle"
       or (shortOf(cur.host) .. "'s battle")) .. " - finish it first.", rec.host)
+    -- a refused accept still consumes the invitation (5.6; M5 review)
+    PG.UI.Dismiss(rec.askKey)
+    rec.askKey = nil
     return false
   end
   if not PG.Session.Claim("IB", rec.token, rec.host) then
     toast("you just joined another game - not joining this one.", rec.host)
+    PG.UI.Dismiss(rec.askKey)
+    rec.askKey = nil
     return false
   end
   local cfg = rec.cfg
@@ -751,7 +814,7 @@ local function raiseInvite(rec)
     end
     return
   end
-  if PG.UI.AskCount and PG.UI.AskCount() >= 3 then
+  if PG.UI.AskCount and PG.UI.AskCount() >= (PG.UI.ASK_MAX or 3) then
     local now = GetTime()
     if now - overflowToastAt >= BUSY_THROTTLE then
       overflowToastAt = now
@@ -799,7 +862,10 @@ local function onOpen(token, sender, scope, f1, f2, f3)
   if liteCount >= MAX_LITE then                           -- row 6
     local oldest, oldestAt
     for k, rec in pairs(sessions) do
-      if rec.kind == "lite" and not rec.askKey then
+      -- liveness by asking the UI, not by our own askKey bookkeeping: a
+      -- stale key must not shield a record from eviction (M5 review, the
+      -- RPS reference form)
+      if rec.kind == "lite" and not (PG.UI.IsAsking and PG.UI.IsAsking(rec.askKey)) then
         if not oldestAt or rec.openedAt < oldestAt then oldest, oldestAt = k, rec.openedAt end
       end
     end
@@ -937,7 +1003,14 @@ local function onDrop(mtype, token)
     endSession("Aborted - addon messages were blocked.")
     toast("aborted - addon messages were blocked.", S.host)
   else
-    voidMatch("Voided - addon messages were blocked. (M6 will pause instead.)", false)
+    local sim = S.ep and S.ep.sim
+    if sim and sim.over then
+      -- a drop during the settle window: the match is already decided, so
+      -- declare it; the peer converges on its own finished sim (M5 review)
+      finishMatch(S)
+    else
+      voidMatch("Voided - addon messages were blocked. (M6 will pause instead.)", false)
+    end
   end
 end
 
@@ -1577,8 +1650,11 @@ end
 local function ensureWindow()
   if win then return end
   win = PG.UI.Window("ib", "Idle Battle (DEV)", BW, BH, "neutral")
-  -- resume after a raid-safety hide only while the session still matters
-  win.__pgResume = function() return live() end
+  -- resume after a raid-safety hide while ANY record exists -- including a
+  -- finished one inside its DONE_TTL, so an encounter that interrupts the
+  -- ending cannot swallow the verdict (M5 review; live() would veto the
+  -- done-phase re-show and the void/result text would never be seen)
+  win.__pgResume = function() return mySession() ~= nil end
 
   ui.status = mkFS(win, "GameFontNormal", CLR.gold)
   ui.status:SetPoint("TOPLEFT", 16, -30)
@@ -1914,7 +1990,10 @@ local function paintEco(S, sim, mySide)
 end
 
 local function paintCommands(S, sim, mySide)
-  local playing = (S ~= nil) and S.phase == "play" and (sim ~= nil)
+  -- "and not sim.over": during the settle window the clock has run out and
+  -- new orders would only fizzle -- grey the surface while the last acks
+  -- land (M5 review)
+  local playing = (S ~= nil) and S.phase == "play" and (sim ~= nil) and not sim.over
   local bank = playing and sim.sides[mySide].bank or 0
   for i = 1, #ui.unitBtns do
     local b = ui.unitBtns[i]
@@ -2206,12 +2285,17 @@ PG.RegisterInit(function()
     PG.Comm.RegisterTrust("IB", function() return false end)
   end
 
-  -- Accepting a seat elsewhere withdraws our outstanding invitations
+  -- Accepting ANY seat withdraws this module's outstanding invitations
   -- (CONCURRENCY.md 5.6 rule 3); the lite records stay listed until expiry.
+  -- Skip only the key that was just claimed, never the whole module: the
+  -- old own-module early-return left our OTHER IB invitations standing when
+  -- the player seated themselves in one of them (M5 review; the RPS
+  -- reference form).
   PG.Session.OnChange(function(seat)
-    if not seat or seat.module == "IB" then return end
+    if not seat then return end
+    local held = keyOf(seat.host or "?", seat.token or "")
     for _, rec in pairs(sessions) do
-      if rec.kind == "lite" and rec.askKey then
+      if rec.kind == "lite" and rec.askKey and rec.key ~= held then
         PG.UI.Dismiss(rec.askKey)
         rec.askKey = nil
       end
@@ -2226,7 +2310,15 @@ PG.RegisterInit(function()
     if trigger == "ENCOUNTER_ON" or trigger == "RESTRICT_ON" then
       local S = mySession()
       if S and (S.phase == "play" or S.phase == "handshake") then
-        voidMatch("Voided - a raid encounter started. (M6 adds pause/resume.)", true)
+        local sim = S.ep and S.ep.sim
+        if sim and sim.over then
+          -- the settle window again: a finished match interrupted by an
+          -- encounter is DECLARED, not voided (M5 review); the reshow
+          -- inside finishMatch defers to the safety state
+          finishMatch(S)
+        else
+          voidMatch("Voided - a raid encounter started. (M6 adds pause/resume.)", true)
+        end
       elseif S and S.phase == "join" then
         if S.isHost then PG.Comm.Broadcast(S.scope, "IB", "CANCEL", S.token, "enc") end
         endSession("Cancelled - a raid encounter started.")

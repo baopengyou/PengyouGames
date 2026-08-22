@@ -37,18 +37,25 @@
 #                 part 1's one documented global (IB_SIM_MODULES) lives in
 #                 the generated Loader.lua, not here.
 #   4  THE DRIVE  tools/ibshim.lua: two module instances over an in-memory
-#                 bus. Selftest; OPEN -> lite -> invitation -> join ->
-#                 handshake -> play; the board asserted on BOTH clients
-#                 (slot geometry from the hashed constants, the side-2
-#                 MIRROR, the no-fog label, a Rules-derived tooltip, the
-#                 queued-order ghost); concede/V, lockdown void, silence
-#                 void; then a COMPLETE 6,000-tick match over a bus that
-#                 drops 15%, delays 0.1..3.5 s, reorders and duplicates --
-#                 every unit kind and every first-playable building letter
-#                 issued through the board by both seats, every late atom
-#                 repaired by rollback through the bridge, ZERO settled hash
-#                 mismatches, both terminal sims bit-identical, and per-
-#                 client traffic measured under 32 messages/min.
+#                 bus that delivers STRINGS for every field, exactly as the
+#                 real channel does. Selftest; OPEN -> lite -> invitation ->
+#                 join -> handshake -> play; the board asserted on BOTH
+#                 clients (slot geometry from the hashed constants, the
+#                 side-2 MIRROR, the no-fog label, a Rules-derived tooltip,
+#                 the queued-order ghost); concede/V, lockdown void, silence
+#                 void; a COMPLETE 6,000-tick match over a bus that drops
+#                 15%, delays 0.1..3.5 s, reorders and duplicates -- every
+#                 unit kind and every first-playable building letter issued
+#                 through the board by both seats, orders pressed ALL THE
+#                 WAY TO THE CLOCK EDGE (the M5-review settle window keeps
+#                 the endpoint splicing until both sides are quiescent),
+#                 every late atom repaired by rollback through the bridge,
+#                 ZERO settled hash mismatches with a floor of 30 real
+#                 comparisons per client, both terminal sims bit-identical,
+#                 per-client traffic under 32 messages/min; and phase D, a
+#                 forced deep recovery -- 20 s inbound blackhole, the atom
+#                 gap pushed past Q_GAP -- proving the Q leg of the BRIDGE
+#                 (whispered request, broadcast replay) end to end.
 #
 #   usage: tools/m5.sh [lua]
 #     lua  path to the interpreter (default /opt/homebrew/bin/lua)
@@ -167,12 +174,11 @@ echo "not verified by this run:
   * THE REVEAL STAGE PLAYBACK. The result payloads are built and captured
     (titles, rows, personal flags asserted); the stage animation itself is
     Theme.lua on a real client.
-  * THE CLOCK-EDGE WINDOW. The drive stops issuing at tick ~5,600 because
-    the part-1 bridge drops in-match rows once a side is done: an order
-    whose delivery outlives the loser's clock can leave the two DONE boards
-    holding different terminal states (no ledger effect; flagged in the
-    README's M5 part 2 section for the owner). This gate does not exercise
-    that window; nothing before it is affected.
+  * THE SETTLE WINDOW'S REAL-WORLD TIMING. The clock-edge window itself is
+    closed (the M5-review settle window; the drive now issues to tick 5,960
+    and converges), but SETTLE_MIN/SETTLE_MAX are tuned against this bus's
+    0.1..3.5 s delays -- the raid-night probe's measured latencies are what
+    confirm those two constants on the live channel.
   * ci.sh / m2.sh / m3.sh / m4.sh own the engine. This gate proves the ADDON
     LAYER above them; run those gates for the sim and the shim themselves."
 echo "=============================================================="

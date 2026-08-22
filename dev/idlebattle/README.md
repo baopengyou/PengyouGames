@@ -54,16 +54,20 @@ tools/syncaddon.sh --check   # M5 drift gate: non-zero if any addon copy
                              #   the derived file from its sources, or the
                              #   .toc engine order no longer loads
 
-tools/m5.sh                  # THE M5 GATE (part 2): syncaddon --check, luac,
-                             #   a zero-new-globals bytecode scan of the game
-                             #   file, then the two-client headless drive --
-                             #   full lifecycle, the real board asserted on
-                             #   both seats (side-2 mirror included), every
-                             #   D.1 order kind, and a COMPLETE 6,000-tick
-                             #   match over a lossy/delaying/reordering/
-                             #   duplicating bus: zero settled mismatches,
-                             #   terminal sims bit-identical, traffic under
-                             #   32 msg/min per client. Sub-second.
+tools/m5.sh                  # THE M5 GATE (part 2 + review): syncaddon
+                             #   --check, luac, a zero-new-globals bytecode
+                             #   scan of the game file, then the two-client
+                             #   headless drive -- full lifecycle, the real
+                             #   board asserted on both seats (side-2 mirror
+                             #   included), every D.1 order kind pressed to
+                             #   the CLOCK EDGE through the settle window,
+                             #   a COMPLETE 6,000-tick match over a lossy/
+                             #   delaying/reordering/duplicating bus (zero
+                             #   settled mismatches, floor 30 compares per
+                             #   client, terminal sims bit-identical, traffic
+                             #   under 32 msg/min), and phase D: a forced
+                             #   deep recovery proving the bridge's Q leg.
+                             #   Sub-second.
 tools/m5.sh "$(which luajit)"    # the 5.1-semantics half of the same drive
 ```
 
@@ -2804,17 +2808,23 @@ set, which all three comparisons share, is the ground truth of that run.
 |---|---|---|---|---|---|---|---|---|---|
 | milestone | 100 | **6,659 -> 6,659** | 0 | 0 | 0/0 | 0 | 1,930 | 58 B | **1353990724 (`e4pxg`)** |
 | rollback | 40 | **2,628 -> 2,628** | 0 | 0 | 0/0 | 0 | 1,127 | 46 B | **630668562 (`fhez6`)** |
-| deep | 12 | 1,012 -> 1,012 | 0 | **8** | **20/19** | **19** | 950 | **70 B** | **1794064162 (`o50rm`)** |
-| stress | 25 | 1,851 -> 1,809 | **42 -> 42** | 0 | 43/36 | 42 | 2,413 | 70 B | **1907532503 (`jp1hz`)** |
+| deep | 12 | 1,013 -> 1,013 | 0 | **8** | **21/20** | **19** | 348 | **70 B** | **1353084329 (`dlajt`)** |
+| stress | 25 | 1,863 -> 1,814 | **49 -> 49** | 0 | 50/37 | 49 | 1,493 | 70 B | **943921746 (`lzioi`)** |
+
+*(Deep and stress regenerated together with the M5-review Q fix -- answerQ
+now replays from the Q's own ackThru claim instead of seq 1, so the replay
+duplicates collapsed (deep 950 -> 348, stress 2,413 -> 1,493) and the two
+suites that exercise Q moved to new hashes; milestone and rollback, where Q
+never fires, are bit-identical to M4's originals. See the M5 review section.)*
 
 Totals across the four scenarios: **177 net matches, 23,481 atoms issued,
-11,304 epochs compared three ways each, 12,150 late commands - 12,108
-repaired by bounded rollback (max rewind 299 ticks) and the 42 beyond-depth
-arrivals repaired by full-log rebuild, 19 forced-desync recoveries, 9,908
+11,304 epochs compared three ways each, 12,163 late commands - 12,114
+repaired by bounded rollback (max rewind 299 ticks) and the 49 beyond-depth
+arrivals repaired by full-log rebuild, 19 forced-desync recoveries, 9,937
 settled hash comparisons, 0 unexplained mismatches, 0 messages over 70
 bytes** against the 200-byte
-budget and 255-byte hard limit. 60,626 messages crossed the fake channel;
-8,246 were dropped by it and 8,170 delivered out of order. The milestone
+budget and 255-byte hard limit. 60,407 messages crossed the fake channel;
+8,197 were dropped by it and 8,018 delivered out of order. The milestone
 floors are enforced, not observed: the step fails if fewer than 2 late
 commands occur per run on average, if too few runs reach the full 6,000
 ticks (15 of 100 did), if no delivery was ever inverted, or if either
@@ -3058,14 +3068,23 @@ bucket (capacity 10, refill 1/s) QUEUES overflow instead of refusing it, so a
 repair burst drains at 1/s without tripping the server throttle; and transit
 loss does not exist on the addon channel - messages die only at SEND time,
 where throttle entries are requeued by Comm itself and lockdown/audience drops
-VOID the match - so repair runs dry in every healthy match. Steady state is H
-10/min + C <= 15/min ~ 0.42/s per side, leaving over half the refill for the
-other games. The one transient exception: a Q recovery (~20 messages paced by
-Net at 10 per 10 s) saturates the refill for ~20 s and other modules' traffic
-queues a few seconds behind it - accepted, rare, bounded, and shared-bucket
-capacity work is explicitly out of module scope (CONCURRENCY 9.9). **No second
-bridge-side bucket was added**; adding one would delay repair for fairness the
-queue already provides losslessly.
+VOID the match - so repair never runs from LOSS. It DOES run in a perfectly
+healthy match when a player sustains clicks faster than the module bucket's
+1-per-4 s cadence: H announces lastSeq including bucket-queued atoms, the
+peer's N ships them through the repair path around the meter, plus one
+duplicate resend each (M5 review, measured; the original "repair runs dry in
+every healthy match" and "0.42/s steady state" claims were wrong). Steady
+state is 0.42/s per side at bucket-compliant clicking and ~0.58/s on the
+worst sustained-clicking row - converging, inside the shared 1/s refill,
+with ~40% headroom rather than "over half"; carrying the FLUSHED watermark
+in H instead is the recorded M6 candidate. The one transient exception: a Q
+recovery, which since the M5 review streams only what the requester's own
+ackThru claim says it lacks (a mid-match gap: seconds of traffic; a deep
+wipe: the full history, which is the point), paced at 10 rows per 10 s -
+accepted, rare, bounded, and shared-bucket capacity work is explicitly out
+of module scope (CONCURRENCY 9.9). **No second bridge-side bucket was
+added**; adding one would delay repair for fairness the queue already
+provides losslessly.
 
 **Matchmaking rides the shipped session system.** Lite records for overheard
 OPENs (caps, TTLs, recent-token poisoning, supersession, the 4.2 decision
@@ -3115,8 +3134,13 @@ overturn.**
    Pre-sim lifecycle has no tick/ackThru to carry, so it uses the shipped
    games' row shapes; the in-match terminal row uses the codec so M6 inherits
    it. `NO reason` (proto|rules|full) is the A.11.1 refusal made visible to
-   the host, who returns to the join window rather than cancelling - another
-   party member on the right build may still join.
+   the host. *(Corrected by the M5 review: the host now CANCELS on a NO. The
+   original "returns to the join window - another party member may still
+   join" recovery was unreachable, because BEGIN had already evicted AND
+   poisoned every bystander's lite record at pairing (7.3): nobody had a
+   popup, a launcher row, or the ability to accept a re-delivered OPEN, so
+   the host idled in a window no one could enter until the deadline said
+   "nobody joined". A fresh battle is a new token and two clicks.)*
 5. **The driver is one module-global OnUpdate frame** (plus the module ticker
    for sweeps/deadlines at 0.5 s). CONCURRENCY I9 counts frames per SESSION;
    this frame is per MODULE, created once, hidden when idle - the spirit
@@ -3210,21 +3234,20 @@ hash comparisons with ZERO mismatches, terminal sims bit-identical
 client against the 32/min budget, largest addon message 38 bytes.**
 Sub-second, so it belongs in the pre-commit loop.
 
-**ONE FLAG FOR THE OWNER (not fixed here; part 1's region is frozen for
-part 2 and the fix sits in it).** The router drops in-match rows once a
-session's phase is `done`, and `finishMatch` fires the moment the LOCAL sim
-ends. A command issued near the clock edge whose delivery outlives the
-receiver's match (the real channel can delay seconds under shared-bucket
-contention; the shim's bus models 3.5 s) is then never spliced -- `Net`
-itself would have repaired it, a late atom after `over` is just one more
-rollback -- and the two DONE boards can hold different terminal states.
-Consequences in M5 are cosmetic (no ledger; each reveal reads its own sim),
-but the milestone's "hashes matching at every heartbeat" deserves the
-closed window. Cheap fix for a part-2.x pass, anticipated by part 1's
-interpretation 6: a short done-linger during which S/C/H/N still reach the
-endpoint, or defer `finishMatch` until the endpoint is quiet. Until then
-the m5 drive stops issuing at tick ~5,600 and the gate's closing block
-names the window honestly.
+**THE CLOCK-EDGE FLAG -- RESOLVED by the M5 review's fix pass (the section
+below).** Part 2 flagged it honestly: the router dropped in-match rows once
+a session's phase was `done`, `finishMatch` fired the moment the LOCAL sim
+ended, and a command whose delivery outlived the receiver's match was never
+spliced, so the two DONE boards could hold different terminal states. The
+fix is the SETTLE WINDOW, part 1's interpretation 6 grown teeth: on
+`sim.over` the driver keeps stepping and the phase stays `play` until the
+endpoint reports quiescent through `Net.quiescent` (everything issued
+acked, everything claimed held, no recovery, no queued traffic) with a
+2 s floor and a 10 s cap; a late row that rolls the sim back under the edge
+cancels the countdown; every interruption trigger (lockdown, drop,
+encounter) DECLARES a finished sim instead of voiding it; and the order
+surface greys while the last acks land. The m5 drive now issues to tick
+~5,960 and converges -- the window is part of the gate, not a caveat.
 
 **M5 PART 2 INTERPRETATIONS** (continuing part 1's numbering; each cheap to
 overturn).
@@ -3279,6 +3302,109 @@ the two-real-characters half**: the gate's closing block lists exactly what
 only two logged-in WoW clients can still show (the real channel and Comm
 queue, `/pgd ib selftest` on WoW Lua, pixels and the reveal stage playback,
 the scale grip / overlap solver / Safety visuals on real Widgets code).
+
+---
+
+## The M5 review, and its fix pass (2026-08-21)
+
+M5 parts 1 and 2 went through the milestone's multi-agent integration
+review: seven adversarial lenses (12.1 API compliance, the determinism
+seam, the comm budget re-derived against the real Comm.lua, session/scope/
+concurrency, UI + raid safety, gate integrity with mutation testing, and
+the probe as raid-night production code), a completeness critic over the
+union, then one adversarial verifier per finding whose brief was to REFUTE
+it. 34 raw findings -> 22 substantive after dedupe -> 14 verified: **12
+confirmed, 1 plausible (a live-client question), 1 refuted.** Every
+confirmed finding was fixed in the same pass. The ledger:
+
+**Fixed in the ENGINE (net/Net.lua; deep + stress suite hashes regenerated
+together, milestone + rollback bit-identical -- the fix's own signature):**
+
+1. **answerQ replayed the full history from seq 1** on every Q, ignoring
+   the requester's ackThru -- a mid-match recovery streamed ~93 mostly-
+   duplicate C rows (~63 s of saturated shared bucket) where the gap alone
+   was owed. Now replays from the Q row's OWN ackThru claim. The first fix
+   attempt used the monotone `peerAckThru` watermark and the M4 deep gate
+   correctly went RED: acks never go down, so after a deep history wipe the
+   watermark still said "holds everything" while the requester needed the
+   atoms below it. The Q's own claim is honest in both cases -- high for a
+   gap (seconds of replay), low after a wipe (the full history, which is
+   the point). Measured: deep-scenario duplicate atoms 950 -> 348, stress
+   2,413 -> 1,493, recovery intact both interpreters.
+2. **`Net.quiescent(ep)`** -- the endpoint-health predicate the settle
+   window (below) reads, exported as an ep method so the bridge keeps
+   consuming only harness surfaces.
+
+**Fixed in `Games/IdleBattle.lua`:**
+
+3. **The clock-edge window, closed** (the part-2 owner flag): the settle
+   window described up in the part-2 section. The m5 drive now issues to
+   tick ~5,960 and asserts convergence through it.
+4. **voidMatch re-entered itself** through Comm's synchronous submit-time
+   drop when sending the best-effort V under lockdown: double toast, wrong
+   endText. endSession now runs BEFORE sendVoid, so the re-entry hits the
+   done-phase guard and no-ops.
+5. **A NO from an incompatible joiner now cancels the session** instead of
+   reopening a join window nobody could enter (interpretation 4, corrected
+   in place above).
+6. **Accepting one IB invitation now withdraws the module's other IB
+   invitations** (the OnChange handler skipped its own module; RPS
+   reference form adopted, skip-the-held-key). Refused accepts also dismiss
+   their invitation, and row-6 eviction tests ask-liveness via
+   `PG.UI.IsAsking` instead of trusting our own askKey bookkeeping.
+7. **A finished match now re-shows the board** for its verdict (an IDLE
+   battle may be hidden when the clock runs out) unless a safety state
+   mandates hiding, and `__pgResume` allows the done-phase window back
+   after a combat hide so an encounter cannot swallow the verdict.
+8. **The budget prose was wrong and is corrected** (part-1 section, and
+   the file header): repair traffic runs in healthy matches under
+   sustained clicking, ~0.58/s worst row, not "idle / 0.42/s"; the ask-cap
+   now reads `PG.UI.ASK_MAX` instead of a hard-coded 3.
+
+**Fixed in the beside-install (dev fork platform files):** the dev Core.lua
+wrote the LIVE addon's `_G.PengyouGames` debugging handle (now
+`_G.PengyouGamesDev`), and both Launcher minimap buttons defaulted to angle
+210, stacking on one spot (dev now 195).
+
+**Fixed in the PROBE:** ADDON_RESTRICTION_STATE_CHANGED registered and
+probed at the pre-activation edge (the design's own confirmation target,
+previously absent); START_PLAYER_COUNTDOWN/CANCEL_PLAYER_COUNTDOWN beside
+START_TIMER (retail pull countdowns fire the former); CAP 5,000 -> 20,000
+with an hourly wall-clock anchor and a half-full warning (the old cap
+overflowed mid-night and evicted the SESS anchor first); /probe export
+defaults to the WHOLE log with visible truncation (1,000 was under an hour);
+12.1 secret-value guards on every logged event arg; the encounter flag
+reseeds from IsEncounterInProgress after a mid-boss /reload.
+
+**Fixed in the GATES:** ibshim phase D -- a 20 s inbound blackhole forcing
+the atom gap past Q_GAP -- proves the Q leg of the BRIDGE end to end
+(whispered request, broadcast replay, deep rebuild, convergence), which had
+zero coverage (a dead Q path stayed GREEN); the bus now delivers STRINGS
+for every field exactly as the real channel does; the settled-compare floor
+is 30 per client, not 1 (a tripwire that died mid-match cleared the old
+floor); syncaddon's golden extraction is guarded per-variable (one empty
+extraction could slip the concatenated check).
+
+**Refuted (recorded so nobody re-finds it):** "num() passes NaN through its
+range clamp; a crafted OPEN wedges a never-expiring lite record" -- the
+verifier showed NaN cannot survive the comparisons involved; the idiom is
+the shipped RPS one and stands.
+
+**Plausible, awaiting the live client:** whether any 12.1 event arg the
+probe logs can be a secret value in practice (the guards are in either way).
+
+**Reviewed, deliberately NOT changed (notes on file):** the receiver-side
+inbound limiter in Comm.lua (12-burst/2-per-s per sender) cannot drop rows
+from a compliant 10-burst/1-per-s peer -- the "no transit loss" premise
+holds for compliant senders; MAX_CATCHUP's ~200 s allowance is unreachable
+behind the 35 s silence void (documented, harmless); recentQ pruning
+diverges cosmetically from the reference (bounded either way); the probe's
+SavedVariables only flush on reload/logout (the /probe status text now says
+so). **M6 candidates recorded:** H carrying the FLUSHED watermark instead
+of outSeq (kills the healthy-match repair traffic at its source); a
+surrender wire row so a concede can be a scored loss instead of a void
+(A.11 has no such row today, and a client-declared loss is not derivable
+from shared inputs).
 
 ---
 
@@ -3345,14 +3471,17 @@ the scale grip / overlap solver / Safety visuals on real Widgets code).
   halt/resume (X/K/G/V decode but nothing acts on them), one process. Twelve
   A.11/A.12 readings are recorded in the M4 INTERPRETATIONS block.
 - **M5** - first playable over the wire. `OPEN`/`JOIN`/`S`/`C`/`H`, party scope.
-  **Status: PART 1 DONE (plumbing; the section above).** The engine is mounted in
-  the DEV addon (`dev/PengyouGamesDev/IdleBattle/`, byte-identical, drift-gated
-  by `tools/syncaddon.sh --check`), the `IB` module rides the addon's Comm layer
-  and session system, the OnUpdate driver ticks the A.12 endpoint on the 100 ms
-  grid, `/pgd ib selftest` proves the committed goldens inside the WoW client,
-  and every mid-match interruption VOIDS (halt/resume is M6). Part 2 is the real
-  board UI; **the M5 milestone is claimed only when part 2 has run the complete
-  600-second two-account match against it.**
+  **Status: PARTS 1 + 2 BUILT AND REVIEWED (the three sections above).** The
+  engine is mounted in the DEV addon (byte-identical, drift-gated by
+  `tools/syncaddon.sh --check`), the `IB` module rides the addon's Comm layer
+  and session system, the OnUpdate driver ticks the A.12 endpoint on the
+  100 ms grid, `/pgd ib selftest` proves the committed goldens inside the WoW
+  client, the REAL BOARD plays D.1 end to end, `tools/m5.sh` gates it (full
+  lossy match to the clock edge, forced deep recovery, both interpreters),
+  and the multi-agent review's 12 confirmed findings are fixed. Mid-match
+  interruptions VOID -- except a finished sim, which DECLARES (the settle
+  window); halt/resume is M6. **The M5 milestone is claimed only when the
+  complete 600-second two-account match has run on two real WoW clients.**
 - **M6** - halt and resume, symmetric and asymmetric.
 - **M7** - fog as a render filter, and the four greps again on a full build.
 - **M8** - loadouts, `rulesHash` refusal, all 40 cards live, offline replay of a persisted
@@ -3969,8 +4098,8 @@ a second machine's `sh tools/m3.sh 200` is a mechanical diff.
 | codec | 3,087 checks pass | 3,087 checks pass |
 | `MILESTONE SUITE HASH` (100 runs) | **1353990724** (`e4pxg`) | **1353990724** |
 | `ROLLBACK SUITE HASH` (40 runs) | **630668562** (`fhez6`) | **630668562** |
-| `DEEP SUITE HASH` (12 runs) | **1794064162** (`o50rm`) | **1794064162** |
-| `STRESS SUITE HASH` (25 runs) | **1907532503** (`jp1hz`) | **1907532503** |
+| `DEEP SUITE HASH` (12 runs) | **1353084329** (`dlajt`) | **1353084329** |
+| `STRESS SUITE HASH` (25 runs) | **943921746** (`lzioi`) | **943921746** |
 
 The M4 suite hashes fold every run's terminal state, terminal tick, logDigest,
 settle tick, repair counters (late, rollbacks, dups, N, backstop, Q, rebuilds),

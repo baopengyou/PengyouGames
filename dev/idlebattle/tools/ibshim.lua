@@ -186,6 +186,7 @@ local busMode = "sync"
 local LOSSY_DROP = 15
 local DUP_PCT = 6
 local pendingMsgs = {}
+local blackhole = nil   -- client NAME whose inbound 1-char wire rows are dropped
 
 local function handOver(c, from, scope, module, mtype, token, ...)
   local h = c.commHandlers[module]
@@ -196,6 +197,18 @@ local function handOver(c, from, scope, module, mtype, token, ...)
 end
 
 local function deliver(from, scope, target, module, mtype, token, ...)
+  -- THE REAL CHANNEL SERIALIZES: every field a Comm handler receives is a
+  -- STRING, numbers included. Stringify once here so a module that forgets
+  -- its SafeNum/SafeStr coercions fails in this shim rather than in a raid
+  -- (M5 review: the old typed varargs were a friendlier contract than the
+  -- one Comm actually offers).
+  local nargs = select("#", ...)
+  local args = {}
+  for ai = 1, nargs do
+    local v = select(ai, ...)
+    if v ~= nil then args[ai] = tostring(v) end
+  end
+  token = tostring(token)
   for i = 1, #clients do
     local c = clients[i]
     if c.name ~= from.name then
@@ -204,16 +217,18 @@ local function deliver(from, scope, target, module, mtype, token, ...)
         -- the addon channel never loses matchmaking rows in transit, and the
         -- lossy mode exists to exercise the repair machinery, not to model a
         -- channel that does not exist.
-        if busMode == "sync" or #mtype > 1 then
-          handOver(c, from, scope, module, mtype, token, ...)
+        if blackhole == c.name and #mtype == 1 then
+          -- inbound outage: the wire row never reaches this client
+        elseif busMode == "sync" or #mtype > 1 then
+          handOver(c, from, scope, module, mtype, token,
+            (table.unpack or unpack)(args, 1, nargs))
         elseif math.random(100) > LOSSY_DROP then
           local copies = (math.random(100) <= DUP_PCT) and 2 or 1
           for _ = 1, copies do
-            local args = { ... }
             pendingMsgs[#pendingMsgs + 1] = {
               due = now + 0.1 + math.random() * 3.4, seqNo = #pendingMsgs,
               c = c, from = from, scope = scope, module = module,
-              mtype = mtype, token = token, args = args,
+              mtype = mtype, token = token, args = args, nargs = nargs,
             }
           end
         end
@@ -230,8 +245,10 @@ local function drainBus()
   end)
   while pendingMsgs[1] and pendingMsgs[1].due <= now do
     local m = table.remove(pendingMsgs, 1)
-    handOver(m.c, m.from, m.scope, m.module, m.mtype, m.token,
-      (table.unpack or unpack)(m.args))
+    if not (blackhole == m.c.name and #m.mtype == 1) then
+      handOver(m.c, m.from, m.scope, m.module, m.mtype, m.token,
+        (table.unpack or unpack)(m.args, 1, m.nargs or #m.args))
+    end
   end
 end
 
@@ -783,12 +800,15 @@ local function bldScript(cl, base)
 end
 bldScript(Cc, 700)
 bldScript(Dd, 790)
--- sustained pressure so the match carries combat, keep damage and coalescing;
--- stops at 5600 so the last exec tick sits far inside the clock (the part-1
--- bridge drops in-match rows once a side is done -- see the README's part 2
--- flag on the clock-edge window)
+-- sustained pressure so the match carries combat, keep damage and coalescing
+-- -- ALL THE WAY TO THE CLOCK EDGE. The old script stopped at 5600 because
+-- the part-1 bridge slammed the door on sim.over; the settle window (M5
+-- review) keeps the endpoint stepping and splicing until both sides are
+-- quiescent, so orders whose delivery outlives the faster side's clock are
+-- exactly what this now covers, and the convergence asserts below prove the
+-- window closed.
 local n = 0
-for i = 2200, 5600, 40 do
+for i = 2200, 5960, 40 do
   n = n + 1
   script[i] = { c = (n % 2 == 0) and Cc or Dd,
                 kind = R.UNITS[(n % #R.UNITS) + 1].kind,
@@ -825,7 +845,13 @@ else
   -- zero settled mismatches, with real comparisons made
   for _, e in ipairs({ { epC, "C" }, { epD, "D" } }) do
     if e[1].st.mismatches ~= 0 then fail(e[2] .. ": settled hash mismatches occurred") end
-    if e[1].st.settledCompares < 1 then fail(e[2] .. ": no settled hash comparison ever ran") end
+    -- a real floor, not "at least one": the desync tripwire must have run
+    -- for the WHOLE match (H every 6 s over 600 s, minus loss, is ~90; a
+    -- tripwire that died halfway would still clear a floor of 1)
+    if e[1].st.settledCompares < 30 then
+      fail(e[2] .. ": only " .. e[1].st.settledCompares
+        .. " settled hash comparisons ran (floor 30) - the tripwire died mid-match")
+    end
   end
   -- the hostile bus actually exercised the repair machinery through the bridge
   local late = epC.st.late + epD.st.late
@@ -877,6 +903,91 @@ else
     epC.st.settledCompares, epD.st.settledCompares,
     sC.sides[1].cmdsFizzled, sC.sides[2].cmdsFizzled,
     sC.sides[1].cmdsExecuted, sC.sides[2].cmdsExecuted))
+end
+
+-- ---------------------------------------------------------------------------
+-- phase D: forced deep recovery through the bridge (M5 review: the Q leg of
+-- the bridge -- outSend's whisper route, the router's private-scope gate,
+-- answerQ's paced replay riding the broadcast path -- had ZERO gate coverage;
+-- a dead Q path stayed GREEN). Blackhole one client's inbound wire rows for
+-- 20 s while the healthy side issues past Q_GAP, restore, and require the Q
+-- path to run end to end over the addon bridge and the match to converge.
+-- ---------------------------------------------------------------------------
+
+print("-- phase D: forced deep recovery (20 s inbound blackhole) --")
+local Ee = makeClient("Echo-DevRealm")
+local Ff = makeClient("Foxtrot-DevRealm")
+Ee.PG.IB.Host("group")
+local accD = false
+for i = 1, 900 do
+  step(0.1)
+  if i % 10 == 0 then tickSecond() end
+  if not accD then
+    local k4
+    for k in pairs(Ff.asks) do k4 = k end
+    if k4 then accD = true; pcall(Ff.asks[k4].onAccept) end
+  end
+  if Ee.ep and Ee.ep.sim and Ff.ep and Ff.ep.sim then
+    local c1, c2 = btnByTag(Ee, "__ibCancel", true), btnByTag(Ff, "__ibCancel", true)
+    if c1 and c2 and tostring(c1.label):find("Concede", 1, true)
+      and tostring(c2.label):find("Concede", 1, true) then break end
+  end
+end
+if not (Ee.ep and Ee.ep.sim and Ff.ep and Ff.ep.sim) then
+  fail("phase D pair never built both sims")
+else
+  -- 10 s of normal play with history on both sides
+  for i = 1, 100 do
+    step(0.1)
+    if i % 10 == 0 then tickSecond() end
+    if i == 20 then orderUnit(Ee, R.UNITS[1].kind, 1, 1) end
+    if i == 40 then orderUnit(Ff, R.UNITS[1].kind, 2, 1) end
+  end
+  -- the outage: Foxtrot hears nothing for 20 s while Echo issues 40 orders,
+  -- pushing the atom gap past Q_GAP (32) so the first post-restore H
+  -- escalates straight to the Q path (a 30 s+ outage would cross the 35 s
+  -- silence void instead: only 5 s of slack against a 6 s H cadence)
+  blackhole = "Foxtrot-DevRealm"
+  local oi = 0
+  for i = 1, 200 do
+    step(0.1)
+    if i % 10 == 0 then tickSecond() end
+    if i % 5 == 0 then
+      oi = oi + 1
+      orderUnit(Ee, R.UNITS[(oi % #R.UNITS) + 1].kind, (oi % R.C.LANES) + 1, 1)
+    end
+  end
+  if not (Ee.PG.Session.IsSeated() and Ff.PG.Session.IsSeated()) then
+    fail("phase D: a side voided DURING the 20 s outage (silence limit is 35 s)")
+  end
+  blackhole = nil
+  -- run to the end of the match
+  local function dDone()
+    return not Ee.PG.Session.IsSeated() and not Ff.PG.Session.IsSeated()
+      and Ee.ep.sim and Ff.ep.sim and Ee.ep.sim.over and Ff.ep.sim.over
+  end
+  for i = 1, 7000 do
+    step(0.1)
+    if i % 10 == 0 then tickSecond() end
+    if dDone() then break end
+  end
+  local sE, sF = Ee.ep.st, Ff.ep.st
+  print(string.format("PROBE-D qSent E %d F %d qAnswered E %d F %d deepRecoveries E %d F %d lateBeyondDepth E %d F %d",
+    sE.qSent, sF.qSent, sE.qAnswered, sF.qAnswered,
+    sE.deepRecoveries, sF.deepRecoveries, sE.lateBeyondDepth, sF.lateBeyondDepth))
+  if sF.qSent < 1 then fail("phase D: the stalled client never sent a Q through the bridge") end
+  if sE.qAnswered < 1 then fail("phase D: the healthy client never answered the Q") end
+  if sF.deepRecoveries < 1 then fail("phase D: the stalled client never deep-rebuilt") end
+  if not dDone() then
+    fail("phase D match never finished on both sides after the recovery")
+  else
+    if ENG.Hash.state(Ee.ep.sim) ~= ENG.Hash.state(Ff.ep.sim) then fail("phase D: terminal stateHash differs") end
+    if ENG.Hash.log(Ee.ep.sim) ~= ENG.Hash.log(Ff.ep.sim) then fail("phase D: terminal logDigest differs") end
+    if Ee.ep.sim.winner ~= Ff.ep.sim.winner then fail("phase D: winner differs") end
+    if sE.mismatches ~= 0 or sF.mismatches ~= 0 then fail("phase D: settled hash mismatches") end
+    print(string.format("  phase D: %d ticks, winner %d, recovered and converged",
+      Ee.ep.sim.clock, Ee.ep.sim.winner))
+  end
 end
 
 print("== ibshim: " .. (#failures == 0 and "GREEN" or ("RED (" .. #failures .. " failures)")) .. " ==")

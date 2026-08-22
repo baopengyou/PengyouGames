@@ -420,13 +420,22 @@ end
 
 -- Answer a Q: a fresh S (the loadout half of the rebuild), a fresh H (the
 -- watermark that tells the requester when it holds everything), and the
--- entire own-command history as verbatim C batches, paced by flushReplay.
-local function answerQ(ep, now)
+-- own-command history FROM THE Q'S OWN ackThru CLAIM as verbatim C batches,
+-- paced by flushReplay. The claim in the row itself -- NOT the monotone
+-- peerAckThru -- is the right floor, and the difference is the deep-wipe
+-- case the M4 gate forces: acks only ever rise, so after the requester
+-- wipes its held history peerAckThru still says "holds everything" while
+-- the Q honestly claims the new low watermark and needs the atoms below the
+-- old one re-streamed. Healthy mid-match recovery claims high and gets the
+-- gap alone (the M5 review measured the old full-history replay at ~63 s of
+-- saturated shared bucket); a repeat Q (10 s cooldown) rebuilds from the
+-- requester's CURRENT claim, so restarts shrink instead of starting over.
+local function answerQ(ep, now, fromAck)
   ep.st.qAnswered = ep.st.qAnswered + 1
   sendS(ep, now)
   sendH(ep, now)
   local q, nq = {}, 0
-  local i = 1
+  local i = (fromAck or 0) + 1
   while i <= ep.outSeq do
     local atoms, n = {}, 0
     while n < Wire.MAX_BATCH and i <= ep.outSeq do
@@ -450,6 +459,12 @@ local function flushReplay(ep, now)
     ep.replayWindowUntil = now + REPLAY_WINDOW
     ep.replayInWindow = 0
   end
+  -- No skip-by-peerAckThru clause here, and that is deliberate: acks are
+  -- monotone, so after a deep wipe the watermark still claims the requester
+  -- holds atoms it just discarded -- a "cancel the residual stream" shortcut
+  -- keyed on it would starve exactly the rebuild it was pacing. The stream
+  -- shrinks the honest way: a repeat Q re-queues from the requester's
+  -- current claim.
   while ep.replayInWindow < REPLAY_BURST and ep.replayHead <= #ep.replayQ do
     local b = ep.replayQ[ep.replayHead]
     ep.replayHead = ep.replayHead + 1
@@ -555,7 +570,7 @@ function Net.onWire(ep, msg, now)
 
   if m.mtype == "Q" then
     handleAck(ep, m.ackThru)
-    answerQ(ep, now)
+    answerQ(ep, now, m.ackThru)
     return
   end
 
@@ -747,6 +762,21 @@ function Net.settled(ep, peerEp)
   if ep.inContig < peerEp.outSeq then return false end
   if ep.peerAckThru < ep.outSeq then return false end
   return true
+end
+
+-- True when this endpoint has nothing left in flight: everything it issued
+-- is acked, everything the peer claims is held, no recovery is running and
+-- no queued/repair/replay traffic remains. The addon's end-of-match settle
+-- window (M5 review) reads endpoint health through this ONE surface instead
+-- of reaching into the fields, so the bridge's only-the-harness-surfaces
+-- rule survives the fix.
+function Net.quiescent(ep)
+  return ep.peerAckThru >= ep.outSeq
+    and ep.inContig >= ep.peerLastSeq
+    and not ep.recovering
+    and #ep.sendQ == 0
+    and #ep.repairQ == 0
+    and ep.replayHead > #ep.replayQ
 end
 
 -- Registration tail (M5): hands this module to IB_SIM_MODULES when the addon

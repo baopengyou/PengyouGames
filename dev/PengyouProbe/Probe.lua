@@ -29,7 +29,13 @@
 -- probe result, RECV echo, BURST result, MARK user note, ERR.
 
 local PREFIX = "PGPROBE"
-local CAP = 5000          -- ring buffer cap; a raid night at these rates is well under
+local CAP = 20000         -- ring buffer cap. NOT "well under" territory: the
+                          -- probe's own SEND+RECV pairs alone run ~1,450
+                          -- lines/hour outside lockdown (M5 review, measured),
+                          -- and the log persists across sessions -- 20,000
+                          -- lines (~1.5 MB of SavedVariables) holds a long
+                          -- night plus pre-raid play without evicting the
+                          -- early hours
 local PROBE_EVERY = 5     -- seconds between self-whisper probes
 local POLL = 0.1          -- lockdown poll cadence
 
@@ -48,6 +54,18 @@ end
 
 local function say(text)
   DEFAULT_CHAT_FRAME:AddMessage("|cff7fbfffProbe|r " .. text)
+end
+
+-- 12.1 secret values hard-error on compare/index; anything that came out of
+-- an event payload goes through these before it is compared or concatenated.
+local function isSecret(v)
+  local f = rawget(_G, "issecretvalue")
+  return (f and f(v)) and true or false
+end
+
+local function safeStr(v)
+  if isSecret(v) then return "<secret>" end
+  return tostring(v)
 end
 
 -- One compact context snapshot: group kind+size, instance type+difficulty,
@@ -169,17 +187,26 @@ end
 
 local EVENTS = {
   "ENCOUNTER_START", "ENCOUNTER_END",
-  "READY_CHECK", "READY_CHECK_FINISHED", "START_TIMER",
+  "READY_CHECK", "READY_CHECK_FINISHED",
+  -- both countdown events: START_PLAYER_COUNTDOWN is what a retail raid
+  -- pull countdown (C_PartyInfo.DoCountdown, DBM/BigWigs /pull) actually
+  -- fires; START_TIMER is instance/PvP start timers (M5 review)
+  "START_TIMER", "START_PLAYER_COUNTDOWN", "CANCEL_PLAYER_COUNTDOWN",
   "PLAYER_REGEN_DISABLED", "PLAYER_REGEN_ENABLED",
   "CHALLENGE_MODE_START", "CHALLENGE_MODE_COMPLETED", "CHALLENGE_MODE_RESET",
   "PLAYER_ENTERING_WORLD",
+  -- the design's own named confirmation target: does this fire, and does it
+  -- fire BEFORE the restriction activates (the pre-activation send below
+  -- measures exactly that)
+  "ADDON_RESTRICTION_STATE_CHANGED",
   "CHAT_MSG_ADDON",
 }
 
 local function onEvent(_, event, ...)
   if event == "CHAT_MSG_ADDON" then
     local prefix, msg, channel, sender = ...
-    if prefix ~= PREFIX then return end
+    if isSecret(prefix) or prefix ~= PREFIX then return end
+    if isSecret(sender) or isSecret(msg) then return end
     local me = myFullName()
     if sender ~= me and sender ~= (UnitName("player")) then return end
     local n = tonumber(tostring(msg):match("^p(%d+)$") or "")
@@ -188,7 +215,7 @@ local function onEvent(_, event, ...)
       dt = string.format(" +%.0fms", (now() - sentAt[n]) * 1000)
       sentAt[n] = nil
     end
-    log("RECV", "#" .. tostring(n or "?") .. dt .. " via " .. tostring(channel))
+    log("RECV", "#" .. tostring(n or "?") .. dt .. " via " .. safeStr(channel))
     return
   end
   if event == "ENCOUNTER_START" then inEncounter = true end
@@ -196,14 +223,18 @@ local function onEvent(_, event, ...)
   local parts = { event }
   local args = { ... }
   for i = 1, math.min(#args, 6) do
-    parts[#parts + 1] = tostring(args[i])
+    parts[#parts + 1] = safeStr(args[i])
   end
   log("EV", table.concat(parts, " ") .. " lock=" .. tostring(lockdownNow()))
   -- an event that can flank a lockdown flip is worth a send result RIGHT
   -- HERE, not up to 5 s later -- but never from inside the encounter itself:
   -- passive observation is the contract mid-fight, and the 5 s cadence still
-  -- samples that state.
-  if event == "READY_CHECK" or event == "START_TIMER" or event == "ENCOUNTER_END" then
+  -- samples that state. ADDON_RESTRICTION_STATE_CHANGED is the prize: it is
+  -- documented to fire BEFORE the restriction activates, and this send is
+  -- the direct measurement of whether that pre-activation window is usable.
+  if event == "READY_CHECK" or event == "START_TIMER"
+    or event == "START_PLAYER_COUNTDOWN" or event == "CANCEL_PLAYER_COUNTDOWN"
+    or event == "ADDON_RESTRICTION_STATE_CHANGED" or event == "ENCOUNTER_END" then
     if active then probeSend("SEND") end
   end
 end
@@ -213,7 +244,9 @@ end
 -------------------------------------------------------------------------------
 
 local function showExport(n)
-  n = math.min(n or 1000, #db.log)
+  -- default is the WHOLE log: a silent 1000-line default was under an hour
+  -- of a raid night, and the truncated dump looked complete (M5 review)
+  n = math.min(n or #db.log, #db.log)
   if not exportWin then
     exportWin = CreateFrame("Frame", "PengyouProbeExport", UIParent, "BasicFrameTemplateWithInset")
     exportWin:SetSize(560, 420)
@@ -223,7 +256,6 @@ local function showExport(n)
     exportWin:RegisterForDrag("LeftButton")
     exportWin:SetScript("OnDragStart", exportWin.StartMoving)
     exportWin:SetScript("OnDragStop", exportWin.StopMovingOrSizing)
-    exportWin.TitleText:SetText("Pengyou Probe export (Ctrl-A, Ctrl-C)")
     local scroll = CreateFrame("ScrollFrame", nil, exportWin, "UIPanelScrollFrameTemplate")
     scroll:SetPoint("TOPLEFT", 12, -32)
     scroll:SetPoint("BOTTOMRIGHT", -32, 12)
@@ -235,6 +267,11 @@ local function showExport(n)
     box:SetScript("OnEscapePressed", function(b) b:ClearFocus() end)
     scroll:SetScrollChild(box)
     exportWin.box = box
+  end
+  -- truncation is visible in the title, never silent
+  if exportWin.TitleText then
+    exportWin.TitleText:SetText(string.format(
+      "Pengyou Probe export - %d of %d lines (Ctrl-A, Ctrl-C)", n, #db.log))
   end
   local from = #db.log - n + 1
   local out = {}
@@ -276,9 +313,11 @@ SlashCmdList.PENGYOUPROBE = function(msg)
     say("burst: 15 back-to-back sends, watching for the throttle edge...")
     for i = 1, 15 do probeSend("BURST") end
   else
-    say(#db.log .. " entries; sends " .. (active and "ON" or "OFF")
+    say(#db.log .. "/" .. CAP .. " entries; sends " .. (active and "ON" or "OFF")
       .. "; lockdown " .. tostring(lockdownNow()) .. ".")
     say("/probe export [n] | mark <note> | active on|off | burst | wipe")
+    say("SavedVariables flush only on /reload or logout - an occasional /reload"
+      .. " between pulls checkpoints the night against a client crash.")
   end
 end
 
@@ -297,8 +336,23 @@ f:SetScript("OnEvent", function(self, event, arg1, ...)
     if db.active == false then active = false end
     local reg = C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix
       and C_ChatInfo.RegisterAddonMessagePrefix(PREFIX)
+    -- a /reload mid-boss must not leave the encounter flag stale (M5 review)
+    if IsEncounterInProgress then
+      local ok, inEnc = pcall(IsEncounterInProgress)
+      inEncounter = (ok and inEnc) and true or false
+    end
     log("SESS", date("%Y-%m-%d %H:%M:%S") .. " login, prefix reg " .. tostring(reg)
       .. ", build " .. tostring((GetBuildInfo())) .. " [" .. ctx() .. "]")
+    if #db.log > CAP / 2 then
+      say("log " .. #db.log .. "/" .. CAP .. " lines - consider /probe wipe before the raid.")
+    end
+    -- hourly wall-clock anchor: however the ring turns over, a capped log
+    -- always retains at least one line that ties the monotonic stamps to
+    -- the clock on the wall (M5 review: eviction is oldest-first and the
+    -- login SESS header was the first casualty)
+    C_Timer.NewTicker(3600, function()
+      log("SESS", date("%Y-%m-%d %H:%M:%S") .. " hourly anchor [" .. ctx() .. "]")
+    end)
     for i = 1, #EVENTS do
       local ok, err = pcall(self.RegisterEvent, self, EVENTS[i])
       if not ok then

@@ -392,13 +392,15 @@ local mmBtn
 
 local function mmDB()
   local p = PG.db.profile
-  if not p.minimap then p.minimap = { hide = false, angle = 210 } end
+  -- 195, not the live addon's 210: the fork installs beside it, and two
+  -- buttons defaulting to the same angle stack on one spot (M5 review)
+  if not p.minimap then p.minimap = { hide = false, angle = 195 } end
   return p.minimap
 end
 
 local function mmApplyPosition()
   if not mmBtn then return end
-  local angle = math.rad(mmDB().angle or 210)
+  local angle = math.rad(mmDB().angle or 195)
   local radius = (Minimap:GetWidth() / 2) + 10
   mmBtn:ClearAllPoints()
   mmBtn:SetPoint("CENTER", Minimap, "CENTER",
