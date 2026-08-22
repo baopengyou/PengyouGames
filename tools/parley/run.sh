@@ -14,3 +14,6 @@ luajit tools/parley/wire.lua "$ROOT"
 echo
 echo "--- LOCK convergence, and the bookie's whole M+ path ---"
 luajit tools/parley/converge.lua "$ROOT"
+echo
+echo "--- the raid Pull Book: broadcast settlement and the union audience ---"
+luajit tools/parley/pullbook.lua "$ROOT"

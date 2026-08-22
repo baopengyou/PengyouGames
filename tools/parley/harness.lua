@@ -210,10 +210,13 @@ end
 -- One independent instance of the module
 -------------------------------------------------------------------------------
 
-function H.newClient(root, name)
+-- `game` selects which module file this client loads; it defaults to the
+-- Mythic Parley. The Pull Book runs against the identical stub set, which is
+-- the point: the two modules share a shape, so they share a harness.
+function H.newClient(root, name, game)
   local PG, inits = {}, {}
   local C = { name = name, PG = PG, commits = {}, sent = {}, after = {},
-              events = {}, toasts = {}, buttons = {}, checks = {} }
+              events = {}, toasts = {}, buttons = {}, checks = {}, cards = {} }
 
   function PG.RegisterInit(fn) inits[#inits + 1] = fn end
   function PG.RegisterEvent(ev, fn)
@@ -236,23 +239,45 @@ function H.newClient(root, name)
   function PG.Comm.Register(_, h, d) C.handler = h; C.drop = d end
   function PG.Comm.RegisterTrust() end
   function PG.Comm.Locked() return C.locked == true end
-  function PG.Comm.ScopeAvailable(s) return s == "group" or s == "guild" end
-  function PG.Comm.ScopeCode(s) return ({ group = "P", guild = "G" })[s] end
-  function PG.Comm.ScopeOfCode(c) return ({ P = "group", G = "guild" })[c] end
-  function PG.Comm.Broadcast(_, _, mtype, ...)
+  -- mirrors Comm.lua's own tables, including the session-only `both`
+  local LEGS = { group = { "group" }, guild = { "guild" }, public = { "public" },
+                 both = { "group", "guild" } }
+  function PG.Comm.ScopeAvailable(sc)
+    if sc == "both" then
+      if C.noGuild then return false, "You're not in a guild." end
+      return true
+    end
+    if sc == "guild" and C.noGuild then return false, "You're not in a guild." end
+    return sc == "group" or sc == "guild" or sc == "both"
+  end
+  function PG.Comm.ScopeCode(sc)
+    return ({ group = "P", guild = "G", public = "R", both = "B" })[sc]
+  end
+  function PG.Comm.ScopeOfCode(c)
+    return ({ P = "group", G = "guild", R = "public", B = "both" })[c]
+  end
+  function PG.Comm.ScopeLegs(sc) return LEGS[sc] end
+  function PG.Comm.ScopeCarries(sessionScope, delivered)
+    local legs = LEGS[sessionScope]
+    if not legs then return false end
+    for i = 1, #legs do if legs[i] == delivered then return true end end
+    return false
+  end
+  function PG.Comm.Broadcast(leg, _, mtype, ...)
     if C.locked then
       if C.drop then C.drop(mtype, (...)) end
       return false
     end
-    C.sent[#C.sent + 1] = { mtype = mtype, f = { ... } }
+    C.sent[#C.sent + 1] = { mtype = mtype, leg = leg, f = { ... } }
     return true
   end
   function PG.Comm.BroadcastEx(o, _, mtype, ...)
+    local leg = o and o.scope
     if C.locked then
       if C.drop then C.drop(mtype, (...)) end
       return false
     end
-    C.sent[#C.sent + 1] = { mtype = mtype, f = { ... } }
+    C.sent[#C.sent + 1] = { mtype = mtype, leg = leg, f = { ... } }
     if o and o.onSent then o.onSent() end
     return true
   end
@@ -278,9 +303,17 @@ function H.newClient(root, name)
   function PG.UI.CardButton(_, label, _, _, onClick)
     local b = mockFrame()
     b.click = onClick
+    C.cards[#C.cards + 1] = { label = tostring(label or ""), click = onClick }
     return b
   end
-  function PG.UI.ScopePicker() return mockFrame() end
+  -- the audience the picker would have returned; a test sets C.pickScope before
+  -- opening the window. rawset, because the mock's __index only synthesises a
+  -- method on first access and an override applied later would lose the race.
+  function PG.UI.ScopePicker()
+    local f = mockFrame()
+    rawset(f, "Get", function() return C.pickScope or "group" end)
+    return f
+  end
   function PG.UI.FitLabel(b) return b end
 
   PG.Ledger = {}
@@ -296,9 +329,10 @@ function H.newClient(root, name)
   function PG.Launcher.RemoveOpenGame() return true end
 
   assert(loadfile(root .. "/PengyouGames/Util.lua"))("PengyouGames", PG)
-  assert(loadfile(root .. "/PengyouGames/Games/MythicParley.lua"))("PengyouGames", PG)
+  assert(loadfile(root .. "/PengyouGames/Games/" .. (game or "MythicParley") .. ".lua"))(
+    "PengyouGames", PG)
   for i = 1, #inits do inits[i]() end
-  C.MP = PG.MP
+  C.MP, C.PB = PG.MP, PG.PB
   return C
 end
 
@@ -337,6 +371,17 @@ function H.press(C, needle)
   return false
 end
 
+-- press a card-face button by its label (the bet strip's YES / NO / OVER ...)
+function H.card(C, needle)
+  for _, b in ipairs(C.cards) do
+    if b.label:find(needle, 1, true) and b.click then
+      local p = H.ME; H.ME = C.name; b.click(); H.ME = p
+      return true
+    end
+  end
+  return false
+end
+
 function H.safety(C, trigger, field)
   local p = H.ME; H.ME = C.name
   if field then C.PG.Safety.state[field] = true end
@@ -346,6 +391,16 @@ end
 
 function H.sentOf(C, mtype)
   for _, m in ipairs(C.sent) do if m.mtype == mtype then return m end end
+end
+
+-- which distributions a given mtype actually went out on
+function H.legsOf(C, mtype)
+  local out = {}
+  for _, m in ipairs(C.sent) do
+    if m.mtype == mtype and m.leg then out[#out + 1] = m.leg end
+  end
+  table.sort(out)
+  return table.concat(out, "+")
 end
 
 function H.countSent(C, mtype)

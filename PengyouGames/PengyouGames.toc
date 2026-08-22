@@ -2,7 +2,7 @@
 ## Title: Pengyou Games
 ## Notes: Six raid-downtime minigames plus a pre-key Mythic+ parley, in one window, with a shared virtual-gold ledger. /pg to start.
 ## Author: Pengyou
-## Version: 1.4.2
+## Version: 1.5.0
 ## SavedVariables: PengyouGamesDB
 
 # ORDERING RATIONALE

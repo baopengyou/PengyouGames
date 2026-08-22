@@ -48,7 +48,11 @@ local MAX_ID = 96
 local MAX_NAME = 64
 local MAX_LABEL = 48
 
-local SCOPES = { group = true, guild = true, public = true }
+-- "both" is party AND guild at once (SCOPE.md 0d): a real session audience, so
+-- a real provenance value. G2's independent sources are the UNION of the two
+-- legs' - the live group and the guild cache - which is strictly more than
+-- either alone, so nothing about the vouching gate weakens here.
+local SCOPES = { group = true, guild = true, public = true, both = true }
 local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
 
 -- Deliberately this file's OWN copy of the code -> name mapping, never a read

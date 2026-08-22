@@ -107,12 +107,21 @@ only be played by people who can see the thing it is scored from.
 | Quiz | Party, Guild, Public |
 | Death Roll | Party, Guild, Public |
 | The Gambler | Party, Guild, Public |
-| The Pull Book (raid pulls) | Party only -- scored from the pull you are personally standing in |
+| The Pull Book (raid pulls) | Party, Guild, Party+Guild |
 | The Mythic Parley | Party, Guild |
 
-The Pull Book is now the only exception, and it is a real one: the book is settled by the
-boss fight you are personally standing in, so there is nothing a guildmate in a city could
-see.
+Public is now the only thing any of the betting games refuse.
+
+**The Pull Book takes Party+Guild**, which is for the nights when half the guild is watching
+the raid from Discord: your group and every guildmate online sit at one table. It used to be
+party-only for a real reason -- every client settled the book from the boss fight it was
+personally standing in, and a guildmate in a city has no such fight. So that changed rather
+than the rule: whoever opens the book now reads the pull and tells everyone else, and everybody
+settles from that one message.
+
+One rule comes with it. **On a Party+Guild book you must be in the guild to bet** -- a bet has
+to reach both halves, or the two halves would settle different pots. A pug in your raid who is
+not in the guild can watch the book and not bet in it.
 
 The Mythic Parley is the same bookie and the opposite situation, which is why it is the one
 Pull Book mode your guild can play. A key gives one clear answer at one moment -- timed or

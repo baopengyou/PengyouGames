@@ -12,18 +12,28 @@
 -- Scissors game, so this file contains zero references to PG.Session,
 -- permanently.
 --
--- The Pull Book is PARTY ONLY (SCOPE.md 1.2), and that is a rule about physics
--- rather than taste: the book is scored from the bookie's own ENCOUNTER_END and
--- UNIT_DIED, so only the group standing in that fight can observe, verify or
--- contest the result. The picker still renders Guild and Public - disabled,
--- with the reason - because "why can't I?" is the question being asked at
--- exactly that moment.
+-- 1.5.0: THE BOOK IS NO LONGER PARTY ONLY (SCOPE.md 0d). It offers Party,
+-- Guild and Party+Guild, because a guild half of which is spectating the raid
+-- in Discord is a real table and the old rule shut it out.
+--
+-- That rule was not taste, though, and it could not simply be deleted: the book
+-- USED to be scored by every client from its OWN ENCOUNTER_END, and a guildmate
+-- in Valdrakken never receives that event for your boss. They would not settle
+-- late, they would settle NOTHING, while the raid settled normally - one book,
+-- two ledgers. So the physics were changed rather than the rule: the bookie now
+-- broadcasts the encounter result (ENC) and EVERY client settles from that one
+-- message, party and guild alike. That is the Mythic Parley's model, and it is
+-- also what the D market has always done here (FD has been bookie-authored
+-- since 0.5.0) - all that has changed is that K and W now agree with it.
+--
+-- Public stays refused. The picker still renders it disabled, with the reason,
+-- because "why can't I?" is the question being asked at exactly that moment.
 local ADDON, PG = ...
 
 PG.PB = {}
 
 -- Read by PG.UI.ScopePicker (SCOPE.md 1.2 / 5.2).
-PG.PB.SCOPES = { group = true, guild = false, public = false }
+PG.PB.SCOPES = { group = true, guild = true, both = true, public = false }
 
 -- Window layout, on the shared spacing grid (PG.Theme.METRIC). Mirrored as a
 -- literal because file scope may not read another module's tables; every
@@ -85,7 +95,7 @@ local ROLE_WORD = { T = "Tank", H = "Healer", D = "DPS" }
 -- (sender, token) - so the sender IS the record's bookie by construction
 -- (CONCURRENCY.md 5.2 gate j). BET is the one type any player at the table
 -- broadcasts, and it resolves against the involved book only.
-local BOOKIE_AUTHORED = { CLOSE = true, HB = true, FD = true }
+local BOOKIE_AUTHORED = { CLOSE = true, HB = true, FD = true, ENC = true }
 
 -------------------------------------------------------------------------------
 -- Presentation (SKIN.md "faire": Darkmoon bookmaker). Markup and color only:
@@ -136,8 +146,8 @@ local MARKET_ICON = { K = "tarotK", D = "tarotD", W = "tarotW" }
 
 -- The Pull Book's own disabled-scope answer (SCOPE.md 1.2, verbatim intent).
 local WIDE_SCOPE_REASON =
-  "The Pull Book follows your own pull. The book is scored from the boss fight "
-  .. "you are standing in, so only your group can see the same result you do."
+  "The book pays out from the bookie's own read of one pull. Your guild can see "
+  .. "who called it; a stranger on the realm channel cannot."
 
 -------------------------------------------------------------------------------
 -- State
@@ -177,9 +187,71 @@ local freezeDialog    -- forward: the closing report (PLAN 5), dialog section
 local thawDialog      -- forward: the dismissal, dialog section
 local ensureTicker    -- forward: defined in the lifecycle section
 local bookieSendFD    -- forward: defined after the wire section
+local bookieSendENC   -- forward: defined with the encounter section
 
 local function shortOf(full)
   return (strsplit("-", tostring(full or "?")))
+end
+
+-------------------------------------------------------------------------------
+-- SENDING AT `both` SCOPE (SCOPE.md 0d)
+--
+-- There is no "party and guild" chat type, so a both-scope book sends every
+-- message TWICE - once on PARTY, once on GUILD. Comm deliberately refuses to do
+-- this for us (see its SESSION_SCOPES note): only this module knows that its two
+-- copies are one logical message, and only this module knows how to be
+-- idempotent about the duplicate.
+--
+-- IDEMPOTENCE IS ALREADY TRUE HERE and is not new work, which is what makes the
+-- doubling safe: a retransmitted OPEN refreshes liveness and nothing else (row
+-- 4), HB only bumps a clock, a BET keeps the first pick per market, CLOSE
+-- evicts and the second copy finds no record, and FD/ENC are guarded by
+-- a.dDone / a.resolvedKW. Somebody who is in both the party and the guild gets
+-- every message twice and cannot tell.
+--
+-- onSent fires on the FIRST leg that actually goes out, not the last: it exists
+-- to say "this went on the wire", and a caller that records local state from it
+-- is recording that fact. A second leg dropped after the first succeeded is the
+-- residual case named in PARLEY-style terms in SCOPE.md 0d.
+local function bookSend(book, mtype, ...)
+  local legs = PG.Comm.ScopeLegs(book.scope)
+  if not legs then return false end
+  local any = false
+  for i = 1, #legs do
+    if PG.Comm.Broadcast(legs[i], "PB", mtype, book.token, ...) then any = true end
+  end
+  return any
+end
+
+local function bookSendEx(book, onSent, mtype, ...)
+  local legs = PG.Comm.ScopeLegs(book.scope)
+  if not legs then return false end
+  local fired, any = false, false
+  local function once()
+    if fired then return end
+    fired = true
+    if onSent then onSent() end
+  end
+  for i = 1, #legs do
+    if PG.Comm.BroadcastEx({ scope = legs[i], onSent = once },
+      "PB", mtype, book.token, ...) then any = true end
+  end
+  return any
+end
+
+-- Every leg a both-scope book rides on has to be usable BY US before we may
+-- bet. This is the one rule the union audience needs and it is local and
+-- certain: I know whether I can speak in guild chat, so I know whether my bet
+-- can reach the guild half. If it cannot, betting is refused with a reason
+-- rather than half-delivered - a bet that reached only the party would leave
+-- the guild settling a pool it never saw, which is precisely the divergence the
+-- whole architecture exists to prevent. The cost is real and is stated on the
+-- Rules page: at Party+Guild a pug who is not in your guild can watch the book
+-- and cannot bet in it.
+local function canBet(book)
+  if book.scope ~= "both" then return true end
+  local ok = PG.Comm.ScopeAvailable("guild")
+  return ok and true or false
 end
 
 -------------------------------------------------------------------------------
@@ -764,14 +836,17 @@ local function placeBet(m, p)
   if not me then return end
   local picks = a.bets[me]
   if picks and picks[m] then return end -- first click per market locks
+  if not canBet(book) then
+    toast("This book is open to the guild too, so a bet has to reach both. "
+      .. "You need to be in the guild to bet in it.", book, { key = "pb-noguild" })
+    return
+  end
   -- loopback rule: our own broadcasts are ignored on receipt, so record the
   -- pick locally - but only from onSent (the BET actually went out), never at
   -- queue time: a queued-then-lockdown-dropped BET must not leave us settling
   -- a bet nobody else saw. Everyone, including us, keeps the first pick per
   -- market, so a rare duplicate send stays consistent group-wide.
-  PG.Comm.BroadcastEx({
-    scope = book.scope,
-    onSent = function()
+  bookSendEx(book, function()
       if attempt ~= a or a.frozen then return end
       local s = PG.Safety.state
       if s.inEncounter or s.restricted then return end -- mirrors the receive path
@@ -783,13 +858,12 @@ local function placeBet(m, p)
       if not pk[m] then pk[m] = p end
       refreshStrip()
       popLock(m) -- decoration only; the lock above is already committed
-    end,
     -- The bookie rides along as the LAST field, so f1/f2 keep their meaning and
     -- no other handler shifts. Identity is the PAIR (CONCURRENCY.md 4.5):
     -- tokens are only host-unique now, and a BET is a BROADCAST every client in
     -- earshot applies, so without the bookie a colliding token folds another
     -- table's bettors into our book and settles them at OUR stake.
-  }, "PB", "BET", book.token, m, p, book.bookie)
+  end, "BET", m, p, book.bookie)
 end
 
 local function buildStrip()
@@ -1042,7 +1116,7 @@ local function onTick()
         book.scopeLostAt = nil
         if not PG.Comm.Locked() and (now - (book.lastSend or 0)) >= HB_SECS then
           book.lastSend = now
-          PG.Comm.Broadcast(book.scope, "PB", "HB", book.token)
+          bookSend(book, "HB")
         end
       end
     else
@@ -1068,33 +1142,21 @@ end
 -- Encounter resolution
 -------------------------------------------------------------------------------
 
-local function resolveEncounter(encounterName, success, encounterUnitStatus)
+-- APPLIES a settled encounter, from data rather than from events. Every client
+-- runs this and every client runs it from the SAME numbers, because those
+-- numbers arrive on one ENC broadcast (see observeEncounter below) rather than
+-- being read locally by whoever happens to be standing in the fight.
+--
+-- succ: 1 kill, 0 wipe, nil unreadable -> K voids.
+-- bossPct: 0..100 or nil -> W voids.
+local function applyEncounter(encName, succ, bossPct)
   local book = myBook()
   local a = attempt
   if not (book and a and a.frozen) or a.resolvedKW then return end
   a.resolvedKW = true
   a.resolvedAt = GetTime() -- for the fast-repull grace window (READY_ON)
-  local succ = PG.SafeNum(success)
-  local encName = PG.SafeStr(encounterName) or "encounter"
+  encName = encName or "encounter"
   a.reason = "Pull Book: " .. encName
-
-  -- bossPct: kill -> 0; wipe -> min remainingHealthPercent over the (non-
-  -- secret, per platform rule 3) encounterUnitStatus array. Anything secret,
-  -- missing or non-numeric leaves bossPct nil -> W market void.
-  local bossPct
-  if succ == 1 then
-    bossPct = 0
-  elseif succ then
-    if not PG.IsSecret(encounterUnitStatus) and type(encounterUnitStatus) == "table" then
-      for i = 1, #encounterUnitStatus do
-        local e = encounterUnitStatus[i]
-        if not PG.IsSecret(e) and type(e) == "table" then
-          local hp = PG.SafeNum(e.remainingHealthPercent)
-          if hp and (not bossPct or hp < bossPct) then bossPct = hp end
-        end
-      end
-    end
-  end
 
   -- the outcome line in both renderings: a toast head when the markets stay
   -- quiet, the stage subtitle when they do not (a queued stage can land well
@@ -1136,10 +1198,77 @@ local function resolveEncounter(encounterName, success, encounterUnitStatus)
   end
 end
 
+-- THE BOOKIE'S OBSERVATION, and the only client that makes one.
+--
+-- Until 1.5.0 every client ran this off its own ENCOUNTER_END and settled
+-- immediately. That cannot serve a guild spectator, who has no such event - and
+-- once one authority is required for them it must be the authority for
+-- everybody, or one book settles from two sources and the first client to miss
+-- an event disagrees about money (the Mythic Parley's ruling 3.2, for the same
+-- reason). So the bookie reads, the bookie broadcasts, and the bookie settles
+-- from its own broadcast on onSent like every other authoritative message in
+-- this file.
+local function observeEncounter(encounterName, success, encounterUnitStatus)
+  local book = myBook()
+  local a = attempt
+  if not (book and book.isBookie and a and a.frozen) or a.resolvedKW then return end
+  if a.encSent then return end
+  local succ = PG.SafeNum(success)
+  local encName = PG.SafeStr(encounterName) or "encounter"
+  -- separators would re-parse into a different message on the far side; no
+  -- encounter name contains one, and stripping is the belt to that braces
+  encName = encName:gsub("[|,~]", " ")
+  if #encName > 40 then encName = encName:sub(1, 40) end
+
+  -- bossPct: kill -> 0; wipe -> min remainingHealthPercent over the (non-
+  -- secret, per platform rule 3) encounterUnitStatus array. Anything secret,
+  -- missing or non-numeric leaves bossPct nil -> W market void.
+  local bossPct
+  if succ == 1 then
+    bossPct = 0
+  elseif succ then
+    if not PG.IsSecret(encounterUnitStatus) and type(encounterUnitStatus) == "table" then
+      for i = 1, #encounterUnitStatus do
+        local e = encounterUnitStatus[i]
+        if not PG.IsSecret(e) and type(e) == "table" then
+          local hp = PG.SafeNum(e.remainingHealthPercent)
+          if hp and (not bossPct or hp < bossPct) then bossPct = hp end
+        end
+      end
+    end
+  end
+  a.enc = { name = encName, succ = succ, pct = bossPct }
+  bookieSendENC()
+end
+
+-- Retried on the same schedule FD uses and for the same reason: the wire is
+-- locked until ENCOUNTER_END lifts it and a queued message can still be dropped.
+-- Settlement rides onSent, so a dropped ENC leaves the attempt intact and the
+-- next retry carries it.
+bookieSendENC = function()
+  local book = myBook()
+  local a = attempt
+  if not (book and book.isBookie and a and a.enc) then return end
+  if a.resolvedKW or a.encSent then return end
+  if PG.Comm.Locked() then return end
+  local e = a.enc
+  bookSendEx(book, function()
+    if attempt ~= a or a.resolvedKW then return end
+    a.encSent = true
+    applyEncounter(e.name, e.succ, e.pct)
+  end, "ENC",
+    (e.succ == 1 and "Y") or (e.succ == 0 and "N") or "-",
+    e.pct and tostring(math.floor(e.pct + 0.5)) or "-",
+    e.name)
+end
+
 local function onEncounterEnd(_, _, encounterName, _, _, success, encounterUnitStatus)
   -- args are combat-adjacent: secrecy-checked inside, pcall as second defense
-  local ok, err = pcall(resolveEncounter, encounterName, success, encounterUnitStatus)
+  local ok, err = pcall(observeEncounter, encounterName, success, encounterUnitStatus)
   if not ok then geterrorhandler()(err) end
+  PG.After(1, function() pcall(bookieSendENC) end)
+  PG.After(4, function() pcall(bookieSendENC) end)
+  PG.After(8, function() pcall(bookieSendENC) end)
 end
 
 -- Bookie-only observation: the first UNIT_DIED GUID that is non-secret AND in
@@ -1212,28 +1341,34 @@ local function tryOpenBook()
   local token = nextToken()
   local code = PG.Comm.ScopeCode(scope)
   if not code then return end
-  if PG.Comm.Broadcast(scope, "PB", "OPEN", token, stake, line, code) then
-    -- built synchronously in the frame that broadcast it, so a double click
-    -- cannot emit two OPENs: the check at the top of this function now sees it
-    local key = keyOf(me, token)
-    books[key] = {
-      kind = "full", key = key, token = token, bookie = me, scope = scope,
-      stake = stake, line = line, isBookie = true,
-      openedAt = GetTime(), lastSend = GetTime(), lastHB = GetTime(),
-    }
-    mine = key
-    attempt = nil
+  -- The record is built BEFORE the send now, because bookSend reads its scope
+  -- to know which legs to ride. Built synchronously in this same frame, so a
+  -- double click still cannot emit two OPENs - the myBook() check at the top of
+  -- this function already sees it - and torn down again if nothing went out.
+  local key = keyOf(me, token)
+  books[key] = {
+    kind = "full", key = key, token = token, bookie = me, scope = scope,
+    stake = stake, line = line, isBookie = true,
+    openedAt = GetTime(), lastSend = GetTime(), lastHB = GetTime(),
+  }
+  mine = key
+  attempt = nil
+  if bookSend(books[key], "OPEN", stake, line, code) then
     ensureTicker()
     refreshDialog()
     toast("The Pull Book is open - " .. P.chgold .. PG.Money(stake) .. "|r a bet, wipe line "
       .. line .. "%.")
+  else
+    books[key] = nil
+    mine = nil
+    refreshDialog()
   end
 end
 
 local function bookieClose()
   local book = myBook()
   if not (book and book.isBookie) then return end
-  PG.Comm.Broadcast(book.scope, "PB", "CLOSE", book.token)
+  bookSend(book, "CLOSE")
   closeBook(book, "You closed the Pull Book.")
 end
 
@@ -1314,8 +1449,8 @@ local function buildDialog()
       allowed = PG.PB.SCOPES,
       width = 340,
       reasons = function(scope)
-        if scope == "group" then return nil end
-        return WIDE_SCOPE_REASON
+        if scope == "public" then return WIDE_SCOPE_REASON end
+        return nil
       end,
     })
     picker:SetPoint("TOPLEFT", dlg, "TOPLEFT", 0, -200)
@@ -1440,8 +1575,10 @@ refreshDialog = function()
     -- rest as body copy, which is why the two are separate fontstrings
     local who = book.isBookie and "Your book is open" or (shortOf(book.bookie) .. "'s book is open")
     statusHead:SetText(who)
+    local aud = ({ group = "Party", guild = "Guild", both = "Party and Guild" })[book.scope]
+      or book.scope
     statusFS:SetText(P.chgold .. tmoney(book.stake) .. "|r a bet, wipe line "
-      .. book.line .. "%.|n|nAudience: Party."
+      .. book.line .. "%.|n|nAudience: " .. aud .. "."
       .. "|n|nThe bet strip appears at every ready check or pull timer."
       .. otherBookLine())
   end
@@ -1641,9 +1778,9 @@ local function onOpen(token, sender, scope, f1, f2, f3)
   -- never trusted: a wire field can claim guild on a PARTY message, a
   -- distribution cannot (SCOPE.md 3.1)
   local declared = PG.Comm.ScopeOfCode(PG.SafeStr(f3))
-  if not declared or declared ~= scope then return end
+  if not declared or not PG.Comm.ScopeCarries(declared, scope) then return end
   if scope == "private" then return end -- an OPEN must never arrive by whisper
-  if not PG.PB.SCOPES[scope] then return end
+  if not PG.PB.SCOPES[declared] then return end
 
   local key = keyOf(sender, token)
   -- row 3: a finished book's key can never be resurrected
@@ -1663,7 +1800,10 @@ local function onOpen(token, sender, scope, f1, f2, f3)
 
   -- row 7: create the record
   rec = {
-    key = key, token = token, bookie = sender, scope = scope,
+    -- the DECLARED session scope, not the leg this copy happened to arrive on:
+    -- a both-scope book heard on PARTY is still a both-scope book, and gate i
+    -- has to accept its GUILD half too
+    key = key, token = token, bookie = sender, scope = declared,
     stake = stake, line = line, isBookie = false, openedAt = GetTime(),
     lastHB = GetTime(),
   }
@@ -1709,7 +1849,11 @@ local function onMessage(mtype, token, sender, scope, f1, f2, f3)
   end
   if not rec then return end
   if rec.kind == "lite" then return liteObserve(rec, mtype) end -- gate h
-  if scope ~= rec.scope then return end                          -- gate i
+  -- gate i: the delivered distribution must be one this book actually rides on.
+  -- For the three plain scopes that is the equality test it always was; for
+  -- `both` it is a set of two, and a message on any THIRD distribution is still
+  -- refused - which is the property the check exists for.
+  if not PG.Comm.ScopeCarries(rec.scope, scope) then return end   -- gate i
 
   if mtype == "BET" then
     -- gate j: a bet moves other people's money, so the sender must be at the
@@ -1720,7 +1864,11 @@ local function onMessage(mtype, token, sender, scope, f1, f2, f3)
     local s = PG.Safety.state
     if s.inEncounter or s.restricted then return end
     if type(f1) ~= "string" or not (VALID_PICK[f1] and VALID_PICK[f1][f2]) then return end
-    if not inGroupNow(sender) then return end
+    -- gate j, per leg. A bet delivered on GUILD is vouched by the distribution
+    -- itself - only an actual guildmate can send on it - which is strictly
+    -- stronger than any roster lookup this client could do against a cache that
+    -- may be cold. A bet on the group leg still has to be in the group.
+    if scope == "group" and not inGroupNow(sender) then return end
     local picks = a.bets[sender]
     if not picks then
       picks = {}
@@ -1736,6 +1884,16 @@ local function onMessage(mtype, token, sender, scope, f1, f2, f3)
   rec.lastHB = GetTime()
   if mtype == "CLOSE" then
     closeBook(rec, shortOf(sender) .. " closed the Pull Book.")
+  elseif mtype == "ENC" then
+    -- The encounter result, from the one client that watched it. Idempotent by
+    -- a.resolvedKW, so the bookie's retries and the both-scope duplicate are
+    -- both no-ops after the first.
+    local succ = (f1 == "Y" and 1) or (f1 == "N" and 0) or nil
+    local pct = PG.SafeNum(f2)
+    if pct and (pct < 0 or pct > 100) then pct = nil end
+    local nm = PG.SafeStr(f3)
+    if nm == "" or nm == "-" then nm = nil end
+    applyEncounter(nm, succ, pct)
   elseif mtype == "FD" then
     if f1 == "NONE" then
       finishD(nil, nil)
@@ -1778,18 +1936,15 @@ bookieSendFD = function()
   if a.firstDeath then
     role, name = a.firstDeath.role, a.firstDeath.name
   end
-  PG.Comm.BroadcastEx({
-    scope = book.scope,
-    onSent = function()
-      if attempt ~= a or a.dDone then return end
-      a.fdSent = true
-      if role == "NONE" then
-        finishD(nil, nil)
-      else
-        finishD(role, name)
-      end
-    end,
-  }, "PB", "FD", book.token, role, name)
+  bookSendEx(book, function()
+    if attempt ~= a or a.dDone then return end
+    a.fdSent = true
+    if role == "NONE" then
+      finishD(nil, nil)
+    else
+      finishD(role, name)
+    end
+  end, "FD", role, name)
 end
 
 -------------------------------------------------------------------------------

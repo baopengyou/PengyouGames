@@ -30,6 +30,28 @@ local MAX_BYTES = 250
 local SCOPES = { group = "P", guild = "G", public = "R" }
 local SCOPE_OF = { P = "group", G = "guild", R = "public" }
 
+-- "both" (wire code B) is a SESSION scope and NEVER a send scope, and the split
+-- between these tables and SCOPES above is what enforces that.
+--
+-- A message goes out on ONE distribution; there is no "party and guild" chat
+-- type. A both-scope session therefore sends everything TWICE - once on PARTY,
+-- once on GUILD - which is the sending MODULE's job rather than the queue's,
+-- because only the module knows its two copies are one logical message and only
+-- the module knows how to be idempotent about the duplicate. So `both` is
+-- absent from SCOPES: normalizeScope will not accept it and resolveOut will
+-- never be asked to turn it into a chat type. It exists only where a session's
+-- audience is NAMED - the wire code on OPEN, the picker, the ledger's
+-- provenance column.
+--
+-- On receipt, a both-scope session's traffic arrives as scope "group" or
+-- "guild", whichever distribution carried it, and the receiving module accepts
+-- either against its record. SCOPE.md 3.1 is unchanged in substance: the
+-- declared code is still CHECKED against the delivered distribution, it is just
+-- checked against a set of two rather than one, and a message on a THIRD
+-- distribution is still refused.
+local SESSION_SCOPES = { group = "P", guild = "G", public = "R", both = "B" }
+local SESSION_OF = { P = "group", G = "guild", R = "public", B = "both" }
+
 -- Channel names may not contain "-". The password is not a secret and is not
 -- pretending to be one: it stops a squatter who created the channel without
 -- one from locking us out cheaply, and keeps casual /join-ers out.
@@ -97,12 +119,35 @@ end
 
 function PG.Comm.ScopeCode(scope)
   local s = PG.SafeStr(scope)
-  return s and SCOPES[s] or nil
+  return s and SESSION_SCOPES[s] or nil
 end
 
 function PG.Comm.ScopeOfCode(code)
   local c = PG.SafeStr(code)
-  return c and SCOPE_OF[c] or nil
+  return c and SESSION_OF[c] or nil
+end
+
+-- The distributions a session scope actually rides on: one for the three plain
+-- scopes, two for `both`. A module sends to each in turn.
+local SCOPE_LEGS = {
+  group = { "group" }, guild = { "guild" }, public = { "public" },
+  both = { "group", "guild" },
+}
+
+function PG.Comm.ScopeLegs(scope)
+  local s = PG.SafeStr(scope)
+  return (s and SCOPE_LEGS[s]) or nil
+end
+
+-- Is a message delivered on `delivered` legitimate for a session opened at
+-- `sessionScope`? The one gate that has to know `both` spans two distributions.
+function PG.Comm.ScopeCarries(sessionScope, delivered)
+  local legs = PG.Comm.ScopeLegs(sessionScope)
+  if not legs then return false end
+  for i = 1, #legs do
+    if legs[i] == delivered then return true end
+  end
+  return false
 end
 
 -------------------------------------------------------------------------------
@@ -371,6 +416,15 @@ end
 
 function PG.Comm.ScopeAvailable(scope, graceSecs)
   local s = PG.SafeStr(scope)
+  if s == "both" then
+    -- BOTH legs must be live. A session that can only reach half its declared
+    -- audience is not that session: half its bettors would settle a pool the
+    -- other half never saw, which is the one failure this whole architecture
+    -- exists to prevent.
+    local okG, whyG = PG.Comm.ScopeAvailable("group", graceSecs)
+    if not okG then return false, whyG end
+    return PG.Comm.ScopeAvailable("guild", graceSecs)
+  end
   if s == "group" then
     if IsInGroup() then return true end
     return false, "You're not in a party or raid."

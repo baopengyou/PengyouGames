@@ -176,10 +176,18 @@ local PAGES = {
         .. "market with fewer than two bettors, or with everyone on the same "
         .. "side, is void and stakes come back." },
       { "p", "Results arrive quietly once the fight is over - never mid-pull." },
-      { "h", "Why it is party only" },
-      { "p", "The book is scored from the boss fight you are standing in, so "
-        .. "only your own group can see the same result you do. Unlike the "
-        .. "other games, it cannot be played guild-wide or publicly." },
+      { "h", "Who can play" },
+      { "p", "Party, Guild, or both at once. Both is for the nights when half "
+        .. "the guild is watching the raid from Discord: your group and every "
+        .. "guildmate online sit at one table." },
+      { "b", "On a Party+Guild book you have to be in the guild to bet. A bet "
+        .. "has to reach both halves or the two halves would settle different "
+        .. "pots - so a pug in the raid who is not in the guild can watch the "
+        .. "book but not bet in it." },
+      { "p", "Whoever opened the book reads the pull and tells everyone else "
+        .. "the result, because they are the one standing in it. Guild "
+        .. "spectators are taking their word for it - the same way every other "
+        .. "game in the suite trusts its host." },
       { "h", "The other book" },
       { "p", "The Pull Book tile opens a menu with two books in it. This is the "
         .. "raid one. The Mythic Parley is the other: bets on a whole Mythic+ "

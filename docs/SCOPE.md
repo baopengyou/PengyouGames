@@ -87,6 +87,32 @@ dialog; the Games grid stays at six tiles.
 
 ---
 
+## 0d. Union-audience delta (2026-08-21) - `PB` opens to the guild, and a fourth scope exists
+
+**The Pull Book is no longer party only.** It offers **Party**, **Guild** and **Party+Guild**,
+because a guild half of which is spectating the raid in Discord is a real table and the old rule
+shut it out. Owner decision, 2026-08-21.
+
+Section 1.2's reasoning was not taste and could not simply be deleted. It said the book is
+scored from the bookie's own `ENCOUNTER_END` and `UNIT_DIED`, so only the group in that fight can
+observe the result - and it was *right*: a guildmate in Valdrakken never receives that event, so
+they would not settle late, they would settle **nothing**, while the raid settled normally. One
+book, two ledgers. **So the physics were changed rather than the rule.**
+
+| Section | Delta |
+|---|---|
+| 1.1's "exactly three values. No other value is ever valid." | **Four now.** `both` (wire code `B`) is a SESSION scope and never a send scope. A message rides one distribution; a both-scope session therefore sends everything TWICE, on `PARTY` and on `GUILD`, and that is the sending MODULE's job rather than the queue's - only the module knows its two copies are one logical message and how to be idempotent about the duplicate. `Comm.lua` keeps `both` out of `SCOPES` (which `normalizeScope` and `resolveOut` read) and in `SESSION_SCOPES` (which the wire code and the picker read), so the separation is structural rather than a convention. |
+| 3.1, "the declared code is CHECKED against the delivered distribution" | **Unchanged in substance, checked against a SET.** `PG.Comm.ScopeCarries(sessionScope, delivered)` is the one gate that knows `both` spans two, and a message on a third distribution is still refused - which is the property the check exists for. A both-scope record remembers the DECLARED scope, not the leg its `OPEN` happened to arrive on. |
+| 1.2's `PB` row | `PG.PB.SCOPES = { group = true, guild = true, both = true, public = false }`. Public stays refused, with its own reason: the book pays out from one client's read of one pull, and a guild can check who called it where a stranger on the realm channel cannot. |
+| 4.3 / `PB` settlement | **`PB` is now host-authoritative like `LG`, `RPS` and `MP`.** The bookie broadcasts `ENC` (success, boss HP %, encounter name) and EVERY client settles from that one message, party and guild alike. This is not new ground for the file: `FD` has been bookie-authored since 0.5.0, so all that changed is that `K` and `W` now agree with `D`. Two sources for one settlement is precisely what `PARLEY.md` 3.2 rejects. |
+| 4.4's gate `j` for `PB` | Per leg. A `BET` on the group leg must still be in the group snapshot; a `BET` delivered on `GUILD` is vouched by the distribution itself, which is strictly stronger than a roster lookup against a cache that may be cold. |
+| A new rule, and the only one the union audience needs | **At `both` scope a client that cannot reach the guild leg may not bet.** The check is local and certain - I know whether I can speak in guild chat - and it is what stops a bet landing on the party leg alone and leaving the guild settling a pool it never saw. The cost is stated on the Rules page: a pug who is not in your guild can watch a Party+Guild book and cannot bet in it. |
+| 5.1's three-segment picker | Four segments, **opt-in**. `PG.UI.ScopePicker` reads a fourth order only when `cfg.allowed` carries a `both` key at all, because 1.3 says an unavailable scope renders greyed rather than hidden - and a fourth segment in the default order would put a permanently dead *Party+Guild* button in six other games' dialogs to serve one. Segments narrow from 68 to 58 and the label shortens to **Both** so the block still fits a 340px dialog. |
+| 4.4's ledger provenance | `both` is a valid `meta.scope`. G2's independent sources are the union of the two legs' - the live group and the guild cache - which is strictly more than either alone. |
+| The residual case | Both legs are checked live before a both-scope book opens and on every heartbeat (`ScopeAvailable("both")` requires both), so a book whose guild half dies closes rather than half-running. What is not covered: a single message whose first leg goes out and whose second is dropped. `onSent` fires on the first leg, so the sender records the bet; the far leg misses it. This is the same class as `PB`'s long-standing missed-`BET` limitation and is not fixed here. |
+
+---
+
 ## 0. What is being built, in one paragraph
 
 Each game's start dialog gains an **Audience** control with three segments — *Party*, *Guild*,

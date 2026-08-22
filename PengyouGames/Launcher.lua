@@ -92,7 +92,8 @@ local GAME_SHORT = { LG = "Goblins", RPS = "RPS", PB = "Book",
                      MP = "Parley" }
 -- CONCURRENCY.md 5.10 rule 1 lists opens "at every scope including group", so
 -- the label set is wider than SCOPE.md 6.3's Guild|Public table.
-local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
+local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public",
+                      both = "Party+Guild" }
 
 local openRows = {}   -- [game|host|token] = entry
 local rowFrames = {}  -- the five rows, built once with the window

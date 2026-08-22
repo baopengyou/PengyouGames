@@ -366,11 +366,21 @@ end
 -- dialog, so nothing here re-lays out).
 -------------------------------------------------------------------------------
 
+-- THREE segments by default and FOUR only on request. `both` is opt-in via
+-- cfg.allowed carrying the key at all, because SCOPE.md 1.3 says an
+-- unavailable scope renders greyed rather than hidden - so a fourth segment in
+-- the default order would put a permanently dead "Party+Guild" button in six
+-- other games' dialogs to serve one. A game that does not know about `both`
+-- passes no `both` key and gets exactly the control it had.
 local SCOPE_ORDER = { "group", "guild", "public" }
-local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public" }
+local SCOPE_ORDER_BOTH = { "group", "guild", "both", "public" }
+local SCOPE_LABEL = { group = "Party", guild = "Guild", public = "Public",
+                      both = "Both" }
 local SCOPE_TIP = {   -- enabled tooltips, SCOPE.md 5.4, verbatim
   group  = { "Party / Raid - everyone in your group who runs the addon." },
   guild  = { "Guild - every guildmate online right now who runs the addon, on any realm in your guild." },
+  both   = { "Party AND Guild at once - your group and every guildmate online, together in one table.",
+             "Needs both: you must be in a group AND able to speak in guild chat." },
   public = { "Public - your realm and its connected realms, your faction only.",
              "Not cross-faction. Not other realms." },
 }
@@ -379,7 +389,12 @@ local SCOPE_TIP = {   -- enabled tooltips, SCOPE.md 5.4, verbatim
 -- space each for a 6-character label, and right-aligning the block while the
 -- label sat left meant nothing in the control was centred.
 local SEG_W, SEG_H, SEG_GAP, SEG_INSET = 68, 22, 6, 24
+-- A four-segment block would be 290 wide, which overruns a 340px dialog's
+-- content column (292) by two pixels of luck; the segments narrow instead, and
+-- "Party+Guild" shortens to "Both" to fit 58.
+local SEG_W4 = 58
 local SEG_BLOCK = SEG_W * 3 + SEG_GAP * 2
+local SEG_BLOCK4 = SEG_W4 * 4 + SEG_GAP * 3
 local PICKER_H = 58   -- label 20 + segments 22 + hint 16; see the note below
 
 local pickers = {}  -- every live picker, for the availability event hooks
@@ -479,6 +494,12 @@ function PG.UI.ScopePicker(parent, cfg)
   if C then hint:SetTextColor(C.BRASS[1], C.BRASS[2], C.BRASS[3]) end
   if Shadow then Shadow(hint) end
 
+  -- per-instance order and geometry: a game that offers `both` gets four
+  -- narrower segments, everybody else gets exactly today's control
+  local order = (allowed.both ~= nil) and SCOPE_ORDER_BOTH or SCOPE_ORDER
+  local segW = (allowed.both ~= nil) and SEG_W4 or SEG_W
+  local segBlock = (allowed.both ~= nil) and SEG_BLOCK4 or SEG_BLOCK
+
   local selected = nil
   local segs = {}
   local selectScope   -- forward: the click handler needs it
@@ -507,8 +528,8 @@ function PG.UI.ScopePicker(parent, cfg)
   end
 
   local function paint()
-    for i = 1, #SCOPE_ORDER do
-      local scope = SCOPE_ORDER[i]
+    for i = 1, #order do
+      local scope = order[i]
       local b = segs[scope]
       local note = policyNote(scope)
       local ok, reason, ride = false, nil, nil
@@ -557,11 +578,11 @@ function PG.UI.ScopePicker(parent, cfg)
   end
 
   local prev
-  local blockX = math.floor((width - SEG_BLOCK) / 2)   -- the block is centred
+  local blockX = math.floor((width - segBlock) / 2)    -- the block is centred
   if blockX < SEG_INSET then blockX = SEG_INSET end
-  for i = 1, #SCOPE_ORDER do        -- built left to right, under the label
-    local scope = SCOPE_ORDER[i]
-    local b = PG.UI.Button(f, SCOPE_LABEL[scope], SEG_W, SEG_H, function(self)
+  for i = 1, #order do              -- built left to right, under the label
+    local scope = order[i]
+    local b = PG.UI.Button(f, SCOPE_LABEL[scope], segW, SEG_H, function(self)
       if self.__pgOff then
         showTip(self)   -- swallowed click: repeat the reason, do nothing else
         return
@@ -610,9 +631,11 @@ function PG.UI.ScopePicker(parent, cfg)
       selected = pref
       hint:SetText("")
     else
+      -- the per-instance order, so a four-segment picker falls back through
+      -- its own four rather than the default three
       local first
-      for i = 1, #SCOPE_ORDER do
-        local s = SCOPE_ORDER[i]
+      for i = 1, #order do
+        local s = order[i]
         if allowed[s] and scopeAvailable(s) then first = s break end
       end
       selected = first
