@@ -53,6 +53,18 @@ tools/syncaddon.sh --check   # M5 drift gate: non-zero if any addon copy
                              #   differs byte-for-byte from its original here,
                              #   the derived file from its sources, or the
                              #   .toc engine order no longer loads
+
+tools/m5.sh                  # THE M5 GATE (part 2): syncaddon --check, luac,
+                             #   a zero-new-globals bytecode scan of the game
+                             #   file, then the two-client headless drive --
+                             #   full lifecycle, the real board asserted on
+                             #   both seats (side-2 mirror included), every
+                             #   D.1 order kind, and a COMPLETE 6,000-tick
+                             #   match over a lossy/delaying/reordering/
+                             #   duplicating bus: zero settled mismatches,
+                             #   terminal sims bit-identical, traffic under
+                             #   32 msg/min per client. Sub-second.
+tools/m5.sh "$(which luajit)"    # the 5.1-semantics half of the same drive
 ```
 
 **They are two gates, not one, and both must be run.** `tools/m2.sh`'s header gives
@@ -426,6 +438,29 @@ tools/               checkers and the first test suite. NOT held to the sim's de
                      SYNCED, NEVER THE REVERSE -- an edit made in the copies
                      is a second, untested game that no gate here reads, and
                      --check exists to turn that state into a red build.
+  m5.sh              THE M5 GATE, beside its four siblings: syncaddon --check,
+                     luac over the game file and the drive, a bytecode scan
+                     asserting ZERO writes through _ENV in Games/IdleBattle.lua
+                     (the addon convention is file-local state + PG; part 1's
+                     one documented global lives in the generated Loader.lua),
+                     then tools/ibshim.lua. Its header quotes the milestone
+                     and its closing block names exactly what only two real
+                     WoW clients can still show.
+  ibshim.lua         the two-client headless drive m5.sh fronts (promoted from
+                     part 1's scratch harness, its stubs extended to the real
+                     board's API surface): two Games/IdleBattle.lua instances
+                     over an in-memory bus -- selftest, OPEN/lite/invitation/
+                     join/handshake/play, the board asserted on BOTH seats
+                     through its own widgets (slot geometry from the hashed
+                     constants, the side-2 MIRROR, the no-fog label, a
+                     Rules-derived tooltip, the queued-order ghost), concede/
+                     V, lockdown void, silence void, then a COMPLETE match on
+                     a lossy/delaying/reordering/duplicating bus with every
+                     unit kind and every first-playable building letter
+                     issued from both seats (discovered from the catalogue,
+                     never listed), asserting rollbacks ran, zero settled
+                     mismatches, bit-identical terminal sims, agreed fizzle
+                     counts, the reveal payloads, and the 32 msg/min budget.
 
 harness/             the SECOND suite, and not redundant with tools/. Three things live
                      ONLY here, and the M1 gate is dishonest without them:
@@ -3096,6 +3131,154 @@ overturn.**
    is validated and carried end-to-end, but a shorter clock would end without
    `sim.over` (the sim's own clock finish fires at C.MATCH_TICKS), so
    presets stay M8+ material.
+
+## M5 part 2 - the REAL BOARD, and the M5 gate (2026-08-21)
+
+Part 1 built the plumbing and drove it with a marked stub. Part 2 replaces
+exactly that stub region of `Games/IdleBattle.lua` (the banner through
+`RefreshUI`; the driver, bridge, router and matchmaking above it are
+untouched, and so is the engine -- `rulesHash` is still `767294897` and every
+prior gate is green on unchanged goldens) with the board that makes it a
+game, and lands `tools/m5.sh` as the milestone's gate.
+
+**THE BOARD**, side-on per `../docs/IDLE_BATTLE_VISUAL.md`: three lanes
+stacked vertically between the two keeps, each lane the FULL shared axis with
+an explicit midline. The one mirroring rule, and it is the whole A.2 render
+story: the viewing player's half is always the LEFT half -- own entities plot
+at `pos/LANE_LEN` of the lane width and enemy entities at `1 - pos/LANE_LEN`,
+identical code both seats, so the side-2 client mirrors by construction
+rather than by a branch (the classic lockstep rendering bug is "am I the
+host" leaking into the draw path; the m5 drive asserts the mirror ON the
+side-2 client). Everything rendered is READ-ONLY off `S.ep.sim` at the 0.5 s
+ticker cadence (the resolve tick the visual doc leans on) plus a repaint per
+click: unit STACKS (one marker per stack, never per unit -- grouped by type
+and 1/16th of the axis -- letter, count and an aggregate HP bar), the four
+slot squares per lane at the fracs the hashed `POS_*_SLOT` constants give
+(letter of the occupant, build-progress percent, HP bar, spent flag, F/B
+class tag from interpretation 1's odd-front numbering), keep HP columns both
+ends, Levy/cap/income cues recomputed from the slots each repaint, per-lane
+supply against `LANE_SUPPLY_CAP`, the match clock, the live Q10 score line
+from `SCORE_SHOW_TICK` (hashed; 20% mark), part 1's net diagnostic line kept
+small at the bottom, and a PERMANENT no-fog label -- both players currently
+see the whole board; the fog render filter mounts at a later milestone in
+front of exactly this read path.
+
+**THE COMMAND SURFACE** is D.1's first playable, whole and nothing more,
+every click through `ep:issue()` (the stub's `issueOrder` contract, kept):
+three unit buttons and six building buttons DISCOVERED from the hashed
+tables (`Rules.UNITS`; `Rules.BUILDINGS` rows with `firstPlayable == 1` --
+the stub's `palisadeLetter()` idiom generalised, no letter or cost ever
+hand-written), a count stepper capped by `MAX_UNITS_PER_ORDER`, arm-then-
+click targeting (pick a unit, click a lane; pick a building, click one of
+your six squares -- the PvZ read), cost tooltips off the catalogue rows with
+a live bank line, affordability greying, and QUEUED-ORDER ghosts that make
+the 2 s `ORDER_DELAY` visible on the lane or slot until the exec tick
+passes. No verbs: D.1 ships zero modifiers, and I/E/L are card verbs. No
+client-side legality beyond paint: an illegal order still ships, both sims
+fizzle it at the exec tick (A.4), and the net line's executed/fizzled
+counters surface it calmly.
+
+**LIFECYCLE UX.** Join phase: countdown plus who-can-join over the empty
+field; handshake named; play as above; concede kept on part 1's exact void
+semantics; and the RESULT rides the shared reveal stage (REVEAL.md) --
+podium variant for a win/loss (two placed player rows carrying the ladder
+stats, the viewer's row personal), cascade for a draw, title
+VICTORY/DEFEAT/DRAW, the deciding tier or the razed keep on the subtitle,
+queued (never played over a busy stage) and culled by `validate` if the
+record is gone. A VOID ending gets a plain stamp and no fanfare. Window:
+the factory's scale grip (0.6..1.6 covers full-screen), the never-overlap
+solver and the Safety registration all come from `PG.UI.Window`; the driver
+part 1 guaranteed keeps ticking while hidden.
+
+**THE GATE: `tools/m5.sh`** -- syncaddon `--check`, `luac -p`, a bytecode
+scan asserting ZERO writes through `_ENV` in the game file (`luac -l -l`
+over every function), then `tools/ibshim.lua`: part 1's scratch two-client
+harness PROMOTED into the tree, its stubs extended to the board's whole
+widget surface, driving both module instances through the board's own
+widgets. Measured on the green run: selftest goldens inside the shim; the
+full lifecycle on a sync bus with the board asserted on both seats (12 slot
+squares per client on the four derived fracs, all six own squares
+clickable, the side-2 mirror, the no-fog label, a Rules-derived tooltip,
+the queued ghost, stacks on the correct halves); concede/V, lockdown void
+and 35 s silence void; then a COMPLETE 6,000-tick match over a bus dropping
+15%, delaying 0.1..3.5 s (reordering), duplicating 6% -- every unit kind
+and every first-playable letter issued from BOTH seats, **51 late atoms ->
+51 rollbacks through the bridge, 20 duplicate atoms absorbed, 58/74 settled
+hash comparisons with ZERO mismatches, terminal sims bit-identical
+(stateHash, logDigest, winner, reason, tick 6,000), fizzle counts agreed
+(6/5 -- the scripted illegal builds), and traffic 18.0/18.1 msg/min per
+client against the 32/min budget, largest addon message 38 bytes.**
+Sub-second, so it belongs in the pre-commit loop.
+
+**ONE FLAG FOR THE OWNER (not fixed here; part 1's region is frozen for
+part 2 and the fix sits in it).** The router drops in-match rows once a
+session's phase is `done`, and `finishMatch` fires the moment the LOCAL sim
+ends. A command issued near the clock edge whose delivery outlives the
+receiver's match (the real channel can delay seconds under shared-bucket
+contention; the shim's bus models 3.5 s) is then never spliced -- `Net`
+itself would have repaired it, a late atom after `over` is just one more
+rollback -- and the two DONE boards can hold different terminal states.
+Consequences in M5 are cosmetic (no ledger; each reveal reads its own sim),
+but the milestone's "hashes matching at every heartbeat" deserves the
+closed window. Cheap fix for a part-2.x pass, anticipated by part 1's
+interpretation 6: a short done-linger during which S/C/H/N still reach the
+endpoint, or defer `finishMatch` until the endpoint is quiet. Until then
+the m5 drive stops issuing at tick ~5,600 and the gate's closing block
+names the window honestly.
+
+**M5 PART 2 INTERPRETATIONS** (continuing part 1's numbering; each cheap to
+overturn).
+
+8. **The result uses the shared reveal stage although D.1's table cuts
+   "Theme.lua reveal stage, podium, animation" from the first playable.**
+   The owner's standing bar -- a flashy, animated, no-holds-barred results
+   screen for EVERY game -- post-dates that scope line and the stage
+   already exists and composes with a 1v1 (podium win/loss, cascade draw),
+   so using it costs nothing and honouring the cut would cost the bar.
+   Overturning is deleting one function (`maybeResult`).
+9. **Concede stays a two-sided VOID, no winner recorded.** A.11 has no
+   surrender row, and a client-DECLARED loss is a result the peer's sim
+   cannot derive from shared inputs -- the engine is frozen for part 2, so
+   part 1's stub text ("scoring lands with the real board") could not be
+   honoured by the board alone; it needs an owner ruling plus a wire row
+   (M6+ material). The concede button and its toast say exactly this.
+10. **Affordability greying is advisory paint, never a gate.** A greyed
+    button still issues; both sims judge at the exec tick (A.4), and the
+    bank can rise during the 2 s delay. The armed-building slot highlight
+    (empty own squares light, matching `slotClass` brighter) is the same:
+    affordance derived from hashed data, no client veto anywhere.
+11. **Counts: the stepper spans 1..`MAX_UNITS_PER_ORDER` (hashed, 9);
+    builds always ship count 1** (the atom's N field is >= 1 by the codec;
+    the sim ignores it for builds).
+12. **Display names derive from catalogue keys** (camelCase split:
+    "trapPit" -> "Trap Pit"); the ONE presentation map is `TIER_WORD`,
+    prose for the hashed Q10 tier identifiers, because the ruleset stores
+    identifiers and the reveal needs sentences. Every other displayed
+    value is read from Rules or sim state at repaint.
+13. **Slot numbering on the board re-derives interpretation 1** (front slot
+    of lane L is `(L-1)*2+1`; odd = front): the engine does not export its
+    slot helpers and the wire's 1..6 slot targets mean nothing without the
+    mapping. The class tag, the geometry and the armed highlight all read
+    it from that one rule.
+14. **Pending orders are an ADDON-side queue** recorded when `issue()`
+    accepts (kind/target/count/exec), pruned once the sim clock passes the
+    exec tick. The endpoint's own `outBuf` is deliberately not reached
+    into -- the bridge consumes only the surfaces the M4 harness used, and
+    part 2 keeps that line.
+15. **Income and cap cues are recomputed from the slots each repaint**
+    (`BASE_INCOME` + `levyFlat` of completed buildings; `BANK_CAP` +
+    `bankCapFlat`), mirroring `phaseIncome`/`bankCapOf` exactly for a D.1
+    cardless match -- never read from the sim's derived caches, which the
+    engine documents as invariant-checked internals.
+
+Bookkeeping notes: the `.toc` Notes line was checked and does not mention
+the stub (no edit needed); Part E's M5 status paragraph is untouched -- its
+"milestone claimed only when part 2 has run the complete two-account match"
+clause is still the truth, because **a green `tools/m5.sh` does not claim
+the two-real-characters half**: the gate's closing block lists exactly what
+only two logged-in WoW clients can still show (the real channel and Comm
+queue, `/pgd ib selftest` on WoW Lua, pixels and the reveal stage playback,
+the scale grip / overlap solver / Safety visuals on real Widgets code).
 
 ---
 

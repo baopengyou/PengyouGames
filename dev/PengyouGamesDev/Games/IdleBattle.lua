@@ -1,8 +1,10 @@
--- Games/IdleBattle.lua - Idle Battle mounted in the DEV addon. M5 PART 1:
--- matchmaking through the shipped session system, the real-channel comm
--- bridge onto net/Net.lua, the OnUpdate tick driver, the in-game determinism
--- selftest, and a STUB match surface. The real board UI is M5 part 2 and
--- replaces exactly the window section at the bottom of this file.
+-- Games/IdleBattle.lua - Idle Battle mounted in the DEV addon. M5 part 1
+-- built the plumbing: matchmaking through the shipped session system, the
+-- real-channel comm bridge onto net/Net.lua, the OnUpdate tick driver and
+-- the in-game determinism selftest. M5 part 2 replaced part 1's stub with
+-- the REAL BOARD (the window section at the bottom of this file): side-on
+-- lanes per docs/IDLE_BATTLE_VISUAL.md, D.1's full command surface, and the
+-- shared reveal stage on a real result.
 --
 -- WHAT THIS FILE IS. The addon-side half of dev/idlebattle/: the headless
 -- engine (byte-identical copies under IdleBattle\, synced and checked by
@@ -89,9 +91,9 @@ PG.IB.SCOPES = { group = true, guild = false, public = false }
 -- demands timed human decisions for ten minutes).
 PG.IB.SEAT = true
 
-local TICK_SECS = 0.5        -- module ticker (sweeps, deadlines, stub repaint)
+local TICK_SECS = 0.5        -- module ticker (sweeps, deadlines, board repaint)
 local SIM_TICK = 0.1         -- one sim tick per 100 ms (Rules.C.SIM_TICK_MS)
-local JOIN_SECS = 45         -- join window (fixed in the M5 stub dialog)
+local JOIN_SECS = 45         -- join window (fixed in the M5 dialog)
 local HANDSHAKE_SECS = 30    -- the S offer cadence is 6 s (Net's HELLO_EVERY),
                              -- so this covers five attempts: enough that a
                              -- couple of silently eaten sends cannot kill a
@@ -292,7 +294,8 @@ end
 
 -- Teardown (CONCURRENCY.md 7.1): the instant phase becomes "done" the seat is
 -- released, the invitation comes down, the launcher row goes, the driver
--- stops. The record lingers DONE_TTL so the stub window can show the verdict.
+-- stops. The record lingers DONE_TTL so the board can show the verdict (and
+-- the final state of the field) before it is swept.
 endSession = function(text)
   local S = mySession()
   if not S or S.phase == "done" then return end
@@ -939,7 +942,7 @@ local function onDrop(mtype, token)
 end
 
 -------------------------------------------------------------------------------
--- The module ticker: deadlines, liveness, sweeping, stub repaint.
+-- The module ticker: deadlines, liveness, sweeping, board repaint.
 -------------------------------------------------------------------------------
 
 onTick = function()
@@ -1083,88 +1086,618 @@ function PG.IB.Diagnose()
 end
 
 -------------------------------------------------------------------------------
--- STUB MATCH SURFACE -- M5 PART 1 PLACEHOLDER. Part 2 replaces everything
--- from here to the dialog with the real board; keep the wiring (ShowWindow /
--- RefreshUI names, the issue() calls, the Safety registration) and delete the
--- rest. Just enough to drive a real match end-to-end between two clients:
--- status, tick, Levy and keep HP both sides, one deploy and one build button.
+-- THE BOARD -- M5 PART 2, the real match surface (replacing part 1's stub).
+--
+-- Side-on battlefield per docs/IDLE_BATTLE_VISUAL.md: three lanes stacked
+-- vertically, each lane drawn as the FULL shared axis with an explicit
+-- midline, both keeps flanking the field. THE VIEWING PLAYER'S HALF IS
+-- ALWAYS THE LEFT HALF, whichever engine side they hold: the sim is
+-- side-agnostic (A.2) and stores every position in its owner's OWN frame
+-- (0 = own keep, LANE_LEN = the enemy keep), so own entities plot at
+-- pos/LANE_LEN of the lane width and enemy entities at 1 - pos/LANE_LEN --
+-- ONE formula for both seats. The side-2 render mirrors by construction,
+-- never by an "am I the host" branch (the classic lockstep rendering bug).
+--
+-- READ-ONLY RENDER. Every repaint derives what it shows -- names, letters,
+-- costs, counts, caps, slot geometry, income -- from Rules and from
+-- S.ep.sim's hashed state, never from a duplicated table (display names
+-- derive from the catalogue keys; the one presentation map is TIER_WORD,
+-- prose keyed by the hashed tier names). The board never writes into the
+-- sim: the only mutation path is issueOrder -> ep:issue -> the endpoint's
+-- own gate, and BOTH sims validate every order at its exec tick (A.4). A
+-- refused order is a counted fizzle on the net line, never a client veto;
+-- affordability greying is advisory paint, not a gate.
+--
+-- NO FOG. fog/ is deliberately not mounted in M5: a permanent board label
+-- says both players currently see the whole board. The fog render filter
+-- mounts at a later milestone in front of exactly this read path.
+--
+-- Layout floats never reach the sim: everything handed to issue() is an
+-- integer the buttons were BUILT with (lane, slot, count).
 -------------------------------------------------------------------------------
+
+local floor = math.floor
+
+-- Window geometry. The window resizes BY SCALE (the factory corner grip,
+-- 0.6..1.6), so these are design-time pixels: nothing below reads GetWidth
+-- at repaint, and the layout never reflows.
+local BW, BH = 980, 560
+local KEEP_W = 60                 -- keep column width
+local BF_X = 82                   -- battlefield left edge (16 + KEEP_W + 6)
+local LANE_W = BW - 2 * BF_X      -- 816
+local BF_Y = 64                   -- battlefield top, below the header
+local LANE_H = 96
+local LANE_GAP = 6
+local BF_H = 3 * LANE_H + 2 * LANE_GAP
+local SLOT_S = 44                 -- slot square side
+local MARK_W, MARK_H = 40, 22     -- unit stack marker
+local MARK_Y_MINE, MARK_Y_FOE = -16, -70
+local BUCKETS = 16                -- stack grouping: 1/16th of the lane axis
+
+-- Presentation only. Art keys would route through PG.Theme (SKIN.md rule 0);
+-- the board draws plain color blocks and bars until the owner's deferred
+-- asset pass (IDLE_BATTLE_VISUAL.md ruling 2) -- legible and honest beats
+-- guessed atlases. Unit colors are indexed by Rules unit index.
+local CLR = {
+  laneBG  = { 0.070, 0.075, 0.095, 0.92 },
+  midline = { 0.85, 0.72, 0.35, 0.45 },
+  mine    = { 0.45, 0.86, 0.55 },
+  foe     = { 0.95, 0.42, 0.34 },
+  unit    = { { 0.72, 0.80, 1.00 }, { 1.00, 0.75, 0.35 }, { 0.62, 0.93, 0.62 } },
+  slotBG  = { 0.13, 0.13, 0.15, 0.85 },
+  slotHi  = { 1.00, 0.82, 0.20 },
+  barBG   = { 0, 0, 0, 0.65 },
+  grey    = { 0.66, 0.66, 0.61 },
+  gold    = { 1.00, 0.85, 0.46 },
+  amber   = { 0.95, 0.78, 0.35 },
+}
+
+-- UI-only selection state (never sim state): what the next board click will
+-- order. Cleared whenever no match is in the play phase.
+local armed                       -- { unit = i } or { bld = i }, Rules indices
+local deployCount = 1             -- 1 .. Rules.C.MAX_UNITS_PER_ORDER
 
 local function fmtClock(ticks)
   local s = math.floor(ticks / 10)
   return string.format("%d:%02d", math.floor(s / 60), s % 60)
 end
 
+local function fmtSecs1(ticks)
+  return string.format("%.1f", ticks / 10)
+end
+
+-- "trapPit" -> "Trap Pit": display names DERIVE from the hashed catalogue
+-- key. Rules carries no display-name field, and a hand-kept name table would
+-- be exactly the duplicated data the determinism doctrine bans.
+local function titleCase(key)
+  local s = tostring(key or ""):gsub("(%u)", " %1")
+  s = s:gsub("^%l", string.upper)
+  return s
+end
+
+-- Decoration runner (the RPS runFX idiom): theme calls are pcall'd and
+-- swallowed so no skin problem can ever touch game state or the wire.
+local function fx(name, ...)
+  local T = PG.Theme
+  local f = T and T[name]
+  if f then
+    local ok, err = pcall(f, ...)
+    if not ok then geterrorhandler()(err) end
+  end
+end
+
 -- One order per click through the endpoint's own gate: exec = now + 2 s
 -- (C.1's order delay), shipped as an A.11.2 atom, validated by BOTH sims at
--- the exec tick (A.4). Palisade is D.1 first-playable content; its letter
--- comes from the hashed catalogue, never hardcoded (A.11.2).
+-- the exec tick (A.4). On success the order is remembered ADDON-side
+-- (kind/target/count/exec) so the delay is VISIBLE: queued markers on the
+-- lane or slot resolve when the sim clock reaches the exec tick. The
+-- engine's own buffers are never reached into for this.
 local function issueOrder(kind, target, count)
   local S = mySession()
   if not S or S.phase ~= "play" or not S.ep then return end
+  local execAt = (S.ep.sim and (S.ep.sim.clock + Rules.C.ORDER_DELAY)) or 0
   local ok, err = pcall(S.ep.issue, S.ep, kind, target, count)
   if not ok then
     geterrorhandler()(err)
     voidMatch("Voided - internal engine error on an order.", true)
-  elseif err == false then
+    return
+  end
+  if err == false then
     -- issue() returned false: past the clock edge; nothing to do
     toast("too late - the match clock is nearly out.", S.host)
+    return
   end
+  S.pending = S.pending or {}
+  S.pending[#S.pending + 1] = { kind = kind, target = target, count = count, exec = execAt }
+  fx("Sound", "click")
+  RefreshUI()
 end
 
-local function palisadeLetter()
-  for i = 1, #Rules.BUILDINGS do
-    if Rules.BUILDINGS[i].key == "palisade" then return Rules.BUILDINGS[i].letter end
+local function prunePending(S, sim)
+  local p = S.pending
+  if not p then return end
+  local w = 0
+  for i = 1, #p do
+    if p[i].exec >= sim.clock then
+      w = w + 1
+      p[w] = p[i]
+    end
+  end
+  for i = #p, w + 1, -1 do p[i] = nil end
+end
+
+local function pendingLaneText(S, sim, lane)
+  local p = S.pending
+  if not p then return "" end
+  local out
+  for i = 1, #p do
+    local e = p[i]
+    if e.target == lane and Rules.UNIT_BY_KIND[e.kind] then
+      local piece = e.count .. "x" .. e.kind .. " in " .. fmtSecs1(e.exec - sim.clock) .. "s"
+      out = out and (out .. "  " .. piece) or piece
+    end
+  end
+  return out and ("queued " .. out) or ""
+end
+
+local function pendingSlotLetter(S, slot)
+  local p = S.pending
+  if not p then return nil end
+  for i = 1, #p do
+    local e = p[i]
+    if e.target == slot and Rules.BUILDING_BY_LETTER[e.kind] then return e.kind end
   end
   return nil
 end
 
+-- Income and cap cues, derived from the slots the same way phaseIncome and
+-- bankCapOf derive them -- for a D.1 (cardless) match the channel and
+-- production terms are structurally zero, so these are exact.
+local function incomeOf(sd)
+  local flat = 0
+  for s = 1, Rules.C.SLOTS do
+    local b = sd.slots[s]
+    if b and b.done == 1 then flat = flat + Rules.BUILDINGS[b.b].levyFlat end
+  end
+  return Rules.C.BASE_INCOME + flat
+end
+
+local function bankCapOfSide(sd)
+  local cap = Rules.C.BANK_CAP
+  for s = 1, Rules.C.SLOTS do
+    local b = sd.slots[s]
+    if b and b.done == 1 then cap = cap + Rules.BUILDINGS[b.b].bankCapFlat end
+  end
+  return cap
+end
+
+local function depthSumOf(sd)
+  local n = 0
+  for lane = 1, Rules.C.LANES do n = n + sd.lanes[lane].depth end
+  return n
+end
+
+local function mySideOf(S)
+  return S.mySide or (S.isHost and 1 or 2)
+end
+
+-- Board clicks. A unit order targets the LANE (uppercase kind, A.11.2), a
+-- building order targets one of MY six slots (lowercase). No legality is
+-- pre-checked here beyond what the buttons painted: the sims judge at exec.
+local function laneClicked(lane)
+  local S = mySession()
+  if not (S and S.phase == "play" and S.ep) then return end
+  if armed and armed.unit then
+    issueOrder(Rules.UNITS[armed.unit].kind, lane, deployCount)
+  end
+end
+
+local function slotClicked(slot, lane)
+  local S = mySession()
+  if not (S and S.phase == "play" and S.ep) then return end
+  if armed and armed.bld then
+    issueOrder(Rules.BUILDINGS[armed.bld].letter, slot, 1)
+    armed = nil
+    RefreshUI()
+  elseif armed and armed.unit then
+    -- a unit order targets the lane; clicking a square still reads as "here"
+    issueOrder(Rules.UNITS[armed.unit].kind, lane, deployCount)
+  end
+end
+
+-------------------------------------------------------------------------------
+-- Tooltips: every number read live from Rules (and the bank from the sim).
+-------------------------------------------------------------------------------
+
+local function tipHide()
+  GameTooltip:Hide()
+end
+
+local function affordLine(cost)
+  local S = mySession()
+  local sim = S and S.ep and S.ep.sim
+  if sim then
+    local bank = sim.sides[mySideOf(S)].bank
+    if bank < cost then
+      GameTooltip:AddLine("Bank " .. bank .. " - short by " .. (cost - bank)
+        .. ". Orders still send: both sims judge at execution (A.4).", 1, 0.45, 0.35, true)
+    end
+  end
+end
+
+local function unitTip(owner, i)
+  local u = Rules.UNITS[i]
+  local C = Rules.C
+  GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+  GameTooltip:AddLine(titleCase(u.key))
+  GameTooltip:AddLine("Cost " .. u.cost .. " Levy"
+    .. ((deployCount > 1) and ("  (x" .. deployCount .. " = " .. (u.cost * deployCount) .. ")") or ""),
+    1, 0.82, 0, true)
+  GameTooltip:AddLine("HP " .. u.hp .. "  -  " .. u.dmg .. " damage every resolve ("
+    .. fmtSecs1(C.RESOLVE_EVERY) .. " s)"
+    .. ((u.targets > 1) and (", up to " .. u.targets .. " targets") or ""), 1, 1, 1, true)
+  GameTooltip:AddLine("Range " .. u.range .. "  -  march " .. u.march .. " per tick", 1, 1, 1, true)
+  GameTooltip:AddLine("Beats " .. titleCase(Rules.UNITS[u.prey].key)
+    .. " (+" .. (C.COUNTER_PCT - 100) .. "% into it)", 0.49, 0.93, 0.64, true)
+  for j = 1, #Rules.UNITS do
+    if Rules.UNITS[j].prey == i then
+      GameTooltip:AddLine("Hunted by " .. titleCase(Rules.UNITS[j].key), 1, 0.54, 0.44, true)
+    end
+  end
+  GameTooltip:AddLine("Supply " .. u.cost .. " of the lane's " .. C.LANE_SUPPLY_CAP
+    .. " (base cost)", 0.66, 0.66, 0.61, true)
+  affordLine(u.cost)
+  GameTooltip:Show()
+end
+
+local function bldTip(owner, bi)
+  local b = Rules.BUILDINGS[bi]
+  GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+  GameTooltip:AddLine(titleCase(b.key))
+  GameTooltip:AddLine("Cost " .. b.cost .. " Levy  -  builds in " .. fmtSecs1(b.build) .. " s",
+    1, 0.82, 0, true)
+  GameTooltip:AddLine("HP " .. b.hp .. "  -  "
+    .. ((b.slotClass == "front") and "FRONT square (F)" or "BACK square (B)")
+    .. ((b.defensive == 1) and "  -  defensive" or ""), 1, 1, 1, true)
+  if b.dmg > 0 then
+    GameTooltip:AddLine("Shoots for " .. b.dmg .. " every resolve, range " .. b.dmgRange,
+      1, 1, 1, true)
+  end
+  if b.trapBurst > 0 then
+    GameTooltip:AddLine("One-shot burst: " .. b.trapBurst .. " damage over up to "
+      .. b.trapTargets .. " targets within " .. b.trapRadius, 1, 1, 1, true)
+  end
+  if b.levyFlat > 0 then
+    GameTooltip:AddLine("+" .. b.levyFlat .. " Levy per Levy tick", 0.49, 0.93, 0.64, true)
+  end
+  if b.bankCapFlat > 0 then
+    GameTooltip:AddLine("+" .. b.bankCapFlat .. " bank cap", 0.49, 0.93, 0.64, true)
+  end
+  if b.vision > 0 then
+    GameTooltip:AddLine("Vision " .. b.vision .. " - real once fog mounts (later milestone)",
+      0.66, 0.66, 0.61, true)
+  end
+  affordLine(b.cost)
+  GameTooltip:Show()
+end
+
+local function slotTip(owner, slot)
+  local S = mySession()
+  local sim = S and S.ep and S.ep.sim
+  if not sim then return end
+  local b = sim.sides[mySideOf(S)].slots[slot]
+  GameTooltip:SetOwner(owner, "ANCHOR_RIGHT")
+  local front = (slot % 2) == 1     -- interpretation 1: odd slots are front
+  if b then
+    local br = Rules.BUILDINGS[b.b]
+    GameTooltip:AddLine(titleCase(br.key) .. " (" .. br.letter .. ")")
+    if b.done == 0 then
+      GameTooltip:AddLine("Under construction - " .. floor(b.prog * 100 / b.need) .. "%",
+        1, 0.82, 0, true)
+    end
+    GameTooltip:AddLine("HP " .. b.hp .. " / " .. b.maxHp, 1, 1, 1, true)
+    if b.spent == 1 then GameTooltip:AddLine("Spent (one-shot fired)", 0.66, 0.66, 0.61, true) end
+  else
+    GameTooltip:AddLine((front and "Front" or "Back") .. " square - empty")
+    GameTooltip:AddLine("Pick a building below, then click here.", 0.66, 0.66, 0.61, true)
+  end
+  GameTooltip:Show()
+end
+
+-------------------------------------------------------------------------------
+-- Widget builders. Pools are built once per lane and reused every repaint;
+-- markers grow on demand and hide when idle, so a busy lane never allocates
+-- per frame.
+-------------------------------------------------------------------------------
+
+local function mkTex(parent, layer, c)
+  local t = parent:CreateTexture(nil, layer)
+  t:SetColorTexture(c[1], c[2], c[3], c[4] or 1)
+  return t
+end
+
+local function mkFS(parent, template, c)
+  local s = parent:CreateFontString(nil, "OVERLAY", template)
+  if c then s:SetTextColor(c[1], c[2], c[3]) end
+  return s
+end
+
+local function mkBar(parent, w, h)
+  local bar = { w = w }
+  bar.bg = mkTex(parent, "ARTWORK", CLR.barBG)
+  bar.bg:SetSize(w, h)
+  bar.fill = mkTex(parent, "OVERLAY", CLR.mine)
+  bar.fill:SetSize(w, h)
+  bar.fill:SetPoint("LEFT", bar.bg, "LEFT", 0, 0)
+  return bar
+end
+
+local function barSet(bar, num, den, c)
+  if den <= 0 then den = 1 end
+  if num < 0 then num = 0 end
+  local w = floor(bar.w * num / den)
+  if w < 1 then
+    bar.fill:Hide()
+  else
+    bar.fill:SetWidth(w)
+    bar.fill:Show()
+  end
+  if c then bar.fill:SetColorTexture(c[1], c[2], c[3], 1) end
+end
+
+local function mkKeep(onRight)
+  local f = CreateFrame("Frame", nil, win)
+  f:SetSize(KEEP_W, BF_H)
+  if onRight then
+    f:SetPoint("TOPRIGHT", -16, -BF_Y)
+  else
+    f:SetPoint("TOPLEFT", 16, -BF_Y)
+  end
+  local k = { frame = f }
+  local bg = mkTex(f, "BACKGROUND", CLR.slotBG)
+  bg:SetAllPoints()
+  k.name = mkFS(f, "GameFontNormalSmall", onRight and CLR.foe or CLR.mine)
+  k.name:SetPoint("TOP", 0, -4)
+  k.name:SetWidth(KEEP_W - 4)
+  k.label = mkFS(f, "GameFontNormalSmall", CLR.grey)
+  k.label:SetPoint("TOP", 0, -18)
+  k.label:SetText("KEEP")
+  k.barBG = mkTex(f, "ARTWORK", CLR.barBG)
+  k.barBG:SetSize(14, BF_H - 64)
+  k.barBG:SetPoint("TOP", 0, -34)
+  k.fill = mkTex(f, "OVERLAY", onRight and CLR.foe or CLR.mine)
+  k.fill:SetSize(14, BF_H - 64)
+  k.fill:SetPoint("BOTTOM", k.barBG, "BOTTOM", 0, 0)
+  k.hp = mkFS(f, "GameFontNormalSmall", nil)
+  k.hp:SetPoint("BOTTOM", 0, 16)
+  k.max = mkFS(f, "GameFontNormalSmall", CLR.grey)
+  k.max:SetPoint("BOTTOM", 0, 4)
+  return k
+end
+
+local function keepSet(k, hp)
+  local h = floor((BF_H - 64) * hp / Rules.C.KEEP_HP)
+  if h < 1 then
+    k.fill:Hide()
+  else
+    k.fill:SetHeight(h)
+    k.fill:Show()
+  end
+  k.hp:SetText(tostring(hp))
+end
+
+-- One slot square. `frac` is the slot's position on the shared axis in THIS
+-- VIEWER's screen frame, handed in by mkLane from the hashed POS_* constants
+-- (own slots at pos/LANE_LEN, enemy slots mirrored to 1 - pos/LANE_LEN).
+local function mkSlotBox(L, laneIdx, slotIdx, frac, mineFlag)
+  local f = CreateFrame("Frame", nil, L.frame)
+  f:SetSize(SLOT_S, SLOT_S)
+  f:SetPoint("TOPLEFT", floor(frac * LANE_W) - floor(SLOT_S / 2), -30)
+  f:SetFrameLevel(L.frame:GetFrameLevel() + 1)
+  f.__ibBoxFrac = frac              -- read by the headless m5 drive
+  local box = { frame = f, mine = mineFlag, slot = slotIdx }
+  box.bg = mkTex(f, "BACKGROUND", CLR.slotBG)
+  box.bg:SetAllPoints()
+  box.hi = mkTex(f, "BACKGROUND", CLR.slotHi)
+  box.hi:SetAllPoints()
+  box.hi:SetAlpha(0)
+  box.tag = mkFS(f, "GameFontNormalSmall", mineFlag and CLR.mine or CLR.foe)
+  box.tag:SetPoint("TOPLEFT", 2, -1)
+  box.tag:SetText(((slotIdx % 2) == 1) and "F" or "B")   -- interpretation 1
+  box.letter = mkFS(f, "GameFontNormalLarge", CLR.gold)
+  box.letter:SetPoint("CENTER", 0, 2)
+  box.sub = mkFS(f, "GameFontNormalSmall", CLR.grey)
+  box.sub:SetPoint("BOTTOM", 0, 6)
+  box.bar = mkBar(f, SLOT_S - 6, 3)
+  box.bar.bg:SetPoint("BOTTOMLEFT", 3, 2)
+  if mineFlag then
+    local hit = CreateFrame("Button", nil, f)
+    hit:SetAllPoints()
+    hit:SetFrameLevel(f:GetFrameLevel() + 5)
+    hit.__ibSlot = slotIdx            -- read by the headless m5 drive
+    hit.__ibLane = laneIdx
+    hit:SetScript("OnClick", function() slotClicked(slotIdx, laneIdx) end)
+    hit:SetScript("OnEnter", function(self) slotTip(self, slotIdx) end)
+    hit:SetScript("OnLeave", tipHide)
+    box.hit = hit
+  end
+  return box
+end
+
+local function mkMark(L)
+  local f = CreateFrame("Frame", nil, L.frame)
+  f:SetSize(MARK_W, MARK_H)
+  f:SetFrameLevel(L.frame:GetFrameLevel() + 3)
+  local m = { frame = f }
+  m.txt = mkFS(f, "GameFontNormalSmall", nil)
+  m.txt:SetPoint("TOP", 0, 0)
+  m.bar = mkBar(f, MARK_W - 6, 3)
+  m.bar.bg:SetPoint("BOTTOMLEFT", 3, 2)
+  return m
+end
+
+local function mkLane(i)
+  local f = CreateFrame("Frame", nil, win)
+  f:SetSize(LANE_W, LANE_H)
+  f:SetPoint("TOPLEFT", BF_X, -(BF_Y + (i - 1) * (LANE_H + LANE_GAP)))
+  local L = { frame = f, marks = {}, boxes = {} }
+  local bg = mkTex(f, "BACKGROUND", CLR.laneBG)
+  bg:SetAllPoints()
+  -- the explicit midline: the shared axis's centre, identical from both seats
+  local mid = mkTex(f, "ARTWORK", CLR.midline)
+  mid:SetSize(2, LANE_H - 16)
+  mid:SetPoint("TOPLEFT", floor(LANE_W / 2) - 1, -14)
+  L.head = mkFS(f, "GameFontNormalSmall", CLR.mine)
+  L.head:SetPoint("TOPLEFT", 4, -1)
+  L.headFoe = mkFS(f, "GameFontNormalSmall", CLR.foe)
+  L.headFoe:SetPoint("TOPRIGHT", -4, -1)
+  L.ghost = mkFS(f, "GameFontNormalSmall", CLR.amber)
+  L.ghost:SetPoint("TOP", 0, -1)
+  -- slot squares: geometry from the hashed constants, enemy mirrored
+  local C = Rules.C
+  local backF = C.POS_BACK_SLOT / C.LANE_LEN
+  local frontF = C.POS_FRONT_SLOT / C.LANE_LEN
+  local fsIdx = (i - 1) * 2 + 1     -- interpretation 1: this lane's front slot
+  L.boxes[1] = mkSlotBox(L, i, fsIdx + 1, backF, true)
+  L.boxes[2] = mkSlotBox(L, i, fsIdx, frontF, true)
+  L.boxes[3] = mkSlotBox(L, i, fsIdx, 1 - frontF, false)
+  L.boxes[4] = mkSlotBox(L, i, fsIdx + 1, 1 - backF, false)
+  -- the lane-wide click target, UNDER the slot hits, over everything else
+  local hit = CreateFrame("Button", nil, f)
+  hit:SetPoint("TOPLEFT", 0, -14)
+  hit:SetPoint("BOTTOMRIGHT", 0, 0)
+  hit:SetFrameLevel(f:GetFrameLevel() + 4)
+  hit.__ibLane = i                  -- read by the headless m5 drive
+  hit.__ibGhost = L.ghost
+  hit:SetScript("OnClick", function() laneClicked(i) end)
+  L.hit = hit
+  return L
+end
+
 local function ensureWindow()
   if win then return end
-  win = PG.UI.Window("ib", "Idle Battle (DEV)", 360, 250, "neutral")
+  win = PG.UI.Window("ib", "Idle Battle (DEV)", BW, BH, "neutral")
   -- resume after a raid-safety hide only while the session still matters
   win.__pgResume = function() return live() end
 
-  ui.stub = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.stub:SetPoint("TOP", 0, -36)
-  ui.stub:SetText("M5 part 1 STUB - the real board arrives in part 2")
-  ui.stub:SetTextColor(0.8, 0.68, 0.42)
-
-  ui.status = win:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  ui.status:SetPoint("TOPLEFT", 16, -56)
-  ui.status:SetPoint("TOPRIGHT", -16, -56)
+  ui.status = mkFS(win, "GameFontNormal", CLR.gold)
+  ui.status:SetPoint("TOPLEFT", 16, -30)
   ui.status:SetJustifyH("LEFT")
-  ui.status:SetWordWrap(true)
 
-  ui.clock = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.clock:SetPoint("TOPLEFT", 16, -92)
-  ui.clock:SetJustifyH("LEFT")
+  ui.clock = mkFS(win, "GameFontNormal", nil)
+  ui.clock:SetPoint("TOPRIGHT", -30, -30)
+  ui.clock:SetJustifyH("RIGHT")
 
-  ui.me = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.me:SetPoint("TOPLEFT", 16, -110)
-  ui.me:SetJustifyH("LEFT")
+  -- the permanent no-fog label (fog/ mounts at a later milestone)
+  ui.fog = mkFS(win, "GameFontNormalSmall", CLR.grey)
+  ui.fog:SetPoint("TOPLEFT", 16, -46)
+  ui.fog:SetText("Full information: both players see the whole board. Fog of war is a later milestone.")
 
-  ui.foe = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.foe:SetPoint("TOPLEFT", 16, -128)
-  ui.foe:SetJustifyH("LEFT")
+  ui.keepMine = mkKeep(false)
+  ui.keepFoe = mkKeep(true)
+  ui.lane = {}
+  for i = 1, Rules.C.LANES do ui.lane[i] = mkLane(i) end
 
-  ui.net = win:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  ui.net:SetPoint("TOPLEFT", 16, -146)
+  -- big centre text for join / handshake / verdict, over the battlefield
+  ui.overlay = mkFS(win, "GameFontNormalLarge", nil)
+  ui.overlay:SetPoint("TOP", 0, -(BF_Y + 110))
+  ui.overlay:SetWidth(LANE_W - 80)
+  ui.overlay:SetJustifyH("CENTER")
+  ui.overlay:SetWordWrap(true)
+
+  local ecoY = BF_Y + BF_H + 8
+  ui.eco = mkFS(win, "GameFontNormalSmall", CLR.mine)
+  ui.eco:SetPoint("TOPLEFT", 16, -ecoY)
+  ui.eco:SetJustifyH("LEFT")
+  ui.ecoFoe = mkFS(win, "GameFontNormalSmall", CLR.foe)
+  ui.ecoFoe:SetPoint("TOPRIGHT", -16, -ecoY)
+  ui.ecoFoe:SetJustifyH("RIGHT")
+  ui.score = mkFS(win, "GameFontNormalSmall", CLR.gold)
+  ui.score:SetPoint("TOP", 0, -(ecoY + 16))
+
+  -- MUSTER row: one button per Rules.UNITS entry, count stepper capped by
+  -- the hashed MAX_UNITS_PER_ORDER. Kind letters ride the buttons from the
+  -- catalogue (the stub's palisadeLetter idiom, generalised).
+  local rowY = ecoY + 34
+  ui.musterLabel = mkFS(win, "GameFontNormalSmall", CLR.grey)
+  ui.musterLabel:SetPoint("TOPLEFT", 16, -rowY)
+  ui.musterLabel:SetText("MUSTER - pick a unit and a count, then click a lane")
+  ui.armedText = mkFS(win, "GameFontNormalSmall", CLR.amber)
+  ui.armedText:SetPoint("TOPRIGHT", -86, -rowY)
+  ui.armedText:SetJustifyH("RIGHT")
+  ui.clearBtn = PG.UI.Button(win, "Clear", 60, 20, function()
+    armed = nil
+    RefreshUI()
+  end)
+  ui.clearBtn:SetPoint("TOPRIGHT", -16, -(rowY - 2))
+  ui.clearBtn.__ibClear = true
+
+  local by = rowY + 16
+  ui.unitBtns = {}
+  local x = 16
+  for i = 1, #Rules.UNITS do
+    local u = Rules.UNITS[i]
+    local idx = i
+    local b = PG.UI.Button(win, titleCase(u.key) .. "  " .. u.cost, 118, 24, function()
+      armed = { unit = idx }
+      fx("Sound", "click")
+      RefreshUI()
+    end)
+    b:SetPoint("TOPLEFT", x, -by)
+    b.__ibKind = u.kind               -- read by the headless m5 drive
+    b:SetScript("OnEnter", function(self) unitTip(self, idx) end)
+    b:SetScript("OnLeave", tipHide)
+    ui.unitBtns[i] = b
+    x = x + 124
+  end
+  ui.cntMinus = PG.UI.Button(win, "-", 24, 24, function()
+    if deployCount > 1 then deployCount = deployCount - 1 end
+    RefreshUI()
+  end)
+  ui.cntMinus:SetPoint("TOPLEFT", x + 8, -by)
+  ui.cntMinus.__ibCountBtn = -1
+  ui.cntText = mkFS(win, "GameFontNormal", nil)
+  ui.cntText:SetPoint("TOPLEFT", x + 40, -(by + 5))
+  ui.cntPlus = PG.UI.Button(win, "+", 24, 24, function()
+    if deployCount < Rules.C.MAX_UNITS_PER_ORDER then deployCount = deployCount + 1 end
+    RefreshUI()
+  end)
+  ui.cntPlus:SetPoint("TOPLEFT", x + 68, -by)
+  ui.cntPlus.__ibCountBtn = 1
+
+  -- BUILD row: exactly D.1's first playable subset, DISCOVERED from the
+  -- hashed catalogue's own firstPlayable flag -- never a hand-kept list.
+  local by2 = by + 46
+  ui.buildLabel = mkFS(win, "GameFontNormalSmall", CLR.grey)
+  ui.buildLabel:SetPoint("TOPLEFT", 16, -(by2 - 14))
+  ui.buildLabel:SetText("BUILD - pick a building, then click one of your squares (F front, B back)")
+  ui.bldBtns = {}
+  x = 16
+  for bi = 1, #Rules.BUILDINGS do
+    local br = Rules.BUILDINGS[bi]
+    if br.firstPlayable == 1 then
+      local idx = bi
+      local b = PG.UI.Button(win, titleCase(br.key) .. "  " .. br.cost, 150, 24, function()
+        armed = { bld = idx }
+        fx("Sound", "click")
+        RefreshUI()
+      end)
+      b:SetPoint("TOPLEFT", x, -by2)
+      b.__ibKind = br.letter            -- read by the headless m5 drive
+      b.__ibBld = bi
+      b:SetScript("OnEnter", function(self) bldTip(self, idx) end)
+      b:SetScript("OnLeave", tipHide)
+      ui.bldBtns[#ui.bldBtns + 1] = b
+      x = x + 156
+    end
+  end
+
+  -- the part-1 net diagnostic line, kept, unobtrusive
+  ui.net = mkFS(win, "GameFontNormalSmall", CLR.grey)
+  ui.net:SetPoint("BOTTOMLEFT", 16, 12)
   ui.net:SetJustifyH("LEFT")
-  ui.net:SetTextColor(0.66, 0.66, 0.61)
 
-  ui.deploy = PG.UI.Button(win, "Deploy Spear (lane 1)", 156, 24, function()
-    issueOrder("S", 1, 1)
-  end)
-  ui.deploy:SetPoint("BOTTOMLEFT", 16, 46)
-
-  ui.build = PG.UI.Button(win, "Build Palisade (slot 1)", 156, 24, function()
-    local letter = palisadeLetter()
-    if letter then issueOrder(letter, 1, 1) end
-  end)
-  ui.build:SetPoint("BOTTOMRIGHT", -16, 46)
-
-  ui.cancel = PG.UI.Button(win, "Cancel / concede", 156, 24, function()
+  ui.cancel = PG.UI.Button(win, "Cancel / concede", 150, 24, function()
     local S = mySession()
     if not S or S.phase == "done" then
       if win then win:Hide() end
@@ -1174,13 +1707,383 @@ local function ensureWindow()
       if S.isHost then PG.Comm.Broadcast(S.scope, "IB", "CANCEL", S.token, "host") end
       endSession("Cancelled.")
     else
-      voidMatch("Voided - you conceded. (No winner in M5; scoring lands with the real board.)", true)
+      voidMatch("Voided - you conceded. (A concede is a VOID in M5: no winner is"
+        .. " recorded until a surrender row exists on the wire.)", true)
     end
   end)
-  ui.cancel:SetPoint("BOTTOM", 0, 14)
+  ui.cancel:SetPoint("BOTTOMRIGHT", -16, 10)
+  ui.cancel.__ibCancel = true
+end
+
+-------------------------------------------------------------------------------
+-- Repaints, all READ-ONLY over S.ep.sim. Driven by onTick (0.5 s, the resolve
+-- cadence the visual doc leans on) and by the click paths.
+-------------------------------------------------------------------------------
+
+local function paintBoxContent(box, sd, S)
+  local b = sd.slots[box.slot]
+  local pendL = box.mine and pendingSlotLetter(S, box.slot) or nil
+  local f = box.frame
+  if b then
+    local br = Rules.BUILDINGS[b.b]
+    box.letter:SetText(br.letter)
+    if b.done == 0 then
+      f:SetAlpha(0.75)
+      box.sub:SetText(floor(b.prog * 100 / b.need) .. "%")
+    elseif b.spent == 1 then
+      f:SetAlpha(0.8)
+      box.sub:SetText("spent")
+    else
+      f:SetAlpha(1)
+      box.sub:SetText("")
+    end
+    box.bar.bg:Show()
+    barSet(box.bar, b.hp, b.maxHp, box.mine and CLR.mine or CLR.foe)
+  elseif pendL then
+    f:SetAlpha(0.9)
+    box.letter:SetText(pendL)
+    box.sub:SetText("queued")
+    box.bar.bg:Hide()
+    box.bar.fill:Hide()
+  else
+    f:SetAlpha(0.8)
+    box.letter:SetText("")
+    box.sub:SetText("")
+    box.bar.bg:Hide()
+    box.bar.fill:Hide()
+  end
+  -- armed-build affordance: my empty squares light, the matching class
+  -- (hashed slotClass against interpretation 1's odd-front numbering)
+  -- brighter. Affordance only: every square stays clickable and the sims
+  -- alone judge legality at the exec tick (A.4).
+  local hi = 0
+  if box.mine and not b and not pendL and armed and armed.bld and S.phase == "play" then
+    local wantFront = Rules.BUILDINGS[armed.bld].slotClass == "front"
+    hi = (wantFront == ((box.slot % 2) == 1)) and 0.30 or 0.10
+  end
+  box.hi:SetAlpha(hi)
+end
+
+local function paintLane(i, S, sim, mySide)
+  local L = ui.lane[i]
+  local C = Rules.C
+  local m = sim.sides[mySide]
+  local e = sim.sides[3 - mySide]
+  L.head:SetText("Lane " .. i .. "   supply " .. m.lanes[i].supply .. "/" .. C.LANE_SUPPLY_CAP)
+  L.headFoe:SetText(e.lanes[i].supply .. "/" .. C.LANE_SUPPLY_CAP .. " supply")
+  L.ghost:SetText(pendingLaneText(S, sim, i))
+  paintBoxContent(L.boxes[1], m, S)
+  paintBoxContent(L.boxes[2], m, S)
+  paintBoxContent(L.boxes[3], e, S)
+  paintBoxContent(L.boxes[4], e, S)
+  -- unit stacks: grouped by (type, 1/16th of the axis), a marker per stack --
+  -- one marker per STACK, never per unit (the visual doc's own rule)
+  local used = 0
+  for pass = 1, 2 do
+    local mineFlag = (pass == 1)
+    local sd = mineFlag and m or e
+    local us = sd.lanes[i].units
+    local order, agg = {}, {}
+    for k = 1, #us do
+      local u = us[k]
+      local bucket = floor(u.pos * BUCKETS / C.LANE_LEN)
+      if bucket >= BUCKETS then bucket = BUCKETS - 1 end
+      local key = u.t * BUCKETS + bucket
+      local a = agg[key]
+      if not a then
+        a = { t = u.t, n = 0, hp = 0, maxHp = 0, pos = 0 }
+        agg[key] = a
+        order[#order + 1] = key
+      end
+      a.n = a.n + 1
+      a.hp = a.hp + u.hp
+      a.maxHp = a.maxHp + u.maxHp
+      a.pos = a.pos + u.pos
+    end
+    for k = 1, #order do
+      local a = agg[order[k]]
+      used = used + 1
+      local mk = L.marks[used]
+      if not mk then
+        mk = mkMark(L)
+        L.marks[used] = mk
+      end
+      -- the one mirroring rule: mine at pos/LANE_LEN, the enemy at 1 - that
+      local frac = a.pos / (a.n * C.LANE_LEN)
+      if not mineFlag then frac = 1 - frac end
+      mk.frame:ClearAllPoints()
+      mk.frame:SetPoint("TOPLEFT", floor(frac * (LANE_W - MARK_W)),
+        mineFlag and MARK_Y_MINE or MARK_Y_FOE)
+      mk.frame.__ibMark = mineFlag and "mine" or "foe"   -- headless m5 drive
+      mk.frame.__ibFrac = frac
+      local ub = Rules.UNITS[a.t]
+      mk.txt:SetText(ub.kind .. ((a.n > 1) and ("x" .. a.n) or ""))
+      local uc = CLR.unit[a.t] or CLR.grey
+      mk.txt:SetTextColor(uc[1], uc[2], uc[3])
+      barSet(mk.bar, a.hp, a.maxHp, mineFlag and CLR.mine or CLR.foe)
+      mk.frame:Show()
+    end
+  end
+  for k = used + 1, #L.marks do L.marks[k].frame:Hide() end
+end
+
+local function paintEmptyLane(i)
+  local L = ui.lane[i]
+  L.head:SetText("Lane " .. i)
+  L.headFoe:SetText("")
+  L.ghost:SetText("")
+  for k = 1, 4 do
+    local box = L.boxes[k]
+    box.letter:SetText("")
+    box.sub:SetText("")
+    box.bar.bg:Hide()
+    box.bar.fill:Hide()
+    box.hi:SetAlpha(0)
+    box.frame:SetAlpha(0.5)
+  end
+  for k = 1, #L.marks do L.marks[k].frame:Hide() end
+end
+
+local function paintHeader(S, sim)
+  if not S then
+    ui.status:SetText("No battle. /pgd ib to open one.")
+    ui.clock:SetText("")
+    return
+  end
+  local who = S.opp and shortOf(S.opp) or "?"
+  if S.phase == "join" then
+    ui.status:SetText("Recruiting - party scope")
+  elseif S.phase == "handshake" then
+    ui.status:SetText("Handshaking with " .. who)
+  elseif S.phase == "play" then
+    ui.status:SetText("BATTLE vs " .. who .. "  -  you are the LEFT army"
+      .. (S.isHost and "  (host)" or ""))
+  else
+    ui.status:SetText("Battle over")
+  end
+  if sim then
+    ui.clock:SetText(fmtClock(sim.clock) .. " / " .. fmtClock(S.matchTicks)
+      .. "   tick " .. sim.clock .. " / " .. S.matchTicks)
+  else
+    ui.clock:SetText("")
+  end
+end
+
+local function paintKeeps(S, sim, mySide)
+  ui.keepMine.name:SetText(S and shortOf(myName() or "You") or "")
+  ui.keepFoe.name:SetText((S and S.opp) and shortOf(S.opp) or "")
+  if not sim then
+    ui.keepMine.hp:SetText("")
+    ui.keepFoe.hp:SetText("")
+    ui.keepMine.max:SetText("")
+    ui.keepFoe.max:SetText("")
+    ui.keepMine.fill:Hide()
+    ui.keepFoe.fill:Hide()
+    return
+  end
+  ui.keepMine.max:SetText("/ " .. Rules.C.KEEP_HP)
+  ui.keepFoe.max:SetText("/ " .. Rules.C.KEEP_HP)
+  keepSet(ui.keepMine, sim.sides[mySide].keepHp)
+  keepSet(ui.keepFoe, sim.sides[3 - mySide].keepHp)
+end
+
+local function paintEco(S, sim, mySide)
+  if not sim then
+    ui.eco:SetText("")
+    ui.ecoFoe:SetText("")
+    ui.score:SetText("")
+    return
+  end
+  local C = Rules.C
+  local m = sim.sides[mySide]
+  local e = sim.sides[3 - mySide]
+  local secs = fmtSecs1(C.LEVY_EVERY)
+  ui.eco:SetText("You   Levy " .. m.bank .. " / " .. bankCapOfSide(m)
+    .. "    +" .. incomeOf(m) .. " every " .. secs .. " s")
+  ui.ecoFoe:SetText("Foe   Levy " .. e.bank .. " / " .. bankCapOfSide(e)
+    .. "    +" .. incomeOf(e) .. " every " .. secs .. " s")
+  -- the live tiebreak score, from the 20% mark (Q10's SCORE_SHOW_TICK)
+  if sim.clock >= C.SCORE_SHOW_TICK or sim.over then
+    ui.score:SetText("Score (you : foe)   keep damage " .. m.keepDamageDealt
+      .. " : " .. e.keepDamageDealt
+      .. "  -  slots razed " .. m.slotsDestroyed .. " : " .. e.slotsDestroyed
+      .. "  -  deepest hold " .. depthSumOf(m) .. " : " .. depthSumOf(e))
+  else
+    ui.score:SetText("")
+  end
+end
+
+local function paintCommands(S, sim, mySide)
+  local playing = (S ~= nil) and S.phase == "play" and (sim ~= nil)
+  local bank = playing and sim.sides[mySide].bank or 0
+  for i = 1, #ui.unitBtns do
+    local b = ui.unitBtns[i]
+    b:SetEnabled(playing)
+    -- affordability greying only: an unaffordable order still sends, and the
+    -- sims judge it at the exec tick (the bank may have risen by then)
+    b:SetAlpha((playing and bank < Rules.UNITS[i].cost) and 0.5 or 1)
+  end
+  for k = 1, #ui.bldBtns do
+    local b = ui.bldBtns[k]
+    b:SetEnabled(playing)
+    b:SetAlpha((playing and bank < Rules.BUILDINGS[b.__ibBld].cost) and 0.5 or 1)
+  end
+  ui.cntText:SetText("x" .. deployCount)
+  ui.cntMinus:SetEnabled(playing and deployCount > 1)
+  ui.cntPlus:SetEnabled(playing and deployCount < Rules.C.MAX_UNITS_PER_ORDER)
+  ui.clearBtn:SetEnabled(playing and armed ~= nil)
+  if not playing then
+    ui.armedText:SetText("")
+  elseif armed and armed.unit then
+    local u = Rules.UNITS[armed.unit]
+    ui.armedText:SetText("Armed: " .. deployCount .. "x " .. titleCase(u.key)
+      .. " (" .. (u.cost * deployCount) .. ") - click a lane")
+  elseif armed and armed.bld then
+    local br = Rules.BUILDINGS[armed.bld]
+    ui.armedText:SetText("Armed: " .. titleCase(br.key) .. " (" .. br.cost
+      .. ") - click one of your " .. ((br.slotClass == "front") and "F" or "B") .. " squares")
+  else
+    ui.armedText:SetText("Pick a unit or a building, then click the board")
+  end
+  -- the cancel button's label tracks the phase; the SEMANTICS are part 1's,
+  -- unchanged (join/handshake cancel, play concede-void, done close)
+  if not S or S.phase == "done" then
+    ui.cancel:SetText("Close")
+  elseif S.phase == "play" then
+    ui.cancel:SetText("Concede (void)")
+  else
+    ui.cancel:SetText("Cancel battle")
+  end
+end
+
+local function paintNet(S, sim, mySide)
+  if not (S and S.ep) then
+    ui.net:SetText("")
+    return
+  end
+  local st = S.ep.st
+  local orders = ""
+  if sim then
+    local sd = sim.sides[mySide]
+    orders = "   orders ok " .. sd.cmdsExecuted .. " fizzled " .. sd.cmdsFizzled
+  end
+  ui.net:SetText("net sent " .. st.sent .. " recv " .. st.recv
+    .. "  late " .. st.late .. " rollbacks " .. st.rollbacks .. orders)
+end
+
+local function paintOverlay(S)
+  if not S then
+    ui.overlay:SetText("No battle.\n/pgd ib opens the start dialog.")
+    ui.overlay:Show()
+    return
+  end
+  if S.phase == "join" then
+    ui.overlay:SetText("Waiting for an opponent... "
+      .. math.max(0, floor(S.joinDeadline - GetTime())) .. " s\n"
+      .. "Any party member on the DEV addon can join - the first to accept plays.")
+    ui.overlay:Show()
+  elseif S.phase == "handshake" then
+    ui.overlay:SetText("Handshaking with " .. shortOf(S.opp or "?") .. "...")
+    ui.overlay:Show()
+  elseif S.phase == "done" then
+    ui.overlay:SetText(tostring(S.endText or "Done."))
+    ui.overlay:Show()
+  else
+    ui.overlay:Hide()
+  end
+end
+
+-------------------------------------------------------------------------------
+-- The result moment: the shared reveal stage (REVEAL.md) on a REAL verdict
+-- (sim.over), queued so it must eventually show; a void ending gets a plain
+-- stamp and no fanfare. Both are decoration behind fx-style pcall guards --
+-- the authoritative outcome already landed in finishMatch's toast and the
+-- window text (SKIN.md 6.7).
+-------------------------------------------------------------------------------
+
+-- Presentation prose for the hashed Q10 tier identifiers (Rules.TIERS): the
+-- one display map keyed by ruleset values, because the ruleset stores
+-- identifiers, not sentences.
+local TIER_WORD = {
+  keepHpRemoved = "keep damage dealt",
+  slotsDestroyed = "buildings razed",
+  penetration = "deepest push held",
+  ownKeepHp = "keep left standing",
+  draw = "dead even",
+}
+
+local function statRow(name, e, role, personal, place)
+  return {
+    text = name .. "  -  keep dmg " .. e.keepDamageDealt
+      .. "  slots " .. e.slotsDestroyed .. "  depth " .. e.penetration
+      .. "  kills " .. e.unitsKilled,
+    role = role, personal = personal, place = place,
+  }
+end
+
+local function maybeResult(S)
+  local sim = S and S.ep and S.ep.sim
+  if not (S and S.phase == "done" and sim and sim.over) then return end
+  if S.uiResultShown then return end
+  S.uiResultShown = true
+  if not (PG.Theme and PG.Theme.RevealQueue) then return end
+  local mySide = mySideOf(S)
+  local r = sim:result()
+  local me, foe = r.sides[mySide], r.sides[3 - mySide]
+  local myN = shortOf(myName() or "You")
+  local foeN = shortOf(S.opp or "Opponent")
+  local won = (r.winner == mySide)
+  local drew = (r.winner == 0)
+  local subtitle
+  if r.reason == "keep" then
+    subtitle = drew and "Both keeps fell on the same tick"
+      or (won and ("You razed " .. foeN .. "'s keep") or (foeN .. " razed your keep"))
+  else
+    local tierKey = Rules.TIERS[r.tier]
+    subtitle = "The clock ran out - decided by " .. (TIER_WORD[tierKey or ""] or tostring(tierKey))
+  end
+  local rec = S
+  local ok, err = pcall(PG.Theme.RevealQueue, {
+    theme = "faire",
+    variant = drew and "cascade" or "podium",
+    anchor = { mode = "window", host = win },
+    title = drew and "DRAW" or (won and "VICTORY" or "DEFEAT"),
+    subtitle = subtitle,
+    rows = {
+      statRow(myN, me, drew and "body" or (won and "gold" or "loss"), true,
+        (not drew) and (won and 1 or 2) or nil),
+      statRow(foeN, foe, drew and "body" or (won and "loss" or "gold"), false,
+        (not drew) and (won and 2 or 1) or nil),
+      { text = fmtClock(r.tick) .. " of battle  -  "
+          .. (me.unitsDeployed + foe.unitsDeployed) .. " units raised  -  "
+          .. (me.cmdsExecuted + foe.cmdsExecuted) .. " orders", role = "fade" },
+    },
+    marquee = drew and "AN HONOURABLE DRAW"
+      or ((won and myN or foeN):upper() .. " TAKES THE FIELD"),
+    burst = won and "stars" or nil,
+    burstCount = 12,
+    sound = won and "cheer" or "page",
+    -- ownership (CONCURRENCY.md 5.8 rule 2): culled if this record is gone
+    validate = function() return sessions[rec.key] == rec end,
+    priority = 1,   -- a 1v1 combatant is always seated in their own match
+  })
+  if not ok then geterrorhandler()(err) end
+end
+
+local function maybeVoidStamp(S)
+  local sim = S and S.ep and S.ep.sim
+  if not (S and S.phase == "done") then return end
+  if sim and sim.over then return end
+  if S.uiVoidShown then return end
+  S.uiVoidShown = true
+  fx("Stamp", win, "NO RESULT")
 end
 
 ShowWindow = function()
+  if not engineOK() then
+    toast("engine not loaded - check the .toc / syncaddon.sh.")
+    return
+  end
   ensureWindow()
   win:Show()
   RefreshUI()
@@ -1189,46 +2092,27 @@ end
 RefreshUI = function()
   if not win then return end
   local S = mySession()
-  if not S then
-    ui.status:SetText("No battle. /pgd ib to open one.")
-    ui.clock:SetText("")
-    ui.me:SetText("")
-    ui.foe:SetText("")
-    ui.net:SetText("")
-    return
+  local sim = S and S.ep and S.ep.sim or nil
+  local mySide = S and mySideOf(S) or 1
+  if not (S and S.phase == "play") then armed = nil end
+  if S and S.phase == "play" and not S.uiBegun then
+    S.uiBegun = true
+    fx("Sound", "stamp")
   end
-  if S.phase == "join" then
-    ui.status:SetText("Waiting for an opponent... ("
-      .. math.max(0, math.floor(S.joinDeadline - GetTime())) .. "s)")
-  elseif S.phase == "handshake" then
-    ui.status:SetText("Handshaking with " .. shortOf(S.opp or "?") .. "...")
-  elseif S.phase == "play" then
-    ui.status:SetText("BATTLE vs " .. shortOf(S.opp or "?")
-      .. (S.isHost and "  (host, side 1)" or "  (side 2)"))
-  else
-    ui.status:SetText(tostring(S.endText or "Done."))
-  end
-  local sim = S.ep and S.ep.sim
+  if S and sim then prunePending(S, sim) end
+  paintHeader(S, sim)
+  paintOverlay(S)
+  paintKeeps(S, sim, mySide)
   if sim then
-    local mySide = S.mySide or (S.isHost and 1 or 2)
-    local m = sim.sides[mySide]
-    local f = sim.sides[3 - mySide]
-    ui.clock:SetText("tick " .. sim.clock .. " / " .. S.matchTicks
-      .. "   clock " .. fmtClock(sim.clock))
-    ui.me:SetText("You:  Levy " .. m.bank .. "   Keep " .. m.keepHp .. " / " .. Rules.C.KEEP_HP)
-    ui.foe:SetText("Foe:  Levy " .. f.bank .. "   Keep " .. f.keepHp .. " / " .. Rules.C.KEEP_HP)
-    local st = S.ep.st
-    ui.net:SetText("net: sent " .. st.sent .. "  recv " .. st.recv
-      .. "  late " .. st.late .. "  rollbacks " .. st.rollbacks)
+    for i = 1, Rules.C.LANES do paintLane(i, S, sim, mySide) end
   else
-    ui.clock:SetText("")
-    ui.me:SetText("")
-    ui.foe:SetText("")
-    ui.net:SetText("")
+    for i = 1, Rules.C.LANES do paintEmptyLane(i) end
   end
-  local playing = S.phase == "play"
-  ui.deploy:SetEnabled(playing)
-  ui.build:SetEnabled(playing)
+  paintEco(S, sim, mySide)
+  paintCommands(S, sim, mySide)
+  paintNet(S, sim, mySide)
+  maybeVoidStamp(S)
+  maybeResult(S)
 end
 
 -------------------------------------------------------------------------------
