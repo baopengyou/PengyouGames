@@ -202,6 +202,15 @@ local MARKET_ICON = { T = "keystone", X = "skull", A = "tarotW", M = "keystone",
                       F = "tarotD", L = "tarotK", W = "tarotK",
                       O = "tarotK", P = "tarotW", D = "skull" }
 
+-- Where a roster came from, in words. Declared up here with the other constant
+-- tables because BOTH the card page and /pg keys read it, and the card page is
+-- built long before the diagnostic is defined.
+local SRC_WORD = {
+  shipped = "shipped with the addon", saved = "remembered",
+  journal = "Encounter Journal", map = "Encounter Journal (this map)",
+  learned = "learned from a run",
+}
+
 local WIDE_SCOPE_REASON =
   "The Mythic Parley pays out from one client's read of one key. Your guild can "
   .. "check who ran it; a stranger on the realm channel cannot."
@@ -363,11 +372,19 @@ end
 --   5. nil, and the per-boss lines are simply not offered, with a reason on the
 --      card page saying why and what fixes it
 --
--- Whatever the source, a roster is a list of { id = dungeonEncounterID, name =
--- string }. THE ID IS THE IDENTITY and the only thing settlement ever compares.
--- The list ORDER is presentation only: the journal's canonical order when the
--- journal answered, and encounter-id order when it did not - never the order a
--- route happened to kill them in, which is not a property of the dungeon at all.
+-- Whatever the source, a roster is an ordered list of boss NAMES, and a boss's
+-- IDENTITY IS ITS POSITION IN THAT LIST. Not its dungeonEncounterID, which
+-- 1.5.1 stopped using: those numbers live in DungeonEncounter.db2, no guide
+-- publishes them, and a wrong one does not fail loudly - it attributes nothing
+-- to that boss and every line about it voids with "that boss was never fought",
+-- which is a lie told to a bettor about their own run. Names are the one thing
+-- both the shipped table and the client agree on (ENCOUNTER_END reports one).
+--
+-- POSITION IS NOT ORDER-OF-KILL, and the distinction is the whole point. The
+-- roster is a fixed identity list for the DUNGEON, published once by the bookie
+-- in its ROSTER message, so "boss 2" means the same named boss on every client
+-- no matter what order the route took them in. A route that opens on the last
+-- boss and wipes still walls on THAT boss.
 -------------------------------------------------------------------------------
 
 local rosterMemo = {}   -- [mapId] = list | false (tried and failed this session)
@@ -443,16 +460,18 @@ local function sanitizeName(v)
   return s
 end
 
+-- Accepts a plain array of names or an array of { name = }, and returns a plain
+-- array of names. Duplicates are dropped: two identically named bosses could
+-- not be told apart at settlement anyway.
 local function normalizeRoster(list)
   if type(list) ~= "table" or #list < 2 then return nil end
   local out, seen = {}, {}
   for i = 1, #list do
     local e = list[i]
-    local id = (type(e) == "table") and PG.SafeNum(e.id) or nil
-    local nm = (type(e) == "table") and sanitizeName(e.name) or nil
-    if id and nm and id > 0 and id == math.floor(id) and id <= 99999 and not seen[id] then
-      seen[id] = true
-      out[#out + 1] = { id = math.floor(id), name = nm }
+    local nm = sanitizeName((type(e) == "table") and e.name or e)
+    if nm and not seen[nm] then
+      seen[nm] = true
+      out[#out + 1] = nm
       if #out >= K.MAX_BOSSES then break end
     end
   end
@@ -460,6 +479,14 @@ local function normalizeRoster(list)
   -- to have two sides, or is about a boss among others.
   if #out < 2 then return nil end
   return out
+end
+
+-- Case- and punctuation-insensitive key, for every name comparison this file
+-- makes: dungeon against the shipped table, and ENCOUNTER_END's boss against
+-- the roster. Applied to both sides, so it never makes two different names
+-- compare equal.
+local function nameKey(v)
+  return (tostring(v or ""):lower():gsub("[^%w]", ""))
 end
 
 -- THE ENCOUNTER JOURNAL IS LOAD-ON-DEMAND, and this is the line that was
@@ -501,14 +528,22 @@ local function encountersOf(instanceID)
   if type(EJ_GetEncounterInfoByIndex) ~= "function" then return nil end
   local list = {}
   for i = 1, 20 do
-    -- name, description, journalEncounterID, rootSectionID, link,
-    -- journalInstanceID, dungeonEncounterID, instanceID
-    local ok, name, _, _, _, _, _, dungeonEncounterID =
-      pcall(EJ_GetEncounterInfoByIndex, i, instanceID)
+    local ok, name = pcall(EJ_GetEncounterInfoByIndex, i, instanceID)
     if not ok or not name then break end
-    list[#list + 1] = { id = PG.SafeNum(dungeonEncounterID), name = name }
+    list[#list + 1] = name
   end
   return normalizeRoster(list)
+end
+
+-- Step 1 of the chain, and the one that works on a client whose Encounter
+-- Journal never answers: the roster shipped in Data/DungeonData.lua, matched on
+-- the DUNGEON's name. English only, by construction - a non-English client
+-- misses here and falls through to the journal or to a run, both of which are
+-- already localised.
+local function shippedRoster(mapId)
+  local want = mapName(mapId)
+  if not (want and PG.DungeonsByKey) then return nil end
+  return normalizeRoster(PG.DungeonsByKey[nameKey(want)])
 end
 
 -- Step 3. Walks the journal's tiers for a dungeon whose name matches the
@@ -589,6 +624,12 @@ local function rosterOf(mapId)
   id = math.floor(id)
   local memo = rosterMemo[id]
   if memo ~= nil then return memo or nil end
+  local shipped = shippedRoster(id)
+  if shipped then
+    rosterMemo[id] = shipped
+    rosterSrc[id] = "shipped"
+    return shipped
+  end
   local db = mpdb()
   local norm = normalizeRoster(db and db.bosses[id])
   if norm then
@@ -653,23 +694,24 @@ local function flushLearned(mapId)
   id = math.floor(id)
   local seen = learning[id]
   if not seen then return end
-  if rosterSrc[id] == "journal" or rosterSrc[id] == "map" then return end
-  local byId = {}
-  local existing = rosterMemo[id]
-  if type(existing) ~= "table" then
-    local db = mpdb()
-    existing = db and db.bosses[id]
-  end
-  if type(existing) == "table" then
-    for i = 1, #existing do
-      local e = existing[i]
-      if type(e) == "table" and e.id then byId[e.id] = e.name end
-    end
-  end
+  if rosterSrc[id] == "journal" or rosterSrc[id] == "map"
+    or rosterSrc[id] == "shipped" then return end
+  -- `learning` is keyed by encounterID purely to give the accumulated names a
+  -- STABLE order across sessions; the id is not carried into the roster and is
+  -- never compared to anything. Merged with what a previous run left behind, so
+  -- a key abandoned after one boss still contributes.
+  local db = mpdb()
+  local byId = (db and type(db.seen) == "table" and db.seen[id]) or {}
   for eid, nm in pairs(seen) do byId[eid] = nm end
+  if db then
+    if type(db.seen) ~= "table" then db.seen = {} end
+    db.seen[id] = byId
+  end
+  local order = {}
+  for eid in pairs(byId) do order[#order + 1] = eid end
+  table.sort(order)
   local list = {}
-  for eid, nm in pairs(byId) do list[#list + 1] = { id = eid, name = nm } end
-  table.sort(list, function(a, b) return a.id < b.id end)
+  for i = 1, #order do list[#list + 1] = byId[order[i]] end
   local norm = normalizeRoster(list)
   if not norm then return end
   rosterMemo[id] = norm
@@ -678,12 +720,21 @@ local function flushLearned(mapId)
   if db then db.bosses[id] = norm end
 end
 
-local function bossName(rec, encounterID)
+-- rec.roster is an array of names, so a boss reference is just an index into it
+local function bossName(rec, idx)
   local list = rec and rec.roster
-  if list then
-    for i = 1, #list do
-      if list[i].id == encounterID then return list[i].name end
-    end
+  return (list and type(idx) == "number") and list[idx] or nil
+end
+
+-- Which roster position an ENCOUNTER_END belongs to, by name. Both strings come
+-- from the same client here - its own roster against its own event - so this is
+-- the one comparison that is guaranteed to be like-for-like.
+local function bossIndexOf(roster, encounterName)
+  if not roster then return nil end
+  local k = nameKey(encounterName)
+  if k == "" then return nil end
+  for i = 1, #roster do
+    if nameKey(roster[i]) == k then return i end
   end
   return nil
 end
@@ -739,8 +790,9 @@ local function decodeCard(str)
     if not def then return nil end
     local e, n = { t = t }, 2
     if def.boss == "one" then
+      -- a ROSTER POSITION, not an encounter id: 1..MAX_BOSSES and nothing else
       local b = tonumber(f[n]); n = n + 1
-      if not b or b ~= math.floor(b) or b <= 0 or b > 99999 then return nil end
+      if not b or b ~= math.floor(b) or b < 1 or b > K.MAX_BOSSES then return nil end
       e.boss = b
     end
     if def.line then
@@ -761,22 +813,16 @@ local function decodeCard(str)
   return out
 end
 
+-- Just the names, in order. The order IS the identity, so nothing else needs to
+-- travel - and sanitizeName has already stripped the separator from each.
 local function encodeRoster(list)
-  local out = {}
-  for i = 1, #list do out[i] = list[i].id .. "~" .. list[i].name end
-  return table.concat(out, ",")
+  return table.concat(list, ",")
 end
 
 local function decodeRoster(str)
   local s = PG.SafeStr(str)
   if not s or s == "" or #s > 200 then return nil end
-  local list = {}
-  local parts = { strsplit(",", s) }
-  for i = 1, #parts do
-    local id, nm = parts[i]:match("^(%d+)~(.+)$")
-    list[#list + 1] = { id = tonumber(id), name = nm }
-  end
-  return normalizeRoster(list)
+  return normalizeRoster({ strsplit(",", s) })
 end
 
 -- A line the local client can render AND bet on. A boss-keyed line with no
@@ -798,8 +844,7 @@ local function lineOptions(rec, e)
   -- because that is the identity and the position is not.
   local out = {}
   for i = 1, #(rec.roster or {}) do
-    local b = rec.roster[i]
-    out[i] = { shortBoss(b.name), tostring(b.id), b.name }
+    out[i] = { shortBoss(rec.roster[i]), tostring(i), rec.roster[i] }
   end
   return out
 end
@@ -1289,29 +1334,31 @@ local function readDeaths()
   return math.floor(d)
 end
 
-local function bossStat(run, id)
-  local b = run.bosses[id]
+local function bossStat(run, idx)
+  local b = run.bosses[idx]
   if not b then
     b = { att = 0, deaths = 0 }
-    run.bosses[id] = b
-    run.order[#run.order + 1] = id
+    run.bosses[idx] = b
+    run.order[#run.order + 1] = idx
   end
   return b
 end
 
-local function onEncounterStart(_, encounterID)
+local function onEncounterStart(_, encounterID, encounterName)
   pcall(function()
     local rec = myParley()
     if not (rec and rec.isBookie and rec.phase == "locked") then return end
     local run = runOf(rec)
     if not run.active or run.done then return end
-    local id = PG.SafeNum(encounterID)
-    if not id then return end
+    -- resolved to a ROSTER POSITION by name; an encounter this dungeon's roster
+    -- does not name contributes to nothing, which is the honest outcome
+    local idx = bossIndexOf(rec.roster, encounterName)
+    if not idx then return end
     -- Per-boss deaths are the party death count DIFFERENCED across the
     -- encounter: GetDeathCount is a run total and there is no per-encounter
     -- API. A missing reading at either end leaves that attempt contributing
     -- nothing rather than contributing a guess.
-    run.markId = math.floor(id)
+    run.markId = idx
     run.markDeaths = readDeaths()
   end)
 end
@@ -1334,9 +1381,8 @@ local function onEncounterEnd(_, encounterID, encounterName, _, _, success)
     if not (rec and rec.isBookie and rec.phase == "locked") then return end
     local run = runOf(rec)
     if not run.active or run.done then return end
-    local id = PG.SafeNum(encounterID)
-    if not id then return end
-    id = math.floor(id)
+    local idx = bossIndexOf(rec.roster, encounterName)
+    if not idx then return end
     local succ = PG.SafeNum(success)
     -- succ nil (secret or unreadable) counts as neither a kill nor a wipe: an
     -- encounter this client could not read is not evidence of anything, and
@@ -1345,21 +1391,21 @@ local function onEncounterEnd(_, encounterID, encounterName, _, _, success)
       run.markId, run.markDeaths = nil, nil
       return
     end
-    local b = bossStat(run, id)
+    local b = bossStat(run, idx)
     b.att = b.att + 1
     local now = readDeaths()
-    if run.markId == id and run.markDeaths and now then
+    if run.markId == idx and run.markDeaths and now then
       b.deaths = b.deaths + math.max(0, now - run.markDeaths)
     end
     run.markId, run.markDeaths = nil, nil
     if now and now > (run.deaths or 0) then run.deaths = now end
     if succ == 0 then
       run.wipes = run.wipes + 1
-      -- FIRST WALL is an id, captured the first time any boss is failed. It is
-      -- emphatically not "boss number N": a group that opens on the last boss
-      -- and wipes has walled on THAT boss, and calling it "boss 1" would settle
-      -- a different bet from the one anybody placed.
-      if not run.firstWall then run.firstWall = id end
+      -- FIRST WALL is a ROSTER POSITION, captured the first time any boss is
+      -- failed - which is not "the first boss": a group that opens on the last
+      -- boss and wipes has walled on THAT boss, and settling it as boss 1 would
+      -- pay a bet nobody placed.
+      if not run.firstWall then run.firstWall = idx end
     end
   end)
 end
@@ -1413,9 +1459,9 @@ end
 -- a bug waiting for a second implementation to disagree with it.
 local function worstBossOf(run)
   local best, bestAtt
-  for id, b in pairs(run.bosses) do
-    if not bestAtt or b.att > bestAtt or (b.att == bestAtt and id < best) then
-      best, bestAtt = id, b.att
+  for idx, b in pairs(run.bosses) do
+    if not bestAtt or b.att > bestAtt or (b.att == bestAtt and idx < best) then
+      best, bestAtt = idx, b.att
     end
   end
   if best and bestAtt and bestAtt > 0 then return best end
@@ -1425,9 +1471,9 @@ end
 local function encodeBossData(run)
   local out = {}
   for i = 1, #run.order do
-    local id = run.order[i]
-    local b = run.bosses[id]
-    if b then out[#out + 1] = id .. "." .. b.att .. "." .. b.deaths end
+    local idx = run.order[i]
+    local b = run.bosses[idx]
+    if b then out[#out + 1] = idx .. "." .. b.att .. "." .. b.deaths end
     if #out >= K.MAX_BOSSES then break end
   end
   return (out[1] and table.concat(out, ",")) or "-"
@@ -1542,10 +1588,11 @@ local function decodeBossData(s)
   if not str or str == "" or str == "-" or #str > 140 then return out end
   local parts = { strsplit(",", str) }
   for i = 1, #parts do
-    local id, att, dth = parts[i]:match("^(%d+)%.(%d+)%.(%d+)$")
-    id, att, dth = tonumber(id), tonumber(att), tonumber(dth)
-    if id and att and dth and att <= K.RES_COUNT_MAX and dth <= K.RES_COUNT_MAX then
-      out[id] = { att = att, deaths = dth }
+    local idx, att, dth = parts[i]:match("^(%d+)%.(%d+)%.(%d+)$")
+    idx, att, dth = tonumber(idx), tonumber(att), tonumber(dth)
+    if idx and att and dth and idx >= 1 and idx <= K.MAX_BOSSES
+      and att <= K.RES_COUNT_MAX and dth <= K.RES_COUNT_MAX then
+      out[idx] = { att = att, deaths = dth }
     end
   end
   return out
@@ -1592,8 +1639,8 @@ local function settleParley(rec, res)
   local function bossId(v)
     if voidAll then return nil end
     local n = PG.SafeNum(v)
-    if not n or n ~= math.floor(n) or n < 0 or n > 99999 then return nil end
-    return n   -- 0 means "there wasn't one"
+    if not n or n ~= math.floor(n) or n < 0 or n > K.MAX_BOSSES then return nil end
+    return n   -- a roster position; 0 means "there wasn't one"
   end
 
   local deaths = count(res.d, K.RES_COUNT_MAX)
@@ -1939,8 +1986,7 @@ local function availableLines()
     for i = 1, #DUNGEON_TYPES do out[#out + 1] = { t = DUNGEON_TYPES[i] } end
     for b = 1, #roster do
       for i = 1, #PER_BOSS_TYPES do
-        out[#out + 1] = { t = PER_BOSS_TYPES[i], boss = roster[b].id,
-                          name = roster[b].name }
+        out[#out + 1] = { t = PER_BOSS_TYPES[i], boss = b, name = roster[b] }
       end
     end
   end
@@ -2444,7 +2490,8 @@ refreshCard = function()
     dungeonNote:SetText(P.chgray .. "No Mythic+ dungeons reported yet - the run-level "
       .. "lines still work, and the list fills itself in when the server answers.|r")
   elseif roster then
-    dungeonNote:SetText(#roster .. " bosses known - per-boss lines are available.")
+    dungeonNote:SetText(#roster .. " bosses known ("
+      .. (SRC_WORD[rosterSrc[setup.mapId]] or "?") .. ") - per-boss lines are available.")
   else
     dungeonNote:SetText(P.chgray .. "Bosses unknown here - run-level lines only. "
       .. "Just run this key once and they appear; /pg keys says why.|r")
@@ -2738,11 +2785,6 @@ end
 -- parser. Every one of these assumptions fails SAFE, so the failure mode is a
 -- line quietly not being offered; without this command that is indistinguishable
 -- from the addon being broken.
-local SRC_WORD = {
-  saved = "remembered", journal = "Encounter Journal",
-  map = "Encounter Journal (this map)", learned = "learned from a run",
-}
-
 -- "bosses UNKNOWN" on every dungeon has several very different causes, and a
 -- diagnostic that cannot tell them apart is not one. This reports the journal
 -- itself: whether the load-on-demand addon came in, which entry points exist,
@@ -3006,9 +3048,10 @@ local function onMessage(mtype, token, sender, scope, f1, f2, f3, f4, f5, f6, f7
         if def.opts[i][2] == pick then ok = true break end
       end
     elseif rec.roster then
-      for i = 1, #rec.roster do
-        if tostring(rec.roster[i].id) == pick then ok = true break end
-      end
+      -- a boss-pick line's options ARE the roster positions, so a pick has to
+      -- name one that exists on this dungeon's roster
+      local n = tonumber(pick)
+      ok = (n ~= nil and n == math.floor(n) and n >= 1 and n <= #rec.roster)
     end
     if not ok then return end
     -- gate j: a bet moves other people's money, so the sender must be allowed

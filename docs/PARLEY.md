@@ -110,11 +110,31 @@ in order: the keystone actually slotted in the font of power, the key already ru
 dungeon this character posted a card for, and the first of the season. The slotted keystone
 leads because it is the only one of the four that is *evidence about what is about to be run*.
 
+**A boss's identity is its POSITION in the roster the bookie publishes**, not its
+`dungeonEncounterID`. That changed in 1.5.1 and the reason is worth stating: those ids live in
+`DungeonEncounter.db2`, no guide publishes them, and **a wrong one does not fail loudly** — it
+attributes nothing to that boss, so every line about it voids with "that boss was never fought"
+and the bettor is told a lie about their own run. Names are the one thing the shipped table and
+the client agree on, because `ENCOUNTER_END` reports one. Never ship a number you cannot verify.
+
+Position is emphatically **not** order-of-kill. The roster is a fixed identity list for the
+*dungeon*, sent once in `ROSTER`, so "boss 2" means the same named boss on every client whatever
+order the route took them in — which is the property §2.3 demands. The bookie attributes an
+`ENCOUNTER_END` to a position by matching its name against its own roster: same client, same
+locale, the one comparison guaranteed to be like-for-like.
+
 **The boss roster is a chain**, in the style of `Theme.Tex`'s asset chains — try, check what
 came back, fall back, and have an honest bottom:
 
 1. the runtime memo
-2. `db.mp.bosses[mapId]`, resolved or learned on a previous session
+1b. **`Data/DungeonData.lua`, the rosters shipped with the addon**, matched on the DUNGEON's
+   name. This is first among the real sources and it is the one that works on day one, on a
+   client whose Encounter Journal answers nothing — which is the client this feature was
+   actually built for. English only by construction: a non-English client misses the lookup,
+   contributes nothing from here, and falls through to the journal or to a run, both already
+   localised. It goes stale when the season rotates, and that is a far smaller problem than a
+   feature that never works; the runtime paths below are still there for exactly that case.
+2. `db.mp.bosses[mapId]`, learned on a previous session
 0. **the journal has to be loaded first.** `Blizzard_EncounterJournal` is a
    load-on-demand addon: the `EJ_*` functions live in the base client and answer calls all day,
    but their *data* does not exist until it has been loaded once. On a client where the player

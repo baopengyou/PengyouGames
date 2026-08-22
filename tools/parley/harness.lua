@@ -65,12 +65,14 @@ _G.GameTooltip = { SetOwner = function() end, AddLine = function() end,
 -- The dungeon world
 -------------------------------------------------------------------------------
 
+-- 391 is a dungeon the SHIPPED table knows (Data/DungeonData.lua), so it
+-- exercises the day-one path; 392 is not, so it falls through to the journal.
 H.MAPS = {
-  [391] = { name = "Ara-Kara, City of Echoes", limit = 1980, ej = 101 },
-  [392] = { name = "The Dawnbreaker",          limit = 2100, ej = 102 },
+  [391] = { name = "Altar of Fangs",  limit = 1980, ej = 101 },
+  [392] = { name = "The Dawnbreaker", limit = 2100, ej = 102 },
 }
 H.ENCOUNTERS = {
-  [101] = { { 2926, "Avanoxx" }, { 2906, "Anub'zekt" }, { 2900, "Ki'katal the Harvester" } },
+  [101] = { { 2926, "Rav'i" }, { 2906, "The Writhing Coil" }, { 2900, "Zul'jan" } },
   [102] = { { 2837, "Speaker Shadowcrown" }, { 2838, "Anub'ikkaj" }, { 2839, "Rasha'nan" } },
 }
 H.keyActive = nil
@@ -213,10 +215,14 @@ end
 -- `game` selects which module file this client loads; it defaults to the
 -- Mythic Parley. The Pull Book runs against the identical stub set, which is
 -- the point: the two modules share a shape, so they share a harness.
-function H.newClient(root, name, game)
+-- opts.noShippedData loads the module WITHOUT Data/DungeonData.lua, which is
+-- how a test reaches the journal and learning paths that the shipped table
+-- would otherwise satisfy first.
+function H.newClient(root, name, game, opts)
   local PG, inits = {}, {}
   local C = { name = name, PG = PG, commits = {}, sent = {}, after = {},
-              events = {}, toasts = {}, buttons = {}, checks = {}, cards = {} }
+              events = {}, toasts = {}, buttons = {}, checks = {}, cards = {},
+              noShippedData = opts and opts.noShippedData or false }
 
   function PG.RegisterInit(fn) inits[#inits + 1] = fn end
   function PG.RegisterEvent(ev, fn)
@@ -329,6 +335,9 @@ function H.newClient(root, name, game)
   function PG.Launcher.RemoveOpenGame() return true end
 
   assert(loadfile(root .. "/PengyouGames/Util.lua"))("PengyouGames", PG)
+  if not C.noShippedData then
+    assert(loadfile(root .. "/PengyouGames/Data/DungeonData.lua"))("PengyouGames", PG)
+  end
   assert(loadfile(root .. "/PengyouGames/Games/" .. (game or "MythicParley") .. ".lua"))(
     "PengyouGames", PG)
   for i = 1, #inits do inits[i]() end

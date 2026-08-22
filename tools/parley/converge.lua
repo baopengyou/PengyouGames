@@ -11,7 +11,7 @@ local H = require("harness")
 local check, recv, drain, fire = H.check, H.recv, H.drain, H.fire
 
 local BOOKIE = "Grizzle-R"
-local ROSTER = "2926~Avanoxx,2906~Anub'zekt,2900~Ki'katal the Harvester"
+local ROSTER = "Rav'i,The Writhing Coil,Zul'jan"
 
 -------------------------------------------------------------------------------
 print("== A. two clients, LOCK arriving 0.4s apart, one ledger ==")
@@ -40,7 +40,7 @@ recv(A, "LOCK", "t1", BOOKIE, "group", 391, 12)
 -- locked and B BEFORE B locked. Without the grace, A drops them and B keeps
 -- them, and the two ledgers disagree about who backed the first-wall pool.
 H.clock = H.clock + 0.15
-for _, bet in ipairs({ { "Cid-R", 3, "2900" }, { "Dot-R", 3, "2926" } }) do
+for _, bet in ipairs({ { "Cid-R", 3, "3" }, { "Dot-R", 3, "1" } }) do
   for _, C in ipairs(BOTH) do
     recv(C, "BET", "t1", bet[1], "group", bet[2], bet[3], BOOKIE)
   end
@@ -52,7 +52,7 @@ recv(B, "LOCK", "t1", BOOKIE, "group", 391, 12)
 H.clock = H.clock + 5
 for _, C in ipairs(BOTH) do
   recv(C, "RES", "t1", BOOKIE, "group", "C", "Y", "9", "2", "300", "T",
-    "2900", "2900", "2900.3.5,2926.1.2,2906.1.1")
+    "3", "3", "3.3.5,1.1.2,2.1.1")
   drain(C)
 end
 
@@ -93,9 +93,9 @@ local boxes = H.checkboxes()
 -- availableLines() order for a three-boss dungeon: the five run-level lines,
 -- the two boss-pick lines, then three per boss in roster order.
 --   1 T   2 X   3 A   4 M   5 F   6 L   7 W
---   8 O.2926   9 P.2926  10 D.2926
---  11 O.2906  12 P.2906  13 D.2906
---  14 O.2900  15 P.2900  16 D.2900
+--   8 O.1   9 P.2926  10 D.2926
+--  11 O.2  12 P.2906  13 D.2906
+--  14 O.3  15 P.2900  16 D.2900
 check("the boss roster resolved from the Encounter Journal", #boxes >= 16, #boxes)
 check("a parley cannot be opened before anything is ticked",
   (H.press(K, "Open parley") and false) or H.sentOf(K, "OPEN") == nil)
@@ -103,8 +103,8 @@ check("a parley cannot be opened before anything is ticked",
 H.clickCheck(boxes[1])    -- Timed?
 H.clickCheck(boxes[2])    -- Deaths o/u 6
 H.clickCheck(boxes[6])    -- First wall
-H.clickCheck(boxes[9])    -- Avanoxx attempts o/u 1
-H.clickCheck(boxes[14])   -- Ki'katal one-shot?
+H.clickCheck(boxes[9])    -- Rav'i attempts o/u 1
+H.clickCheck(boxes[14])   -- Zul'jan one-shot?
 check("five lines tick", true)
 
 H.clickCheck(boxes[3])
@@ -118,7 +118,7 @@ check("OPEN carries stake, dungeon, card and scope code",
   openMsg and openMsg.f[2] == 100 and openMsg.f[3] == 391 and openMsg.f[5] == "P",
   openMsg and tostring(openMsg.f[3]))
 check("the card is the five ticked lines, in builder order",
-  openMsg and openMsg.f[4] == "T,X.6,L,P.2926.1,O.2900", openMsg and openMsg.f[4])
+  openMsg and openMsg.f[4] == "T,X.6,L,P.1.1,O.3", openMsg and openMsg.f[4])
 
 local rosterMsg = H.sentOf(K, "ROSTER")
 check("a ROSTER goes out beside the OPEN so every client names the same bosses",
@@ -132,7 +132,7 @@ print("== B. the run, with the route in the wrong order ==")
 -------------------------------------------------------------------------------
 
 for _, b in ipairs({ { "Bob-R", 1, "Y" }, { "Cid-R", 1, "N" },
-                     { "Bob-R", 3, "2900" }, { "Cid-R", 3, "2926" },
+                     { "Bob-R", 3, "3" }, { "Cid-R", 3, "1" },
                      { "Bob-R", 4, "O" }, { "Cid-R", 4, "U" },
                      { "Bob-R", 5, "Y" }, { "Cid-R", 5, "N" } }) do
   recv(K, "BET", TOK, b[1], "group", b[2], b[3], BOOKIE == BOOKIE and "Ann-R" or nil)
@@ -146,8 +146,8 @@ K.locked = true           -- the wire is dead for the whole run
 H.keyActive = 391
 fire(K, "CHALLENGE_MODE_START")
 
--- The group opens on Ki'katal - the journal's LAST boss - walls twice, kills
--- it, then clears Avanoxx and Anub'zekt in one pull each. Nothing about this
+-- The group opens on Zul'jan - the journal's LAST boss - walls twice, kills
+-- it, then clears Rav'i and The Writhing Coil in one pull each. Nothing about this
 -- route matches the journal's order, which is the point.
 local function encounter(id, name, success, deathsAfter)
   fire(K, "ENCOUNTER_START", id, name, 8, 5)
@@ -155,12 +155,12 @@ local function encounter(id, name, success, deathsAfter)
   fire(K, "ENCOUNTER_END", id, name, 8, 5, success)
 end
 
-encounter(2900, "Ki'katal the Harvester", 0, 2)
+encounter(2900, "Zul'jan", 0, 2)
 fire(K, "UNIT_DIED", "GUID-raid1")          -- the tank went down first
-encounter(2900, "Ki'katal the Harvester", 0, 4)
-encounter(2900, "Ki'katal the Harvester", 1, 5)
-encounter(2926, "Avanoxx", 1, 7)
-encounter(2906, "Anub'zekt", 1, 8)
+encounter(2900, "Zul'jan", 0, 4)
+encounter(2900, "Zul'jan", 1, 5)
+encounter(2926, "Rav'i", 1, 7)
+encounter(2906, "The Writhing Coil", 1, 8)
 H.deaths = 9
 fire(K, "CHALLENGE_MODE_DEATH_COUNT_UPDATED")
 
@@ -185,25 +185,25 @@ check("2 boss wipes - the three kills are not wipes", res and res.f[5] == "2",
 check("300 seconds left, from the elapsed time against the dungeon timer",
   res and res.f[6] == "300", res and res.f[6])
 check("first death was the TANK", res and res.f[7] == "T", res and res.f[7])
-check("FIRST WALL is Ki'katal's id, not 'boss 1'", res and res.f[8] == "2900",
+check("FIRST WALL is Zul'jan's id, not 'boss 1'", res and res.f[8] == "3",
   res and res.f[8])
-check("WORST BOSS is Ki'katal's id (three attempts)", res and res.f[9] == "2900",
+check("WORST BOSS is Zul'jan's id (three attempts)", res and res.f[9] == "3",
   res and res.f[9])
 check("per-boss data attaches 3 attempts / 5 deaths to KI'KATAL",
-  res and res.f[10]:find("2900.3.5", 1, true) ~= nil, res and res.f[10])
+  res and res.f[10]:find("3.3.5", 1, true) ~= nil, res and res.f[10])
 check("...1 attempt / 2 deaths to AVANOXX",
-  res and res.f[10]:find("2926.1.2", 1, true) ~= nil, res and res.f[10])
+  res and res.f[10]:find("1.1.2", 1, true) ~= nil, res and res.f[10])
 check("...1 attempt / 1 death to ANUB'ZEKT",
-  res and res.f[10]:find("2906.1.1", 1, true) ~= nil, res and res.f[10])
+  res and res.f[10]:find("2.1.1", 1, true) ~= nil, res and res.f[10])
 
 local byIdx = H.byIndex(K)
 check("the bookie settled its own card from the RES it sent", #K.commits == 4,
   #K.commits)
-check("line 3 First wall: Ki'katal backer wins",
+check("line 3 First wall: Zul'jan backer wins",
   byIdx[3] and byIdx[3].rows["Bob-R"] == 100, byIdx[3] and byIdx[3].rows["Bob-R"])
-check("line 4 Avanoxx attempts: one attempt is UNDER a line of 1",
+check("line 4 Rav'i attempts: one attempt is UNDER a line of 1",
   byIdx[4] and byIdx[4].rows["Cid-R"] == 100, byIdx[4] and byIdx[4].rows["Cid-R"])
-check("line 5 Ki'katal one-shot?: three attempts, so NO wins",
+check("line 5 Zul'jan one-shot?: three attempts, so NO wins",
   byIdx[5] and byIdx[5].rows["Cid-R"] == 100, byIdx[5] and byIdx[5].rows["Cid-R"])
 
 -------------------------------------------------------------------------------
@@ -211,9 +211,10 @@ print()
 print("== B. the run learns the dungeon it was in ==")
 -------------------------------------------------------------------------------
 
-local learned = K.PG.db.mp and K.PG.db.mp.bosses and K.PG.db.mp.bosses[391]
-check("the roster is cached for next time", type(learned) == "table" and #learned == 3,
-  learned and #learned)
+check("a run does not clobber the SHIPPED roster",
+  (K.PG.db.mp == nil or K.PG.db.mp.bosses == nil or K.PG.db.mp.bosses[391] == nil)
+    and table.concat(K.PG.MP.Diagnose(), " "):find("shipped with the addon", 1, true) ~= nil,
+  table.concat(K.PG.MP.Diagnose(), " / "))
 
 -------------------------------------------------------------------------------
 print()
@@ -245,7 +246,38 @@ check("and writes nothing to the ledger", #R.commits == 0, #R.commits)
 
 -------------------------------------------------------------------------------
 print()
-print("== C. the client is missing things it needs ==")
+print("== C. the shipped table carries a client whose journal is dead ==")
+-------------------------------------------------------------------------------
+
+do
+  local realTiers = _G.EJ_GetNumTiers
+  local realForMap = _G.EJ_GetInstanceForMap
+  local realMap = _G.C_Map
+  _G.EJ_GetNumTiers = function() return 0 end   -- the journal answers NOTHING
+  _G.EJ_GetInstanceForMap = nil
+  _G.C_Map = nil
+
+  local D0 = H.newClient(ROOT, "Ann-R")
+  H.ME = "Ann-R"
+  H.slotted = 391
+  H.created = {}
+  D0.PG.MP.OpenDialog()
+  check("a shipped dungeon offers all 16 lines with no journal at all",
+    #H.shownChecks() == 16, #H.shownChecks())
+  local d0 = table.concat(D0.PG.MP.Diagnose(), " / ")
+  check("...credited to the shipped table",
+    d0:find("Altar of Fangs %- 3 bosses, shipped with the addon") ~= nil, d0)
+  check("...and a dungeon NOT in the table is still honestly unknown",
+    d0:find("The Dawnbreaker %- bosses UNKNOWN") ~= nil, d0)
+
+  _G.EJ_GetNumTiers = realTiers
+  _G.EJ_GetInstanceForMap = realForMap
+  _G.C_Map = realMap
+end
+
+-------------------------------------------------------------------------------
+print()
+print("== C2. the client is missing things it needs ==")
 -------------------------------------------------------------------------------
 
 -- The season list is empty (a fresh login, before the server answers). The mode
@@ -255,7 +287,7 @@ local asked = 0
 _G.C_ChallengeMode.GetMapTable = function() return {} end
 _G.C_ChallengeMode.RequestMapInfo = function() asked = asked + 1 end
 
-local E = H.newClient(ROOT, "Ann-R")
+local E = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.slotted = nil
 H.keyActive = nil    -- and no key running either: nothing to default to at all
@@ -297,7 +329,7 @@ local realByMap = _G.EJ_GetInstanceForMap
 _G.EJ_GetNumTiers = nil
 _G.EJ_GetInstanceForMap = nil
 
-local J = H.newClient(ROOT, "Ann-R")
+local J = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 J.PG.MP.OpenDialog()
@@ -316,15 +348,15 @@ _G.EJ_GetInstanceForMap = realByMap
 _G.EJ_GetNumTiers = function() return 0 end   -- tier walk yields nothing
 _G.C_Map = { GetBestMapForUnit = function() return 2660 end }
 _G.EJ_GetInstanceForMap = function(u) return (u == 2660) and 101 or nil end
-_G.EJ_GetInstanceInfo = function(i) return (i == 101) and "Ara-Kara, City of Echoes" or nil end
+_G.EJ_GetInstanceInfo = function(i) return (i == 101) and "Altar of Fangs" or nil end
 
-local Q = H.newClient(ROOT, "Ann-R")
+local Q = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 Q.PG.MP.OpenDialog()
 local qd = table.concat(Q.PG.MP.Diagnose(), " / ")
 check("a broken tier walk still resolves the dungeon you are standing in",
-  qd:find("Ara%-Kara, City of Echoes %- 3 bosses") ~= nil, qd)
+  qd:find("Altar of Fangs %- 3 bosses") ~= nil, qd)
 check("...and says where it came from",
   qd:find("this map", 1, true) ~= nil, qd)
 
@@ -333,7 +365,7 @@ _G.EJ_GetNumTiers = realTiers
 -- And the name check is real: standing in the wrong dungeon resolves nothing.
 _G.EJ_GetNumTiers = function() return 0 end
 _G.EJ_GetInstanceInfo = function() return "Somewhere Else" end
-local Z = H.newClient(ROOT, "Ann-R")
+local Z = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 Z.PG.MP.OpenDialog()
@@ -382,7 +414,7 @@ _G.C_AddOns = {
 }
 _G.C_Map = nil    -- and we are not standing in the dungeon, so no by-map path
 
-local S2 = H.newClient(ROOT, "Ann-R")
+local S2 = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 S2.PG.MP.OpenDialog()
@@ -396,7 +428,7 @@ check("/pg keys reports the journal state", d2:find("addonLoaded=true", 1, true)
 -- than just "UNKNOWN"
 journalLoaded = false
 _G.C_AddOns.LoadAddOn = function() return false end
-local S3 = H.newClient(ROOT, "Ann-R")
+local S3 = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 local d3 = table.concat(S3.PG.MP.Diagnose(), " / ")
 check("an unloadable journal is reported as such",
@@ -414,14 +446,14 @@ _G.EJ_GetInstanceByIndex = function(i, isRaid)
   if id == 101 then return id, "Operation Floodgate" end
   return id, nm
 end
-local S4 = H.newClient(ROOT, "Ann-R")
+local S4 = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 S4.PG.MP.OpenDialog()
 check("a name differing only in punctuation still resolves",
   #H.shownChecks() == 16, #H.shownChecks())
 _G.EJ_GetInstanceByIndex = realByIndex
-H.MAPS[391].name = "Ara-Kara, City of Echoes"
+H.MAPS[391].name = "Altar of Fangs"
 
 -- but a genuinely different name does not
 _G.EJ_GetInstanceByIndex = function(i, isRaid)
@@ -429,7 +461,7 @@ _G.EJ_GetInstanceByIndex = function(i, isRaid)
   if id == 101 then return id, "Somewhere Else Entirely" end
   return id, nm
 end
-local S5 = H.newClient(ROOT, "Ann-R")
+local S5 = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 S5.PG.MP.OpenDialog()
@@ -451,7 +483,7 @@ _G.EJ_GetNumTiers = function() return 0 end
 _G.EJ_GetInstanceForMap = nil
 _G.C_Map = nil
 
-local L = H.newClient(ROOT, "Ann-R")
+local L = H.newClient(ROOT, "Ann-R", "MythicParley", { noShippedData = true })
 H.ME = "Ann-R"
 H.created = {}
 L.PG.MP.OpenDialog()
@@ -460,9 +492,9 @@ check("with no journal, only the run-level lines are offered",
 
 -- run a key with NO parley open at all
 H.keyActive = 391
-fire(L, "ENCOUNTER_END", 2926, "Avanoxx", 8, 5, 1)
+fire(L, "ENCOUNTER_END", 2926, "Rav'i", 8, 5, 1)
 check("one boss is not yet a roster", (L.PG.db.mp.bosses[391] == nil), "stored too early")
-fire(L, "ENCOUNTER_END", 2900, "Ki'katal the Harvester", 8, 5, 0)
+fire(L, "ENCOUNTER_END", 2900, "Zul'jan", 8, 5, 0)
 check("two bosses is", type(L.PG.db.mp.bosses[391]) == "table"
   and #L.PG.db.mp.bosses[391] == 2, L.PG.db.mp.bosses[391] and #L.PG.db.mp.bosses[391])
 
@@ -477,7 +509,7 @@ check("an abandoned key still taught the client two bosses",
 
 -- a later run adds the third
 H.keyActive = 391
-fire(L, "ENCOUNTER_END", 2906, "Anub'zekt", 8, 5, 1)
+fire(L, "ENCOUNTER_END", 2906, "The Writhing Coil", 8, 5, 1)
 H.keyActive = nil
 L.PG.MP.OpenDialog()
 check("a later run adds the boss the first one skipped",
@@ -493,7 +525,7 @@ H.ME = "Ann-R"
 J2.PG.MP.OpenDialog()
 local before = J2.PG.db.mp.bosses[391]
 H.keyActive = 391
-fire(J2, "ENCOUNTER_END", 2926, "Avanoxx", 8, 5, 1)
+fire(J2, "ENCOUNTER_END", 2926, "Rav'i", 8, 5, 1)
 H.keyActive = nil
 check("a journal roster is not overwritten by a run",
   J2.PG.db.mp.bosses[391] == before
